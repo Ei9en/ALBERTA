@@ -1,155 +1,89 @@
 import torch
 import torch.nn as nn
-import time
-
-from pathlib import Path
-
-from tqdm import tqdm
-from torch.utils.data import DataLoader
-from torch.optim import AdamW
-
-from src.chess_dataset import ChessDataset
-from src.models.resnet import ChessResNet
-from src.actions_space import ACTIONS
 
 
-DATASET = "data/processed/positions_bc.jsonl"
+class ResidualBlock(nn.Module):
 
-CHECKPOINT_DIR = Path("checkpoints")
+    def __init__(self, channels):
+
+        super().__init__()
+
+        self.block = nn.Sequential(
+            nn.Conv2d(
+                channels,
+                channels,
+                kernel_size=3,
+                padding=1
+            ),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(),
+
+            nn.Conv2d(
+                channels,
+                channels,
+                kernel_size=3,
+                padding=1
+            ),
+            nn.BatchNorm2d(channels),
+        )
 
 
-def main():
+    def forward(self, x):
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    print("Device:", device)
-
-    CHECKPOINT_DIR.mkdir(exist_ok=True)
+        return torch.relu(
+            x + self.block(x)
+        )
 
 
-    dataset = ChessDataset(DATASET)
 
-    loader = DataLoader(
-        dataset,
-        batch_size=32,
-        shuffle=True,
-        num_workers=0,
-    )
+class ChessResNet(nn.Module):
 
-
-    model = ChessResNet(
-        num_actions=len(ACTIONS),
+    def __init__(
+        self,
+        in_channels=19,
         channels=64,
         blocks=4,
-    ).to(device)
+        num_actions=20160,
+    ):
+
+        super().__init__()
 
 
-    print(
-        "Parameters:",
-        sum(p.numel() for p in model.parameters())
-    )
-
-
-    optimizer = AdamW(
-        model.parameters(),
-        lr=3e-4,
-        weight_decay=1e-4,
-    )
-
-    criterion = nn.CrossEntropyLoss()
-
-
-    model.train()
-
-    epochs = 1
-
-
-    for epoch in range(epochs):
-
-        start = time.time()
-
-        total_loss = 0
-
-
-        pbar = tqdm(
-            loader,
-            desc=f"Epoch {epoch}"
+        self.input = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                channels,
+                kernel_size=3,
+                padding=1
+            ),
+            nn.BatchNorm2d(channels),
+            nn.ReLU()
         )
 
 
-        for batch, (x, y) in enumerate(pbar):
+        self.residuals = nn.Sequential(
+            *[
+                ResidualBlock(channels)
+                for _ in range(blocks)
+            ]
+        )
 
-            x = x.to(device)
-            y = y.to(device)
 
-
-            logits = model(x)
-
-            loss = criterion(
-                logits,
-                y
+        self.policy = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(
+                channels * 8 * 8,
+                num_actions
             )
-
-
-            optimizer.zero_grad()
-
-            loss.backward()
-
-            optimizer.step()
-
-
-            total_loss += loss.item()
-
-
-            pbar.set_postfix(
-                loss=f"{loss.item():.4f}"
-            )
-
-
-        epoch_loss = total_loss / len(loader)
-
-
-        elapsed = (time.time() - start) / 60
-
-
-        print()
-        print(
-            f"Epoch {epoch} loss:",
-            epoch_loss
-        )
-
-        print(
-            f"Epoch time: {elapsed:.1f} min"
         )
 
 
-        #
-        # SAVE CHECKPOINT
-        #
+    def forward(self, x):
 
-        checkpoint = {
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "loss": epoch_loss,
-            "actions": len(ACTIONS),
-        }
+        x = self.input(x)
 
+        x = self.residuals(x)
 
-        path = CHECKPOINT_DIR / f"bc_epoch_{epoch}.pt"
+        x = self.policy(x)
 
-
-        torch.save(
-            checkpoint,
-            path
-        )
-
-
-        print(
-            "Saved:",
-            path
-        )
-
-
-if __name__ == "__main__":
-    main()
+        return x
