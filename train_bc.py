@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import time
 
+from pathlib import Path
+
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
@@ -13,12 +15,16 @@ from src.actions_space import ACTIONS
 
 DATASET = "data/processed/positions_bc.jsonl"
 
+CHECKPOINT_DIR = Path("checkpoints")
+
 
 def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     print("Device:", device)
+
+    CHECKPOINT_DIR.mkdir(exist_ok=True)
 
     dataset = ChessDataset(DATASET)
 
@@ -105,6 +111,31 @@ def main():
 
         print(
             f"Epoch time: {(time.time()-start)/60:.1f} min"
+        )
+
+
+        # =========================
+        # SAVE CHECKPOINT
+        # =========================
+
+        checkpoint = {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "loss": epoch_loss,
+            "actions": len(ACTIONS),
+        }
+
+        path = CHECKPOINT_DIR / f"bc_epoch_{epoch}.pt"
+
+        torch.save(
+            checkpoint,
+            path
+        )
+
+        print(
+            "Saved:",
+            path
         )
 
 
