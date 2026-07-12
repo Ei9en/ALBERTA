@@ -7,9 +7,11 @@ import json
 
 from src.actions_space import ACTION_TO_INDEX, INDEX_TO_ACTION
 
-INPUT = "data/processed/positions.jsonl"
-OUTPUT = "data/processed/positions_bc.jsonl"
+#INPUT = "data/processed/positions.jsonl"
+#OUTPUT = "data/processed/positions_bc.jsonl"
 
+INPUT = "data/processed/positions_2300.jsonl"
+OUTPUT = "data/processed/positions_2300_bc.jsonl"
 
 def main():
 

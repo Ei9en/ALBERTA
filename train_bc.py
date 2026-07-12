@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import time
+import json
 
 from pathlib import Path
 
@@ -13,9 +14,19 @@ from src.models.resnet import ChessResNet
 from src.actions_space import ACTIONS
 
 
-DATASET = "data/processed/positions_bc.jsonl"
+DATASET = "data/processed/positions_2300_bc.jsonl"
 
 CHECKPOINT_DIR = Path("checkpoints")
+
+# checkpoint V2 utilisé comme point de départ
+PRETRAINED_CHECKPOINT = CHECKPOINT_DIR / "bc_epoch_0.pt"
+
+# nouveau checkpoint V2.5
+START_EPOCH = 0
+
+EPOCHS = 10
+
+LOSS_LOG = CHECKPOINT_DIR / "training_loss.json"
 
 
 def main():
@@ -24,7 +35,9 @@ def main():
 
     print("Device:", device)
 
+
     CHECKPOINT_DIR.mkdir(exist_ok=True)
+
 
     dataset = ChessDataset(DATASET)
 
@@ -34,6 +47,7 @@ def main():
         shuffle=True,
         num_workers=0,
     )
+
 
     model = ChessResNet(
         num_actions=len(ACTIONS),
@@ -54,31 +68,75 @@ def main():
         weight_decay=1e-4,
     )
 
+
+    # =========================
+    # LOAD V2 CHECKPOINT
+    # =========================
+
+    if PRETRAINED_CHECKPOINT.exists():
+
+        print("Loading:", PRETRAINED_CHECKPOINT)
+
+        checkpoint = torch.load(
+            PRETRAINED_CHECKPOINT,
+            map_location=device
+        )
+
+        assert checkpoint["actions"] == len(ACTIONS), (
+            "Action space mismatch"
+        )
+
+        model.load_state_dict(
+            checkpoint["model_state_dict"]
+        )
+
+        print(
+            "Loaded previous model, loss:",
+            checkpoint["loss"]
+        )
+
+    else:
+        print("No checkpoint found, training from scratch")
+
+
     criterion = nn.CrossEntropyLoss()
+
+
+    # historique loss
+
+    if LOSS_LOG.exists():
+
+        with open(LOSS_LOG) as f:
+            history = json.load(f)
+
+    else:
+        history = []
 
 
     model.train()
 
-    epochs = 1
 
-
-    for epoch in range(epochs):
+    for epoch in range(START_EPOCH, EPOCHS):
 
         start = time.time()
 
         total_loss = 0
+
 
         pbar = tqdm(
             loader,
             desc=f"Epoch {epoch}"
         )
 
+
         for batch, (x, y) in enumerate(pbar):
 
             x = x.to(device)
             y = y.to(device)
 
+
             logits = model(x)
+
 
             loss = criterion(
                 logits,
@@ -103,6 +161,24 @@ def main():
 
         epoch_loss = total_loss / len(loader)
 
+
+        history.append(
+            {
+                "epoch": epoch,
+                "loss": epoch_loss,
+                "time_min": (time.time()-start)/60
+            }
+        )
+
+
+        with open(LOSS_LOG, "w") as f:
+            json.dump(
+                history,
+                f,
+                indent=2
+            )
+
+
         print()
         print(
             f"Epoch {epoch} loss:",
@@ -119,19 +195,34 @@ def main():
         # =========================
 
         checkpoint = {
+
             "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "loss": epoch_loss,
-            "actions": len(ACTIONS),
+
+            "model_state_dict":
+                model.state_dict(),
+
+            "optimizer_state_dict":
+                optimizer.state_dict(),
+
+            "loss":
+                epoch_loss,
+
+            "actions":
+                len(ACTIONS),
+
+            "loss_history":
+                history,
         }
 
-        path = CHECKPOINT_DIR / f"bc_epoch_{epoch}.pt"
+
+        path = CHECKPOINT_DIR / f"bc_v2_5_epoch_{epoch}.pt"
+
 
         torch.save(
             checkpoint,
             path
         )
+
 
         print(
             "Saved:",

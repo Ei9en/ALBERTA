@@ -4,25 +4,37 @@ import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from dataset.fast_reader import iter_headers
-DATASET = "data/raw/lichess_db_atomic_rated_2026-06.pgn.zst"
+
+RAW_DIR = Path("data/raw")
+MIN_ELO = 2300
 
 total = 0
-games_2000 = 0
+games_kept = 0
 
-for headers in iter_headers(DATASET):
+datasets = sorted(RAW_DIR.glob("*.pgn.zst"))
 
-    total += 1
+print(f"Found {len(datasets)} datasets")
 
-    try:
-        w = int(headers.get("WhiteElo", 0))
-        b = int(headers.get("BlackElo", 0))
+for dataset in datasets:
+    print(f"Processing {dataset.name}")
 
-        if w >= 2000 and b >= 2000:
-            games_2000 += 1
+    for headers in iter_headers(dataset):
 
-    except ValueError:
-        pass
+        total += 1
 
-print(total)
-print(games_2000)
-print(round(games_2000/total*100, 2),'%')
+        try:
+            w = int(headers.get("WhiteElo", 0))
+            b = int(headers.get("BlackElo", 0))
+
+            if w >= MIN_ELO and b >= MIN_ELO:
+                games_kept += 1
+
+        except ValueError:
+            pass
+
+print()
+print(f"Total games       : {total}")
+print(f"Games >= {MIN_ELO} : {games_kept}")
+
+if total:
+    print(f"Percentage        : {games_kept / total * 100:.2f}%")

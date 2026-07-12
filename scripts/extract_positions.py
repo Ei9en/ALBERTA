@@ -9,8 +9,11 @@ import chess.variant
 
 from dataset.fast_reader import iter_games
 
-INPUT = "data/filtered/atomic_2000_2026-06.pgn"
-OUTPUT = "data/processed/positions.jsonl"
+
+RAW_DIR = Path("data/raw")
+OUTPUT = "data/processed/positions_2300.jsonl"
+
+MIN_ELO = 2300
 
 COMMENT_RE = re.compile(r"\{.*?\}")
 MOVE_NUMBER_RE = re.compile(r"\d+\.(\.\.)?")
@@ -34,60 +37,84 @@ def main():
     Path("data/processed").mkdir(parents=True, exist_ok=True)
 
     games = 0
+    skipped_elo = 0
     failed = 0
     positions = 0
 
+    input_files = sorted(RAW_DIR.glob("*.pgn.zst"))
+
+    print(f"Found {len(input_files)} PGN files")
+    print(f"Elo filter: >= {MIN_ELO}")
+
     with open(OUTPUT, "w", encoding="utf-8") as out:
 
-        for headers, game_text in iter_games(INPUT):
+        for input_file in input_files:
 
-            games += 1
+            print()
+            print(f"Processing {input_file.name}")
 
-            board = chess.variant.AtomicBoard()
+            for headers, game_text in iter_games(input_file):
 
-            try:
+                try:
+                    white_elo = int(headers.get("WhiteElo", 0))
+                    black_elo = int(headers.get("BlackElo", 0))
 
-                moves = extract_moves(game_text)
+                except ValueError:
+                    failed += 1
+                    continue
 
-                for san in moves:
+                if white_elo < MIN_ELO or black_elo < MIN_ELO:
+                    skipped_elo += 1
+                    continue
 
-                    move = board.parse_san(san)
+                games += 1
 
-                    sample = {
-                        "fen": board.fen(),
-                        "uci": move.uci(),
-                        "result": headers["Result"],
-                        "white_elo": int(headers["WhiteElo"]),
-                        "black_elo": int(headers["BlackElo"]),
-                    }
+                board = chess.variant.AtomicBoard()
 
-                    out.write(json.dumps(sample))
-                    out.write("\n")
+                try:
 
-                    board.push(move)
+                    moves = extract_moves(game_text)
 
-                    positions += 1
+                    for san in moves:
 
-            except Exception as e:
+                        move = board.parse_san(san)
 
-                failed += 1
+                        sample = {
+                            "fen": board.fen(),
+                            "uci": move.uci(),
+                            "result": headers["Result"],
+                            "white_elo": white_elo,
+                            "black_elo": black_elo,
+                        }
 
-                print("=" * 60)
-                print(f"Game #{games}")
-                print(headers.get("White"), "-", headers.get("Black"))
-                print("SAN :", san)
-                print(e)
+                        out.write(json.dumps(sample))
+                        out.write("\n")
 
-            if games % 1000 == 0:
-                print(f"{games:,} games")
+                        board.push(move)
+
+                        positions += 1
+
+                except Exception as e:
+
+                    failed += 1
+
+                    print("=" * 60)
+                    print(f"Game #{games}")
+                    print(headers.get("White"), "-", headers.get("Black"))
+                    print("SAN :", san if "san" in locals() else "?")
+                    print(e)
+
+                if games % 1000 == 0:
+                    print(f"{games:,} kept games")
+
 
     print()
     print("=" * 60)
-    print(f"Games processed : {games:,}")
+    print(f"Games kept      : {games:,}")
+    print(f"Games skipped   : {skipped_elo:,}")
     print(f"Games failed    : {failed:,}")
-    print(f"Games kept      : {games - failed:,}")
     print(f"Positions       : {positions:,}")
-    print(f"Average/game    : {positions / max(1, games - failed):.2f}")
+    print(f"Average/game    : {positions / max(1, games):.2f}")
     print(f"Saved to        : {OUTPUT}")
 
 
