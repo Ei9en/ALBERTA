@@ -19,14 +19,47 @@ DATASET = "data/processed/positions_2300_bc.jsonl"
 CHECKPOINT_DIR = Path("checkpoints")
 
 # checkpoint V2 utilisé comme point de départ
-#PRETRAINED_CHECKPOINT = CHECKPOINT_DIR / "bc_epoch_0.pt"
 PRETRAINED_CHECKPOINT = Path("/content/bc_epoch_0.pt")
-# nouveau checkpoint V2.5
+
 START_EPOCH = 0
 
 EPOCHS = 10
+SAVE_EVERY = 10000
 
 LOSS_LOG = CHECKPOINT_DIR / "training_loss.json"
+
+
+def save_checkpoint(path, epoch, batch, model, optimizer, loss, history):
+
+    checkpoint = {
+
+        "epoch": epoch,
+
+        "batch": batch,
+
+        "model_state_dict":
+            model.state_dict(),
+
+        "optimizer_state_dict":
+            optimizer.state_dict(),
+
+        "loss":
+            loss,
+
+        "actions":
+            len(ACTIONS),
+
+        "loss_history":
+            history,
+    }
+
+    torch.save(
+        checkpoint,
+        path
+    )
+
+    print()
+    print("Saved checkpoint:", path)
 
 
 def main():
@@ -35,11 +68,11 @@ def main():
 
     print("Device:", device)
 
-
     CHECKPOINT_DIR.mkdir(exist_ok=True)
 
 
     dataset = ChessDataset(DATASET)
+
 
     loader = DataLoader(
         dataset,
@@ -102,8 +135,6 @@ def main():
     criterion = nn.CrossEntropyLoss()
 
 
-    # historique loss
-
     if LOSS_LOG.exists():
 
         with open(LOSS_LOG) as f:
@@ -159,6 +190,28 @@ def main():
             )
 
 
+            # =========================
+            # TEMP CHECKPOINT
+            # =========================
+
+            if batch > 0 and batch % SAVE_EVERY == 0:
+
+                temp_path = (
+                    CHECKPOINT_DIR /
+                    f"bc_v2_5_temp_e{epoch}_b{batch}.pt"
+                )
+
+                save_checkpoint(
+                    temp_path,
+                    epoch,
+                    batch,
+                    model,
+                    optimizer,
+                    loss.item(),
+                    history
+                )
+
+
         epoch_loss = total_loss / len(loader)
 
 
@@ -191,42 +244,19 @@ def main():
 
 
         # =========================
-        # SAVE CHECKPOINT
+        # END EPOCH CHECKPOINT
         # =========================
-
-        checkpoint = {
-
-            "epoch": epoch,
-
-            "model_state_dict":
-                model.state_dict(),
-
-            "optimizer_state_dict":
-                optimizer.state_dict(),
-
-            "loss":
-                epoch_loss,
-
-            "actions":
-                len(ACTIONS),
-
-            "loss_history":
-                history,
-        }
-
 
         path = CHECKPOINT_DIR / f"bc_v2_5_epoch_{epoch}.pt"
 
-
-        torch.save(
-            checkpoint,
-            path
-        )
-
-
-        print(
-            "Saved:",
-            path
+        save_checkpoint(
+            path,
+            epoch,
+            -1,
+            model,
+            optimizer,
+            epoch_loss,
+            history
         )
 
 
