@@ -1,4 +1,5 @@
 import chess
+import chess.variant
 import torch
 
 PIECE_TO_CHANNEL = {
@@ -19,7 +20,7 @@ PIECE_TO_CHANNEL = {
 
 def encode_fen(fen: str) -> torch.Tensor:
 
-    board = chess.Board(fen)
+    board = chess.variant.AtomicBoard(fen)
 
     planes = torch.zeros((19, 8, 8), dtype=torch.float32)
 

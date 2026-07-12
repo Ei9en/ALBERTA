@@ -10,3 +10,5 @@ __pycache__/
 data/raw/
 data/processed/
 data/filtered/
+checkpoints/
+lichess_bot_auto_logs/
