@@ -19,8 +19,8 @@ DATASET = "data/processed/positions_2300_bc.jsonl"
 CHECKPOINT_DIR = Path("checkpoints")
 
 # checkpoint V2 utilisé comme point de départ
-PRETRAINED_CHECKPOINT = CHECKPOINT_DIR / "bc_epoch_0.pt"
-
+#PRETRAINED_CHECKPOINT = CHECKPOINT_DIR / "bc_epoch_0.pt"
+PRETRAINED_CHECKPOINT = "/content/bc_epoch_0.pt"
 # nouveau checkpoint V2.5
 START_EPOCH = 0
 
