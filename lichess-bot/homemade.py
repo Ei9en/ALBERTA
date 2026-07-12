@@ -4,7 +4,7 @@ from lib.engine_wrapper import MinimalEngine
 from lib.lichess_types import HOMEMADE_ARGS_TYPE
 import logging
 
-from atomic_engine import RandomBot
+from atomic_engine import BCBot
 
 logger = logging.getLogger(__name__)
 
@@ -15,13 +15,13 @@ class ExampleEngine(MinimalEngine):
 
 
 class AtomicRandom(ExampleEngine):
-    """Bot Atomic utilisant notre moteur Python."""
+    """Bot Atomic utilisant notre réseau BC."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.bot = RandomBot()
+        self.bot = BCBot() # ou RandomBot
 
     def search(self, board: chess.Board, *args: HOMEMADE_ARGS_TYPE) -> PlayResult:
         move = self.bot.choose_move(board)
-        logger.info(f"AtomicRandom joue : {move}")
+        logger.info(f"BC joue : {move}")
         return PlayResult(move, None)
