@@ -12,7 +12,7 @@ from src.encoding import encode_fen
 from src.actions_space import ACTIONS, INDEX_TO_ACTION
 
 
-DEFAULT_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "bc_epoch_0.pt"
+DEFAULT_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "bc_v2_5_epoch_1.pt"
 
 
 class BCBot:
