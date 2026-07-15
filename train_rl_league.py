@@ -18,7 +18,7 @@ from src.models.resnet import ChessResNet
 from src.models.actor_critic import ActorCritic
 
 from src.agents.actor_critic_agent import ActorCriticAgent
-from src.selfplay.game import SelfPlayGame
+from src.selfplay.match import play_match
 
 from src.rl.compute_returns import compute_returns
 
@@ -96,43 +96,30 @@ def collect_games(model, league, n_games):
 
     with torch.no_grad():
 
-        for i in tqdm(range(n_games), desc="League self-play", leave=False):
+        for i in tqdm(range(n_games), desc="League self-play"):
 
             opponent_name, opponent = league.sample_opponent()
-
-            current_agent = ActorCriticAgent(
-                model,
-                deterministic=False,
-                temperature=0.75,
-            )
-
-            opponent_agent = ActorCriticAgent(
-                opponent,
-                deterministic=False,
-                temperature=0.75,
-            )
 
             #
             # Alterner les couleurs
             #
             if i % 2 == 0:
 
-                white = current_agent
-                black = opponent_agent
+                trajectory, result = play_match(
+                    model,
+                    opponent,
+                )
+
                 current_is_white = True
 
             else:
 
-                white = opponent_agent
-                black = current_agent
+                trajectory, result = play_match(
+                    opponent,
+                    model,
+                )
+
                 current_is_white = False
-
-            game = SelfPlayGame(
-                white,
-                black,
-            )
-
-            trajectory, result = game.play()
 
             #
             # Ne garder que les coups du modèle courant
