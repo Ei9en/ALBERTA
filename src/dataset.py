@@ -2,7 +2,7 @@ import json
 
 from torch.utils.data import Dataset
 
-from encoding import encode_fen
+from src.encoding import encode_fen
 
 
 class ChessDataset(Dataset):
