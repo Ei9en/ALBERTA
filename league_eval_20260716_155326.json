@@ -1,0 +1,87 @@
+{
+    "elos": {
+        "bc_init": 1256.5355695649325,
+        "league_epoch_000": 1196.4294691839814,
+        "league_epoch_001": 1194.7394690894073,
+        "league_epoch_002": 1180.4167141367711,
+        "league_epoch_003": 1158.9452260465252,
+        "league_epoch_004": 1212.9335519783824
+    },
+    "results": {
+        "bc_init vs league_epoch_000": {
+            "a_win": 26,
+            "b_win": 4,
+            "draw": 0
+        },
+        "bc_init vs league_epoch_001": {
+            "a_win": 27,
+            "b_win": 3,
+            "draw": 0
+        },
+        "bc_init vs league_epoch_002": {
+            "a_win": 26,
+            "b_win": 4,
+            "draw": 0
+        },
+        "bc_init vs league_epoch_003": {
+            "a_win": 26,
+            "b_win": 2,
+            "draw": 2
+        },
+        "bc_init vs league_epoch_004": {
+            "a_win": 27,
+            "b_win": 3,
+            "draw": 0
+        },
+        "league_epoch_000 vs league_epoch_001": {
+            "a_win": 15,
+            "b_win": 15,
+            "draw": 0
+        },
+        "league_epoch_000 vs league_epoch_002": {
+            "a_win": 18,
+            "b_win": 12,
+            "draw": 0
+        },
+        "league_epoch_000 vs league_epoch_003": {
+            "a_win": 29,
+            "b_win": 0,
+            "draw": 1
+        },
+        "league_epoch_000 vs league_epoch_004": {
+            "a_win": 6,
+            "b_win": 24,
+            "draw": 0
+        },
+        "league_epoch_001 vs league_epoch_002": {
+            "a_win": 15,
+            "b_win": 15,
+            "draw": 0
+        },
+        "league_epoch_001 vs league_epoch_003": {
+            "a_win": 16,
+            "b_win": 2,
+            "draw": 12
+        },
+        "league_epoch_001 vs league_epoch_004": {
+            "a_win": 15,
+            "b_win": 15,
+            "draw": 0
+        },
+        "league_epoch_002 vs league_epoch_003": {
+            "a_win": 16,
+            "b_win": 8,
+            "draw": 6
+        },
+        "league_epoch_002 vs league_epoch_004": {
+            "a_win": 6,
+            "b_win": 24,
+            "draw": 0
+        },
+        "league_epoch_003 vs league_epoch_004": {
+            "a_win": 4,
+            "b_win": 16,
+            "draw": 10
+        }
+    }
+}

@@ -2,7 +2,6 @@
 
 import chess.variant
 
-
 class SelfPlayGame:
 
     def __init__(self, white_agent, black_agent):

@@ -5,51 +5,60 @@ import random
 
 class League:
 
-    def __init__(self, max_agents=10):
+    def __init__(self, max_agents=3):
 
         self.max_agents = max_agents
+
         self.agents = {}
 
 
-    def add_agent(self, name, model):
+    def add_agent(
+        self,
+        name,
+        model,
+    ):
 
         self.agents[name] = model
 
+        #
+        # On conserve toujours le BC initial.
+        # Les autres snapshots sont supprimés du plus ancien au plus récent.
+        #
         while len(self.agents) > self.max_agents:
 
-            oldest = next(iter(self.agents))
+            removable = [
+                agent_name
+                for agent_name in self.agents
+                if agent_name != "league_bc_init"
+            ]
 
-            if oldest == "bc_init" and len(self.agents) > 1:
+            if not removable:
+                break
 
-                keys = list(self.agents.keys())
-
-                oldest = keys[1]
+            oldest = removable[0]
 
             del self.agents[oldest]
 
 
-    def sample_opponent(self, exclude=None):
+    def sample_opponent(
+        self,
+        exclude=None,
+    ):
 
-        names = list(self.agents.keys())
+        candidates = [
+            (name, model)
+            for name, model in self.agents.items()
+            if name != exclude
+        ]
 
-        if exclude is not None and exclude in names:
-            names.remove(exclude)
-
-        if len(names) == 0:
-            raise ValueError(
-                "No available opponent in league"
-            )
-
-        opponent = random.choice(names)
-
-        return (
-            opponent,
-            self.agents[opponent]
-        )
+        return random.choice(candidates)
 
 
-    def list_agents(self):
+    def __len__(self):
 
-        return list(
-            self.agents.keys()
-        )
+        return len(self.agents)
+
+
+    def names(self):
+
+        return list(self.agents.keys())

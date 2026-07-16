@@ -7,10 +7,13 @@ import torch
 from src.models.resnet import ChessResNet
 from src.models.actor_critic import ActorCritic
 
-from src.selfplay.match import play_match
+from src.agents.actor_critic_agent import ActorCriticAgent
+from src.selfplay.game import SelfPlayGame
 
 from src.actions_space import ACTIONS
 
+import json
+from datetime import datetime
 
 ### Constants ###
 
@@ -30,7 +33,7 @@ BC_CHECKPOINT = (
     / "bc_v2_5_epoch_3.pt"
 )
 
-GAMES_PER_MATCH = 10
+GAMES_PER_MATCH = 30
 
 
 ### Model building ###
@@ -151,11 +154,25 @@ def evaluate_match(
         leave=False,
     ):
 
-        _, result = play_match(
+        white_agent = ActorCriticAgent(
             white_model,
-            black_model,
-            deterministic=True,
+            deterministic=False,
+            temperature=0.5,
         )
+
+        black_agent = ActorCriticAgent(
+            black_model,
+            deterministic=False,
+            temperature=0.5,
+        )
+
+
+        game = SelfPlayGame(
+            white_agent,
+            black_agent,
+        )
+
+        _, result = game.play()
 
 
         if result == "1-0":
@@ -202,9 +219,14 @@ def main():
         agents.keys()
     )
 
+    elos = {
+        name: 1200.0
+        for name in names
+    }
+
+    K = 32
 
     results = {}
-
 
     print(
         "\n===== Evaluation ====="
@@ -255,6 +277,28 @@ def main():
                 draws_1 + draws_2,
         }
 
+        games = (
+            results[(a, b)]["a_win"]
+            + results[(a, b)]["b_win"]
+            + results[(a, b)]["draw"]
+        )
+
+        score_a = (
+            results[(a, b)]["a_win"]
+            + 0.5 * results[(a, b)]["draw"]
+        ) / games
+
+        score_b = 1.0 - score_a
+
+        expected_a = 1.0 / (
+            1.0
+            + 10 ** ((elos[b] - elos[a]) / 400)
+        )
+
+        expected_b = 1.0 - expected_a
+
+        elos[a] += K * (score_a - expected_a)
+        elos[b] += K * (score_b - expected_b)
 
         print(
             f"{a}: "
@@ -304,6 +348,38 @@ def main():
             f"{name:25s} {score:.1f}"
         )
 
+    print("\n===== Elo =====")
+
+    for name, elo in sorted(
+        elos.items(),
+        key=lambda x: x[1],
+        reverse=True,
+    ):
+        print(
+            f"{name:25s} {elo:.1f}"
+        )
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    output = {
+        "elos": elos,
+        "results": {
+            f"{a} vs {b}": result
+            for (a, b), result in results.items()
+        }
+    }
+
+    with open(
+        PROJECT_ROOT
+        / f"league_eval_{timestamp}.json",
+        "w",
+    ) as f:
+
+        json.dump(
+            output,
+            f,
+            indent=4,
+        )
 
 
 if __name__ == "__main__":
