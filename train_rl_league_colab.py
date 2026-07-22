@@ -311,6 +311,12 @@ def train_epoch(
 
     model.train()
 
+    if len(buffer) < BATCH_SIZE:
+        print(
+            "Replay buffer too small for training."
+        )
+        return 0.0, 0.0, 0.0
+
     TRAIN_STEPS = len(buffer) // BATCH_SIZE
 
     total_loss = 0
