@@ -1,0 +1,166 @@
+{
+    "temperature": 0.5,
+    "games_per_match": 20,
+    "elos": {
+        "bc_v2_5_epoch_0": 1483.6550125612694,
+        "bc_v2_5_epoch_1": 1489.7396603292698,
+        "bc_v2_5_epoch_2": 1503.4566950133114,
+        "bc_v2_5_epoch_3": 1503.7536886994162,
+        "bc_v2_5_epoch_4": 1509.0060866507085,
+        "bc_v2_5_epoch_5": 1508.5056697422176,
+        "bc_v2_5_epoch_6": 1503.0722047971153,
+        "bc_v2_5_epoch_7": 1498.810982206692
+    },
+    "scores": {
+        "bc_v2_5_epoch_0": 58.5,
+        "bc_v2_5_epoch_1": 62.5,
+        "bc_v2_5_epoch_2": 72.0,
+        "bc_v2_5_epoch_3": 72.0,
+        "bc_v2_5_epoch_4": 76.5,
+        "bc_v2_5_epoch_5": 76.5,
+        "bc_v2_5_epoch_6": 73.0,
+        "bc_v2_5_epoch_7": 69.0
+    },
+    "results": {
+        "bc_v2_5_epoch_0 vs bc_v2_5_epoch_1": {
+            "a_wins": 7,
+            "b_wins": 9,
+            "draws": 4
+        },
+        "bc_v2_5_epoch_0 vs bc_v2_5_epoch_2": {
+            "a_wins": 8,
+            "b_wins": 8,
+            "draws": 4
+        },
+        "bc_v2_5_epoch_0 vs bc_v2_5_epoch_3": {
+            "a_wins": 8,
+            "b_wins": 11,
+            "draws": 1
+        },
+        "bc_v2_5_epoch_0 vs bc_v2_5_epoch_4": {
+            "a_wins": 6,
+            "b_wins": 12,
+            "draws": 2
+        },
+        "bc_v2_5_epoch_0 vs bc_v2_5_epoch_5": {
+            "a_wins": 5,
+            "b_wins": 11,
+            "draws": 4
+        },
+        "bc_v2_5_epoch_0 vs bc_v2_5_epoch_6": {
+            "a_wins": 6,
+            "b_wins": 11,
+            "draws": 3
+        },
+        "bc_v2_5_epoch_0 vs bc_v2_5_epoch_7": {
+            "a_wins": 8,
+            "b_wins": 9,
+            "draws": 3
+        },
+        "bc_v2_5_epoch_1 vs bc_v2_5_epoch_2": {
+            "a_wins": 5,
+            "b_wins": 12,
+            "draws": 3
+        },
+        "bc_v2_5_epoch_1 vs bc_v2_5_epoch_3": {
+            "a_wins": 7,
+            "b_wins": 9,
+            "draws": 4
+        },
+        "bc_v2_5_epoch_1 vs bc_v2_5_epoch_4": {
+            "a_wins": 8,
+            "b_wins": 9,
+            "draws": 3
+        },
+        "bc_v2_5_epoch_1 vs bc_v2_5_epoch_5": {
+            "a_wins": 10,
+            "b_wins": 6,
+            "draws": 4
+        },
+        "bc_v2_5_epoch_1 vs bc_v2_5_epoch_6": {
+            "a_wins": 5,
+            "b_wins": 12,
+            "draws": 3
+        },
+        "bc_v2_5_epoch_1 vs bc_v2_5_epoch_7": {
+            "a_wins": 7,
+            "b_wins": 11,
+            "draws": 2
+        },
+        "bc_v2_5_epoch_2 vs bc_v2_5_epoch_3": {
+            "a_wins": 8,
+            "b_wins": 5,
+            "draws": 7
+        },
+        "bc_v2_5_epoch_2 vs bc_v2_5_epoch_4": {
+            "a_wins": 6,
+            "b_wins": 11,
+            "draws": 3
+        },
+        "bc_v2_5_epoch_2 vs bc_v2_5_epoch_5": {
+            "a_wins": 3,
+            "b_wins": 11,
+            "draws": 6
+        },
+        "bc_v2_5_epoch_2 vs bc_v2_5_epoch_6": {
+            "a_wins": 11,
+            "b_wins": 7,
+            "draws": 2
+        },
+        "bc_v2_5_epoch_2 vs bc_v2_5_epoch_7": {
+            "a_wins": 10,
+            "b_wins": 7,
+            "draws": 3
+        },
+        "bc_v2_5_epoch_3 vs bc_v2_5_epoch_4": {
+            "a_wins": 10,
+            "b_wins": 9,
+            "draws": 1
+        },
+        "bc_v2_5_epoch_3 vs bc_v2_5_epoch_5": {
+            "a_wins": 6,
+            "b_wins": 9,
+            "draws": 5
+        },
+        "bc_v2_5_epoch_3 vs bc_v2_5_epoch_6": {
+            "a_wins": 8,
+            "b_wins": 9,
+            "draws": 3
+        },
+        "bc_v2_5_epoch_3 vs bc_v2_5_epoch_7": {
+            "a_wins": 11,
+            "b_wins": 6,
+            "draws": 3
+        },
+        "bc_v2_5_epoch_4 vs bc_v2_5_epoch_5": {
+            "a_wins": 9,
+            "b_wins": 9,
+            "draws": 2
+        },
+        "bc_v2_5_epoch_4 vs bc_v2_5_epoch_6": {
+            "a_wins": 7,
+            "b_wins": 8,
+            "draws": 5
+        },
+        "bc_v2_5_epoch_4 vs bc_v2_5_epoch_7": {
+            "a_wins": 9,
+            "b_wins": 6,
+            "draws": 5
+        },
+        "bc_v2_5_epoch_5 vs bc_v2_5_epoch_6": {
+            "a_wins": 10,
+            "b_wins": 8,
+            "draws": 2
+        },
+        "bc_v2_5_epoch_5 vs bc_v2_5_epoch_7": {
+            "a_wins": 8,
+            "b_wins": 10,
+            "draws": 2
+        },
+        "bc_v2_5_epoch_6 vs bc_v2_5_epoch_7": {
+            "a_wins": 7,
+            "b_wins": 9,
+            "draws": 4
+        }
+    }
+}

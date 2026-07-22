@@ -12,7 +12,7 @@ from src.encoding import encode_fen
 from src.actions_space import ACTIONS, INDEX_TO_ACTION
 
 
-DEFAULT_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "bc_v2_5_epoch_3.pt"
+DEFAULT_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "bc_v2_5_epoch_7.pt"
 
 
 class BCBot:
@@ -27,18 +27,18 @@ class BCBot:
             blocks=4,
         ).to(self.device)
 
-        checkpoint = torch.load(
+        checkpoint_data = torch.load(
             checkpoint,
             map_location=self.device,
         )
 
         self.model.load_state_dict(
-            checkpoint["model_state_dict"]
+            checkpoint_data["model_state_dict"]
         )
 
         self.model.eval()
 
-        print(f"Loaded checkpoint: {DEFAULT_CHECKPOINT}")
+        print(f"Loaded checkpoint: {checkpoint}")
 
     @torch.no_grad()
     def choose_move(self, board: chess.Board):

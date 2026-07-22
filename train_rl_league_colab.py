@@ -31,9 +31,18 @@ from src.actions_space import ACTION_TO_INDEX
 
 ### Constants ###
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path("/content/drive/MyDrive/ALBERTA")
 
-CHECKPOINT = PROJECT_ROOT / "checkpoints" / "bc_v2_5_epoch_5.pt"
+CHECKPOINT = (
+    PROJECT_ROOT
+    / "bc_v2_5_epoch_5.pt" # Agent courant
+)
+
+LEAGUE_DIR = (
+    PROJECT_ROOT
+    / "checkpoints"
+    / "league"
+)
 
 DEVICE = (
     "cuda"
@@ -47,13 +56,13 @@ GAMES_PER_EPOCH = 100
 
 RL_EPOCHS = 20
 
-CHECKPOINT_EVERY = 2
+CHECKPOINT_EVERY = 1
 
 VALUE_COEF = 0.1
 
 BATCH_SIZE = 128
 
-SGD_EPOCHS = 5 # Nombre de passages complets sur le replay buffer pendant un epoch RL.
+SGD_EPOCHS = 3 # Nombre de passages complets sur le replay buffer pendant un epoch RL.
                # Plus élevé = plus d'updates par collecte de parties, mais risque de sur-apprentissage
                # sur les anciennes expériences.
 
@@ -65,6 +74,8 @@ def load_bc_agent(
 
     path = (
         PROJECT_ROOT
+        / "checkpoints"
+        / "bc_epoch"
         / f"bc_v2_5_epoch_{epoch}.pt"
     )
 
@@ -118,7 +129,7 @@ def load_model():
 
     model = ActorCritic(bc_model)
 
-    model.to(DEVICE)
+    model = model.to(DEVICE)
 
     optimizer = Adam(
         model.parameters(),
@@ -408,11 +419,14 @@ def train_epoch(
 
             loss /= BATCH_SIZE
 
-
             loss.backward()
 
-            optimizer.step()
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                1.0
+            )
 
+            optimizer.step()
 
             total_loss += loss.item()
             total_actor += actor_loss_sum / BATCH_SIZE
@@ -442,8 +456,12 @@ def save_checkpoint(model, optimizer, epoch, loss):
             "optimizer_state_dict": optimizer.state_dict(),
             "loss": loss,
         },
-        PROJECT_ROOT / f"checkpoints/rl_epoch_{epoch}.pt",
+        PROJECT_ROOT
+        / "checkpoints"
+        / "rl_epoch"
+        / f"rl_epoch_{epoch}.pt",
     )
+
 ### Saving Replay Buffer ###
 
 def save_replay_buffer(
@@ -482,7 +500,7 @@ def main():
 
 
     buffer = ReplayBuffer(
-        capacity=50000
+        capacity=20000
     )
 
 
@@ -496,6 +514,9 @@ def main():
 
         print(f"\n===== Epoch {epoch} =====")
 
+        wins=0
+        losses=0
+        draws=0
 
         games = collect_games(
             model,
@@ -509,14 +530,20 @@ def main():
         # Ajout dans replay buffer
         #
 
+        
+
         for game in games:
 
             trajectory = game["trajectory"]
             result = game["result"]
             current_white = game["current_white"]
 
-
             if result == "1-0":
+
+                if current_white:
+                    wins += 1
+                else:
+                    losses += 1
 
                 reward = (
                     1.0
@@ -524,8 +551,12 @@ def main():
                     else -1.0
                 )
 
-
             elif result == "0-1":
+
+                if current_white:
+                    losses += 1
+                else:
+                    wins += 1
 
                 reward = (
                     -1.0
@@ -533,18 +564,16 @@ def main():
                     else 1.0
                 )
 
-
             else:
 
+                draws += 1
+
                 reward = 0.0
-
-
 
             rewards = [
                 reward
                 for _ in trajectory
             ]
-
 
             returns = compute_returns(
                 rewards,
@@ -580,7 +609,14 @@ def main():
 
         print(
             f"Replay buffer size: {len(buffer)}"
-        )
+            )
+
+        print(
+            f"Results: W={wins} "
+            f"L={losses} "
+            f"D={draws}"
+            f"Win rate: {wins / GAMES_PER_EPOCH:.1%}"
+            )
 
 
         #
@@ -614,7 +650,7 @@ def main():
         stats.save(
             PROJECT_ROOT
             / "checkpoints"
-            / "active_learning_stats.json"
+            / "uncertainty_stats.json"
         )
 
 

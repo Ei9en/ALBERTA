@@ -4,7 +4,8 @@ from lib.engine_wrapper import MinimalEngine
 from lib.lichess_types import HOMEMADE_ARGS_TYPE
 import logging
 
-from atomic_engine import BCBot
+from atomic_engine.bc_bot import BCBot 
+from atomic_engine.bc_bot_stochastic import BCBotStochastic
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,11 @@ class AtomicRandom(ExampleEngine):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.bot = BCBot() # ou RandomBot
+        #self.bot = BCBotStochastic(
+        #    temperature=0.75
+        #)
+        self.bot = BCBot()
+        
 
     def search(self, board: chess.Board, *args: HOMEMADE_ARGS_TYPE) -> PlayResult:
         move = self.bot.choose_move(board)
