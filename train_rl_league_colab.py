@@ -35,6 +35,8 @@ PROJECT_ROOT = Path("/content/drive/MyDrive/ALBERTA")
 
 CHECKPOINT = (
     PROJECT_ROOT
+    / "checkpoints"
+    / "bc_epoch"
     / "bc_v2_5_epoch_5.pt" # Agent courant
 )
 
