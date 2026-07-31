@@ -21,7 +21,6 @@ class UncertaintyStats:
 
         values = []
 
-
         #
         # Snapshots league
         #
@@ -59,22 +58,26 @@ class UncertaintyStats:
         ).item()
 
 
-
     def add(
         self,
         fen,
+        action,
         entropy,
         uncertainty,
+        HU,
+        result,
     ):
+
         self.data.append(
             {
                 "fen": fen,
+                "actions": action,
                 "H": entropy,
                 "U": uncertainty,
-                "HU": entropy * uncertainty,
+                "HU": HU,
+                "result": result,
             }
         )
-
 
 
     def save(
@@ -84,7 +87,10 @@ class UncertaintyStats:
 
         path = Path(path)
 
-        with open(path, "w") as f:
+        with open(
+            path,
+            "w",
+        ) as f:
 
             json.dump(
                 self.data,

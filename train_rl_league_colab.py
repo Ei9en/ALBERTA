@@ -3,7 +3,9 @@
 ### Imports ###
 
 import pickle
+import time
 import chess
+import chess.variant
 
 from src.selfplay.league import League
 import copy
@@ -181,6 +183,11 @@ def collect_games(
 
     games = []
 
+    #
+    # Timer self-play
+    #
+    selfplay_start = time.perf_counter()
+
     with torch.no_grad():
 
         #
@@ -256,72 +263,110 @@ def collect_games(
                 }
             )
 
-        #
-        # =========================
-        # Calcul U global
-        # =========================
-        #
 
-        all_steps = []
+    selfplay_time = (
+        time.perf_counter()
+        - selfplay_start
+    )
 
-        for game in games:
+    total_positions = sum(
+        len(game["trajectory"])
+        for game in games
+    )
 
-            result = game["result"]
+    print(
+        f"Self-play time: {selfplay_time:.2f}s "
+        f"({selfplay_time / n_games:.2f}s/game)"
+    )
 
-            for step in game["trajectory"]:
+    print(
+        f"Self-play positions: {total_positions} "
+        f"({total_positions / n_games:.1f}/game)"
+    )
 
-                step["_game_result"] = result
 
-                all_steps.append(step)
+    #
+    # =========================
+    # Calcul U global
+    # =========================
+    #
+
+    uncertainty_start = time.perf_counter()
+
+    all_steps = []
+
+    for game in games:
+
+        result = game["result"]
+
+        for step in game["trajectory"]:
+
+            step["_game_result"] = result
+
+            all_steps.append(step)
 
 
-        if all_steps:
+    if all_steps:
 
-            boards = [
-                chess.variant.AtomicBoard(
-                    step["fen"]
-                )
-                for step in all_steps
-            ]
+        boards = [
+            chess.variant.AtomicBoard(
+                step["fen"]
+            )
+            for step in all_steps
+        ]
 
-            x = encode_boards(
-                boards
-            ).to(DEVICE)
+        x = encode_boards(
+            boards
+        ).to(DEVICE)
 
-            uncertainties = (
-                league.uncertainty_batch(
-                    x,
-                    current_model=model,
-                )
+        uncertainties = (
+            league.uncertainty_batch(
+                x,
+                current_model=model,
+            )
+        )
+
+        for step, U in zip(
+            all_steps,
+            uncertainties,
+        ):
+
+            U = U.item()
+
+            H = step.get(
+                "entropy",
+                0.0,
             )
 
-            for step, U in zip(
-                all_steps,
-                uncertainties,
-            ):
+            HU = H * U
 
-                U = U.item()
+            step["uncertainty"] = U
+            step["HU"] = HU
 
-                H = step.get(
-                    "entropy",
-                    0.0,
-                )
+            stats.add(
+                step["fen"],
+                step["action"],
+                H,
+                U,
+                HU,
+                step["_game_result"],
+            )
 
-                HU = H * U
 
-                step["uncertainty"] = U
-                step["HU"] = HU
+    uncertainty_time = (
+        time.perf_counter()
+        - uncertainty_start
+    )
 
-                stats.add(
-                    step["fen"],
-                    step["action"],
-                    H,
-                    U,
-                    step["_game_result"],
-                )
+    print(
+        f"U computation time: "
+        f"{uncertainty_time:.2f}s "
+        f"({uncertainty_time / max(len(all_steps), 1) * 1000:.2f}ms/position)"
+    )
 
 
     return games
+
 
 ### Training ###
 
@@ -334,10 +379,13 @@ def train_epoch(
     model.train()
 
     if len(buffer) < BATCH_SIZE:
+
         print(
             "Replay buffer too small for training."
         )
+
         return 0.0, 0.0, 0.0
+
 
     TRAIN_STEPS = len(buffer) // BATCH_SIZE
 
@@ -345,13 +393,20 @@ def train_epoch(
     total_actor = 0
     total_critic = 0
 
-    total_updates = TRAIN_STEPS * SGD_EPOCHS
+    total_updates = (
+        TRAIN_STEPS
+        *
+        SGD_EPOCHS
+    )
 
 
     progress = tqdm(
         total=total_updates,
         desc="Training",
     )
+
+
+    training_start = time.perf_counter()
 
 
     for epoch in range(SGD_EPOCHS):
@@ -362,9 +417,7 @@ def train_epoch(
                 BATCH_SIZE
             )
 
-
             optimizer.zero_grad()
-
 
             loss = 0
             actor_loss_sum = 0
@@ -391,7 +444,8 @@ def train_epoch(
 
                 advantage = (
                     target
-                    - value.detach()
+                    -
+                    value.detach()
                 )
 
 
@@ -413,15 +467,19 @@ def train_epoch(
                 )
 
 
-                action_position = legal_indices.index(
-                    step["action"]
+                action_position = (
+                    legal_indices.index(
+                        step["action"]
+                    )
                 )
+
 
                 advantage = torch.clamp(
                     advantage,
                     -5,
                     5,
                 )
+
 
                 actor_loss = (
                     -log_probs[action_position]
@@ -439,12 +497,19 @@ def train_epoch(
                 loss += (
                     actor_loss
                     +
-                    VALUE_COEF * critic_loss
+                    VALUE_COEF
+                    *
+                    critic_loss
                 )
 
 
-                actor_loss_sum += actor_loss.item()
-                critic_loss_sum += critic_loss.item()
+                actor_loss_sum += (
+                    actor_loss.item()
+                )
+
+                critic_loss_sum += (
+                    critic_loss.item()
+                )
 
 
             loss /= BATCH_SIZE
@@ -459,14 +524,37 @@ def train_epoch(
             optimizer.step()
 
             total_loss += loss.item()
-            total_actor += actor_loss_sum / BATCH_SIZE
-            total_critic += critic_loss_sum / BATCH_SIZE
+
+            total_actor += (
+                actor_loss_sum
+                /
+                BATCH_SIZE
+            )
+
+            total_critic += (
+                critic_loss_sum
+                /
+                BATCH_SIZE
+            )
 
 
             progress.update(1)
 
 
     progress.close()
+
+
+    training_time = (
+        time.perf_counter()
+        - training_start
+    )
+
+
+    print(
+        f"Training time: "
+        f"{training_time:.2f}s "
+        f"({training_time / max(total_updates, 1):.2f}s/update)"
+    )
 
 
     return (
