@@ -3,6 +3,7 @@
 ### Imports ###
 
 import pickle
+import chess
 
 from src.selfplay.league import League
 import copy
@@ -15,6 +16,7 @@ import torch.nn.functional as F
 from torch.optim import Adam
 
 from src.encoding import encode_fen
+from src.encoding import encode_boards
 
 from src.models.resnet import ChessResNet
 from src.models.actor_critic import ActorCritic
@@ -54,11 +56,11 @@ DEVICE = (
 
 LR = 5e-5
 
-GAMES_PER_EPOCH = 100
+GAMES_PER_EPOCH = 2
 
-RL_EPOCHS = 20
+RL_EPOCHS = 1
 
-CHECKPOINT_EVERY = 1
+CHECKPOINT_EVERY = 5
 
 VALUE_COEF = 0.1
 
@@ -179,21 +181,26 @@ def collect_games(
 
     games = []
 
-
     with torch.no_grad():
+
+        #
+        # =========================
+        # Self-play
+        # =========================
+        #
 
         for i in tqdm(
             range(n_games),
             desc="League self-play",
         ):
 
-            opponent_name, opponent = league.sample_opponent()
-
+            opponent_name, opponent = (
+                league.sample_opponent()
+            )
 
             #
             # Alterner les couleurs
             #
-
             if i % 2 == 0:
 
                 white_agent = ActorCriticAgent(
@@ -211,7 +218,6 @@ def collect_games(
                 )
 
                 current_is_white = True
-
 
             else:
 
@@ -232,71 +238,87 @@ def collect_games(
                 current_is_white = False
 
 
-
             game = SelfPlayGame(
                 white_agent,
                 black_agent,
             )
 
-
             trajectory, result = game.play()
 
-
             #
-            # Calcul U + stockage H/U
+            # Garder les informations nécessaires.
             #
-
-            for step in trajectory:
-
-                x = (
-                    encode_fen(step["fen"])
-                    .unsqueeze(0)
-                    .to(DEVICE)
-                )
-
-
-                U = league.uncertainty(
-                    x,
-                    current_model=model,
-                )
-
-
-                step["uncertainty"] = U
-
-
-                stats.add(
-                    step["fen"],
-                    step.get(
-                        "entropy",
-                        0.0,
-                    ),
-                    U,
-                )
-
-
-
-            #
-            # Ne garder que les coups du modèle courant
-            #
-
-            filtered = []
-
-
-            for step in trajectory:
-
-                if step["player"] == current_is_white:
-
-                    filtered.append(step)
-
-
-
             games.append(
                 {
-                    "trajectory": filtered,
+                    "trajectory": trajectory,
                     "result": result,
                     "current_white": current_is_white,
                 }
             )
+
+        #
+        # =========================
+        # Calcul U global
+        # =========================
+        #
+
+        all_steps = []
+
+        for game in games:
+
+            result = game["result"]
+
+            for step in game["trajectory"]:
+
+                step["_game_result"] = result
+
+                all_steps.append(step)
+
+
+        if all_steps:
+
+            boards = [
+                chess.variant.AtomicBoard(
+                    step["fen"]
+                )
+                for step in all_steps
+            ]
+
+            x = encode_boards(
+                boards
+            ).to(DEVICE)
+
+            uncertainties = (
+                league.uncertainty_batch(
+                    x,
+                    current_model=model,
+                )
+            )
+
+            for step, U in zip(
+                all_steps,
+                uncertainties,
+            ):
+
+                U = U.item()
+
+                H = step.get(
+                    "entropy",
+                    0.0,
+                )
+
+                HU = H * U
+
+                step["uncertainty"] = U
+                step["HU"] = HU
+
+                stats.add(
+                    step["fen"],
+                    step["action"],
+                    H,
+                    U,
+                    step["_game_result"],
+                )
 
 
     return games

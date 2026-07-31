@@ -66,16 +66,12 @@ class UncertaintyStats:
         entropy,
         uncertainty,
     ):
-
         self.data.append(
             {
                 "fen": fen,
-
                 "H": entropy,
-
                 "U": uncertainty,
-
-                "M": None,
+                "HU": entropy * uncertainty,
             }
         )
 

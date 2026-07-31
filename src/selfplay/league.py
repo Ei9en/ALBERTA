@@ -1,12 +1,10 @@
-# League.py
-
 import random
 import torch
 
 
 class League:
 
-    def __init__(self, max_agents=20):
+    def __init__(self, max_agents=22):
 
         self.max_agents = max_agents
 
@@ -72,7 +70,6 @@ class League:
 
         values = []
 
-
         for model in self.agents.values():
 
             model.eval()
@@ -82,7 +79,6 @@ class League:
             values.append(
                 value.item()
             )
-
 
         return values
 
@@ -96,9 +92,8 @@ class League:
 
         values = []
 
-
         #
-        # Valeurs des snapshots de la league
+        # Snapshots de la league
         #
         for model in self.agents.values():
 
@@ -110,9 +105,8 @@ class League:
                 value.item()
             )
 
-
         #
-        # Valeur du modèle en entraînement
+        # Modèle courant
         #
         if current_model is not None:
 
@@ -124,27 +118,115 @@ class League:
                 value.item()
             )
 
-
-        #
-        # Pas assez d'agents pour une variance
-        #
         if len(values) < 2:
 
             return 0.0
 
-
-        values = torch.tensor(values)
-
+        values = torch.tensor(
+            values,
+            device=x.device,
+        )
 
         return torch.var(
             values,
             unbiased=False,
         ).item()
 
+
+    #
+    # =========================
+    # Batched uncertainty
+    # =========================
+    #
+
+    @torch.no_grad()
+    def uncertainty_batch(
+        self,
+        x,
+        current_model=None,
+    ):
+
+        #
+        # x:
+        #
+        # [N, 19, 8, 8]
+        #
+        # Retour:
+        #
+        # [N]
+        #
+        all_values = []
+
+        #
+        # Snapshots de la league
+        #
+        for model in self.agents.values():
+
+            model.eval()
+
+            _, values = model(x)
+
+            #
+            # [N, 1] -> [N]
+            #
+            values = values.squeeze(-1)
+
+            all_values.append(
+                values
+            )
+
+        #
+        # Modèle courant
+        #
+        if current_model is not None:
+
+            current_model.eval()
+
+            _, values = current_model(x)
+
+            values = values.squeeze(-1)
+
+            all_values.append(
+                values
+            )
+
+        #
+        # Pas assez d'agents
+        #
+        if len(all_values) < 2:
+
+            return torch.zeros(
+                x.shape[0],
+                device=x.device,
+            )
+
+        #
+        # [agents, N]
+        #
+        values = torch.stack(
+            all_values,
+            dim=0,
+        )
+
+        #
+        # Variance entre agents
+        #
+        uncertainty = torch.var(
+            values,
+            dim=0,
+            unbiased=False,
+        )
+
+        return uncertainty
+
+
     def __len__(self):
 
         return len(self.agents)
 
+
     def names(self):
 
-        return list(self.agents.keys())
+        return list(
+            self.agents.keys()
+        )

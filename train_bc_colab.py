@@ -17,12 +17,12 @@ from src.actions_space import ACTIONS
 DATASET = "//content/drive/MyDrive/ALBERTA/positions_2300_bc.jsonl"
 
 CHECKPOINT_DIR = Path(
-    "/content/drive/MyDrive/ALBERTA/checkpoints"
+    "/content/drive/MyDrive/ALBERTA/checkpoints/bc_epoch"
 )
 
 # checkpoint utilisé comme point de départ
 PRETRAINED_CHECKPOINT = Path(
-    "/content/drive/MyDrive/ALBERTA/checkpoints/bc_v2_5_epoch_6.pt"
+    "/content/drive/MyDrive/ALBERTA/checkpoints/bc_epoch/bc_v2_5_epoch_6.pt"
 )
 
 EPOCHS = 10
