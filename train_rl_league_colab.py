@@ -239,6 +239,11 @@ def _init_selfplay_worker(
     actuellement disponibles.
     """
 
+    print(
+        "[WORKER INIT] done",
+        flush=True
+    )
+
     global _WORKER_CURRENT_MODEL
     global _WORKER_LEAGUE_MODELS
     global _WORKER_CURRENT_AGENT
@@ -306,6 +311,11 @@ def _selfplay_worker(
     Retourne exactement le même format que
     collect_games_batched().
     """
+
+    print(
+        f"[WORKER {worker_id}] START",
+        flush=True
+    )
 
     (
         n_games,
