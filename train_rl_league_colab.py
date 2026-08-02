@@ -374,7 +374,7 @@ def collect_games_batched(
     league,
     n_games,
     stats,
-    batch_size=2048,
+    batch_size=256,
 ):
 
     model.eval()
@@ -388,7 +388,6 @@ def collect_games_batched(
     #
 
     active_games = []
-
     completed_games = []
 
     for i in range(n_games):
@@ -397,9 +396,6 @@ def collect_games_batched(
             league.sample_opponent()
         )
 
-        #
-        # Alterner les couleurs
-        #
         if i % 2 == 0:
 
             white_agent = ActorCriticAgent(
@@ -446,10 +442,9 @@ def collect_games_batched(
             }
         )
 
-
     #
     # =========================
-    # Self-play parallèle
+    # Self-play
     # =========================
     #
 
@@ -457,17 +452,19 @@ def collect_games_batched(
 
         while active_games:
 
-            #
-            # Positions nécessitant un coup
-            # du modèle RL courant.
-            #
             model_games = []
 
             #
-            # Positions nécessitant un coup
-            # d'un adversaire.
+            # Dictionnaire :
+            # modèle adverse -> parties utilisant ce modèle
             #
-            opponent_games = []
+            opponent_groups = {}
+
+            #
+            # =========================
+            # Classification des parties
+            # =========================
+            #
 
             for game in active_games:
 
@@ -480,11 +477,23 @@ def collect_games_batched(
                 )
 
                 if agent.model is model:
+
                     model_games.append(game)
 
                 else:
-                    opponent_games.append(game)
 
+                    model_id = id(agent.model)
+
+                    if model_id not in opponent_groups:
+
+                        opponent_groups[model_id] = {
+                            "agent": agent,
+                            "games": [],
+                        }
+
+                    opponent_groups[
+                        model_id
+                    ]["games"].append(game)
 
             #
             # =========================
@@ -506,16 +515,6 @@ def collect_games_batched(
                     game["board"]
                     for game in batch_games
                 ]
-
-                #
-                # Attention :
-                # choose_moves() utilise le modèle
-                # contenu dans l'agent.
-                #
-                # Ici tous les batch_games utilisent
-                # le même modèle RL, donc on peut
-                # utiliser directement l'agent RL.
-                #
 
                 model_agent = (
                     batch_games[0]["white"]
@@ -543,8 +542,7 @@ def collect_games_batched(
                             "entropy": info["entropy"],
                             "legal_moves": [
                                 move.uci()
-                                for move
-                                in board.legal_moves
+                                for move in board.legal_moves
                             ],
                         }
                     )
@@ -553,50 +551,69 @@ def collect_games_batched(
                         info["move"]
                     )
 
-
             #
             # =========================
             # Coups des adversaires
             # =========================
             #
+            # IMPORTANT :
+            # On batch maintenant les parties
+            # qui utilisent le même snapshot.
+            #
 
-            for game in opponent_games:
+            for group in opponent_groups.values():
 
-                board = game["board"]
+                agent = group["agent"]
+                games = group["games"]
 
-                agent = (
-                    game["white"]
-                    if board.turn
-                    else game["black"]
-                )
+                for start in range(
+                    0,
+                    len(games),
+                    batch_size,
+                ):
 
-                info = agent.choose_move(
-                    board
-                )
+                    batch_games = games[
+                        start:start + batch_size
+                    ]
 
-                game["trajectory"].append(
-                    {
-                        "fen": board.fen(),
-                        "action": info["action"],
-                        "player": board.turn,
-                        "value": info["value"],
-                        "entropy": info["entropy"],
-                        "legal_moves": [
-                            move.uci()
-                            for move
-                            in board.legal_moves
-                        ],
-                    }
-                )
+                    boards = [
+                        game["board"]
+                        for game in batch_games
+                    ]
 
-                board.push(
-                    info["move"]
-                )
+                    infos = agent.choose_moves(
+                        boards
+                    )
 
+                    for game, info in zip(
+                        batch_games,
+                        infos,
+                    ):
+
+                        board = game["board"]
+
+                        game["trajectory"].append(
+                            {
+                                "fen": board.fen(),
+                                "action": info["action"],
+                                "player": board.turn,
+                                "value": info["value"],
+                                "entropy": info["entropy"],
+                                "legal_moves": [
+                                    move.uci()
+                                    for move
+                                    in board.legal_moves
+                                ],
+                            }
+                        )
+
+                        board.push(
+                            info["move"]
+                        )
 
             #
             # =========================
-            # Retirer les parties terminées
+            # Parties terminées
             # =========================
             #
 
@@ -623,12 +640,9 @@ def collect_games_batched(
 
                 else:
 
-                    still_active.append(
-                        game
-                    )
+                    still_active.append(game)
 
             active_games = still_active
-
 
     #
     # =========================
@@ -658,7 +672,6 @@ def collect_games_batched(
         f"({total_positions / n_games:.1f}/game)"
     )
 
-
     #
     # =========================
     # Calcul U
@@ -678,7 +691,6 @@ def collect_games_batched(
             step["_game_result"] = result
 
             all_steps.append(step)
-
 
     if all_steps:
 
@@ -725,7 +737,6 @@ def collect_games_batched(
                 HU,
                 step["_game_result"],
             )
-
 
     uncertainty_time = (
         time.perf_counter()
