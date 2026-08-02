@@ -234,9 +234,16 @@ def _init_selfplay_worker(
     """
     Initialise un worker multiprocessing.
 
-    Les modèles sont en mémoire CPU partagée.
-    league_registry contient les noms des modèles
-    actuellement disponibles.
+    current_model :
+        modèle courant en mémoire CPU partagée.
+
+    league_models :
+        dictionnaire FIXE de slots :
+            slot_name -> modèle partagé.
+
+    league_registry :
+        dictionnaire partagé :
+            agent_name -> slot_name
     """
 
     global _WORKER_CURRENT_MODEL
@@ -253,30 +260,37 @@ def _init_selfplay_worker(
     #
     # Un seul thread PyTorch par worker.
     #
+
     torch.set_num_threads(1)
 
     #
     # Modèle courant
     #
+
     _WORKER_CURRENT_MODEL = current_model
+
     _WORKER_CURRENT_MODEL.eval()
 
     #
-    # Modèles league
+    # Slots league
     #
+
     _WORKER_LEAGUE_MODELS = league_models
 
     for model in _WORKER_LEAGUE_MODELS.values():
+
         model.eval()
 
     #
-    # Registry
+    # Registry réellement partagé
     #
+
     _WORKER_LEAGUE_REGISTRY = league_registry
 
     #
     # Agent courant
     #
+
     _WORKER_CURRENT_AGENT = ActorCriticAgent(
         _WORKER_CURRENT_MODEL,
         deterministic=False,
@@ -285,22 +299,34 @@ def _init_selfplay_worker(
     )
 
     #
-    # Agents league
+    # Agents league actuellement actifs
     #
+
     _WORKER_LEAGUE_AGENTS = {}
 
-    for name, model in _WORKER_LEAGUE_MODELS.items():
+    for name, slot_name in (
+        _WORKER_LEAGUE_REGISTRY.items()
+    ):
 
-        _WORKER_LEAGUE_AGENTS[name] = ActorCriticAgent(
-            model,
-            deterministic=False,
-            temperature=0.75,
-            device="cpu",
+        model = (
+            _WORKER_LEAGUE_MODELS[
+                slot_name
+            ]
+        )
+
+        _WORKER_LEAGUE_AGENTS[name] = (
+            ActorCriticAgent(
+                model,
+                deterministic=False,
+                temperature=0.75,
+                device="cpu",
+            )
         )
 
     print(
         f"[WORKER INIT] "
-        f"{len(_WORKER_LEAGUE_AGENTS)} league agents ready",
+        f"{len(_WORKER_LEAGUE_AGENTS)} "
+        f"league agents ready",
         flush=True
     )
 
@@ -314,8 +340,8 @@ def _selfplay_worker(
     """
     Exécute les parties attribuées à un worker.
 
-    Retourne exactement le même format que
-    collect_games_batched().
+    Le registry de la league est partagé entre les processus.
+    Les modèles eux-mêmes résident dans des slots CPU partagés.
     """
 
     (
@@ -324,38 +350,82 @@ def _selfplay_worker(
         batch_size,
     ) = worker_args
 
-    print(
-        f"[WORKER {worker_id}] START "
-        f"({n_games} games)",
-        flush=True
-    )
-
     global _WORKER_CURRENT_MODEL
     global _WORKER_CURRENT_AGENT
     global _WORKER_LEAGUE_MODELS
     global _WORKER_LEAGUE_AGENTS
     global _WORKER_LEAGUE_REGISTRY
 
+    print(
+        f"[WORKER {worker_id}] START "
+        f"({n_games} games)",
+        flush=True
+    )
+
     #
     # ========================================================
-    # Synchronisation légère de la league
+    # Synchronisation de la league
     # ========================================================
     #
 
-    for name in _WORKER_LEAGUE_REGISTRY:
+    active_names = list(
+        _WORKER_LEAGUE_REGISTRY.keys()
+    )
+
+    #
+    # Ajouter les nouveaux agents
+    #
+
+    for name in active_names:
 
         if name not in _WORKER_LEAGUE_AGENTS:
 
-            model = _WORKER_LEAGUE_MODELS[name]
+            slot_name = (
+                _WORKER_LEAGUE_REGISTRY[name]
+            )
+
+            model = (
+                _WORKER_LEAGUE_MODELS[
+                    slot_name
+                ]
+            )
 
             model.eval()
 
-            _WORKER_LEAGUE_AGENTS[name] = ActorCriticAgent(
-                model,
-                deterministic=False,
-                temperature=0.75,
-                device="cpu",
+            _WORKER_LEAGUE_AGENTS[name] = (
+                ActorCriticAgent(
+                    model,
+                    deterministic=False,
+                    temperature=0.75,
+                    device="cpu",
+                )
             )
+
+    #
+    # Supprimer les agents qui ne sont plus dans
+    # le registry actif.
+    #
+    # Les modèles restent physiquement dans leurs slots,
+    # mais les anciens noms ne doivent plus être tirés.
+    #
+
+    for name in list(
+        _WORKER_LEAGUE_AGENTS.keys()
+    ):
+
+        if name not in active_names:
+
+            del _WORKER_LEAGUE_AGENTS[name]
+
+    #
+    # Sécurité
+    #
+
+    if not _WORKER_LEAGUE_AGENTS:
+
+        raise RuntimeError(
+            "Worker : league vide."
+        )
 
     #
     # ========================================================
@@ -370,9 +440,26 @@ def _selfplay_worker(
     )
 
     random.seed(seed)
+
     torch.manual_seed(seed)
 
-    current_agent = _WORKER_CURRENT_AGENT
+    #
+    # ========================================================
+    # Agents
+    # ========================================================
+    #
+
+    current_agent = (
+        _WORKER_CURRENT_AGENT
+    )
+
+    league_agents = (
+        _WORKER_LEAGUE_AGENTS
+    )
+
+    opponent_names = list(
+        league_agents.keys()
+    )
 
     #
     # ========================================================
@@ -392,12 +479,6 @@ def _selfplay_worker(
         flush=True
     )
 
-    league_agents = _WORKER_LEAGUE_AGENTS
-
-    opponent_names = list(
-        league_agents.keys()
-    )
-
     #
     # ========================================================
     # Initialisation des parties
@@ -405,6 +486,7 @@ def _selfplay_worker(
     #
 
     active_games = []
+
     completed_games = []
 
     for i in range(n_games):
@@ -414,12 +496,15 @@ def _selfplay_worker(
         )
 
         opponent_agent = (
-            league_agents[opponent_name]
+            league_agents[
+                opponent_name
+            ]
         )
 
         #
         # Alterner les couleurs.
         #
+
         if i % 2 == 0:
 
             white_agent = current_agent
@@ -478,15 +563,19 @@ def _selfplay_worker(
 
                 if agent is current_agent:
 
-                    model_games.append(game)
+                    model_games.append(
+                        game
+                    )
 
                 else:
 
-                    opponent_games.append(game)
+                    opponent_games.append(
+                        game
+                    )
 
             #
             # =================================================
-            # Coups du modèle courant
+            # Coups modèle courant
             # =================================================
             #
 
@@ -508,8 +597,10 @@ def _selfplay_worker(
                     for game in batch_games
                 ]
 
-                infos = current_agent.choose_moves(
-                    boards
+                infos = (
+                    current_agent.choose_moves(
+                        boards
+                    )
                 )
 
                 for game, info in zip(
@@ -551,7 +642,7 @@ def _selfplay_worker(
 
             #
             # =================================================
-            # Coups des adversaires
+            # Coups adversaires
             # =================================================
             #
 
@@ -630,9 +721,13 @@ def _selfplay_worker(
 
                 else:
 
-                    still_active.append(game)
+                    still_active.append(
+                        game
+                    )
 
-            active_games = still_active
+            active_games = (
+                still_active
+            )
 
     print(
         f"[WORKER {worker_id}] DONE "
@@ -1534,8 +1629,114 @@ def main():
 
     #
     # ========================================================
-    # Multiprocessing context
+    # Préparation des modèles CPU partagés
     # ========================================================
+    #
+
+    print(
+        "Preparing shared CPU models...",
+        flush=True
+    )
+
+    #
+    # Modèle courant
+    #
+    shared_current_model = _prepare_shared_model(
+        model
+    )
+
+    #
+    # ========================================================
+    # Modèles league partagés
+    #
+    # IMPORTANT :
+    #
+    # On prépare également des slots pour les futurs
+    # snapshots afin de ne jamais avoir à ajouter une entrée
+    # dans le dictionnaire partagé après le lancement du pool.
+    #
+    # Les workers connaissent donc dès le départ tous les
+    # modèles potentiellement disponibles.
+    # ========================================================
+    #
+
+    shared_league_models = {}
+
+    #
+    # Modèles déjà présents dans la league
+    #
+    for name, league_model in league.agents.items():
+
+        shared_league_models[name] = (
+            _prepare_shared_model(
+                league_model
+            )
+        )
+
+    #
+    # ========================================================
+    # Slots réservés aux futurs snapshots
+    # ========================================================
+    #
+
+    #
+    # On réserve suffisamment de slots pour toutes les epochs
+    # RL restantes.
+    #
+    # Le nom exact des snapshots créés plus bas est :
+    #
+    # league_epoch_000
+    # league_epoch_001
+    # ...
+    #
+    # Certains peuvent déjà exister dans la league.
+    #
+
+    for epoch in range(RL_EPOCHS):
+
+        name = f"league_epoch_{epoch:03d}"
+
+        if name in shared_league_models:
+            continue
+
+        #
+        # On crée un modèle de même architecture que le modèle
+        # courant.
+        #
+        placeholder = copy.deepcopy(
+            model
+        ).to("cpu")
+
+        placeholder.eval()
+
+        placeholder.share_memory()
+
+        shared_league_models[name] = (
+            placeholder
+        )
+
+    print(
+        f"Shared models ready: "
+        f"{len(shared_league_models)} league slots",
+        flush=True
+    )
+
+    #
+    # ========================================================
+    # Registry dynamique
+    # ========================================================
+    #
+
+    #
+    # IMPORTANT :
+    #
+    # Avec spawn, une simple list Python ne serait pas
+    # réellement partagée entre les processus.
+    #
+    # Manager().list() fournit ici une petite registry
+    # inter-processus.
+    #
+    # Les modèles eux-mêmes restent en mémoire partagée.
     #
 
     ctx = mp.get_context(
@@ -1544,61 +1745,26 @@ def main():
 
     manager = ctx.Manager()
 
-    #
-    # ========================================================
-    # Modèles CPU partagés — créés UNE SEULE FOIS
-    # ========================================================
-    #
-
-    print(
-        "Preparing shared CPU models..."
-    )
-
-    #
-    # Modèle courant
-    #
-    shared_current_model, _ = (
-        _prepare_shared_model(
-            model
-        )
-    )
-
-    #
-    # Modèles league
-    #
-    shared_league_models = {}
-
-    for name, league_model in (
-        league.agents.items()
-    ):
-
-        shared_league_models[name], _ = (
-            _prepare_shared_model(
-                league_model
-            )
-        )
-
-    #
-    # Registry partagé
-    #
     league_registry = manager.list(
         league.agents.keys()
     )
 
     print(
-        f"Shared models ready: "
-        f"{len(shared_league_models)} league agents"
+        f"Initial league registry: "
+        f"{list(league_registry)}",
+        flush=True
     )
 
     #
     # ========================================================
-    # Pool — créé UNE SEULE FOIS
+    # Pool
     # ========================================================
     #
 
     print(
         f"Starting {NUM_WORKERS} "
-        f"self-play workers..."
+        f"self-play workers...",
+        flush=True
     )
 
     with ctx.Pool(
@@ -1620,7 +1786,8 @@ def main():
         for epoch in range(RL_EPOCHS):
 
             print(
-                f"\n===== Epoch {epoch} ====="
+                f"\n===== Epoch {epoch} =====",
+                flush=True
             )
 
             wins = 0
@@ -1657,6 +1824,9 @@ def main():
                 result = game["result"]
                 current_white = game["current_white"]
 
+                #
+                # Résultat du point de vue du modèle courant
+                #
                 if result == "1-0":
 
                     if current_white:
@@ -1684,19 +1854,28 @@ def main():
                     white_reward = 0.0
                     black_reward = 0.0
 
+                #
+                # Rewards selon le joueur
+                #
                 rewards = []
 
                 for step in trajectory:
 
                     if step["player"]:
+
                         rewards.append(
                             white_reward
                         )
+
                     else:
+
                         rewards.append(
                             black_reward
                         )
 
+                #
+                # Returns
+                #
                 returns = compute_returns(
                     rewards,
                     gamma=0.99,
@@ -1707,12 +1886,18 @@ def main():
                     dtype=torch.float32,
                 )
 
+                #
+                # Normalisation
+                #
                 returns = (
                     returns - returns.mean()
                 ) / (
                     returns.std() + 1e-8
                 )
 
+                #
+                # Ajout au replay buffer
+                #
                 for step, ret in zip(
                     trajectory,
                     returns,
@@ -1737,14 +1922,18 @@ def main():
             ) / GAMES_PER_EPOCH
 
             print(
-                f"Replay buffer size: {len(buffer)}"
+                f"Replay buffer size: "
+                f"{len(buffer)}",
+                flush=True
             )
 
             print(
                 f"Results: W={wins} "
                 f"L={losses} "
                 f"D={draws} "
-                f"Score rate={selfplay_score_rate:.1%}"
+                f"Score rate="
+                f"{selfplay_score_rate:.1%}",
+                flush=True
             )
 
             #
@@ -1764,19 +1953,21 @@ def main():
             print(
                 f"Loss={loss:.4f} "
                 f"| Actor={actor_loss:.4f} "
-                f"| Critic={critic_loss:.4f}"
+                f"| Critic={critic_loss:.4f}",
+                flush=True
             )
 
             #
             # =================================================
-            # Sauvegardes
+            # Sauvegarde replay buffer
             # =================================================
             #
 
             if epoch % 5 == 0:
 
                 print(
-                    ">>> BEFORE replay save"
+                    ">>> BEFORE replay save",
+                    flush=True
                 )
 
                 save_replay_buffer(
@@ -1784,8 +1975,15 @@ def main():
                     epoch,
                 )
 
+            #
+            # =================================================
+            # Sauvegarde statistiques
+            # =================================================
+            #
+
             print(
-                ">>> BEFORE stats save"
+                ">>> BEFORE stats save",
+                flush=True
             )
 
             stats.save(
@@ -1794,10 +1992,17 @@ def main():
                 / "uncertainty_stats.json"
             )
 
+            #
+            # =================================================
+            # Checkpoint RL
+            # =================================================
+            #
+
             if epoch % CHECKPOINT_EVERY == 0:
 
                 print(
-                    ">>> BEFORE RL checkpoint"
+                    ">>> BEFORE RL checkpoint",
+                    flush=True
                 )
 
                 save_checkpoint(
@@ -1809,12 +2014,13 @@ def main():
 
             #
             # =================================================
-            # League snapshot
+            # Snapshot league
             # =================================================
             #
 
             print(
-                ">>> BEFORE league deepcopy"
+                ">>> BEFORE league deepcopy",
+                flush=True
             )
 
             snapshot = copy.deepcopy(
@@ -1827,59 +2033,20 @@ def main():
                 f"league_epoch_{epoch:03d}"
             )
 
+            #
+            # Ajout à la league Python principale
+            #
             league.add_agent(
                 agent_name,
                 snapshot,
             )
 
             #
-            # =================================================
-            # Ajouter le nouveau snapshot à la mémoire
-            # partagée
-            # =================================================
+            # Sauvegarde disque
             #
-
             print(
-                ">>> Preparing shared league snapshot"
-            )
-
-            shared_snapshot, _ = (
-                _prepare_shared_model(
-                    snapshot
-                )
-            )
-
-            shared_league_models[
-                agent_name
-            ] = shared_snapshot
-
-            #
-            # Ajouter son nom au registry partagé.
-            #
-            # IMPORTANT :
-            # le registry est partagé entre les workers.
-            #
-            #
-
-            if agent_name not in league_registry:
-
-                league_registry.append(
-                    agent_name
-                )
-
-            print(
-                f">>> Shared league updated: "
-                f"{agent_name}"
-            )
-
-            #
-            # =================================================
-            # Sauvegarde league
-            # =================================================
-            #
-
-            print(
-                ">>> BEFORE league save"
+                ">>> BEFORE league save",
+                flush=True
             )
 
             torch.save(
@@ -1896,17 +2063,81 @@ def main():
 
             #
             # =================================================
-            # Mise à jour du modèle courant partagé
+            # Mise à jour du snapshot dans le modèle partagé
+            # =================================================
             #
-            # IMPORTANT :
-            # les workers possèdent déjà ce même objet.
-            # On ne recrée donc PAS le pool.
+            # Le slot existe déjà depuis le lancement du pool.
             #
+            # On ne remplace PAS :
+            #
+            # shared_league_models[agent_name] = snapshot
+            #
+            # car les workers possèdent déjà une référence vers
+            # l'ancien objet partagé.
+            #
+            # On copie donc uniquement les poids dans le slot.
             # =================================================
             #
 
             print(
-                ">>> Updating shared current model"
+                f">>> Updating shared league model "
+                f"{agent_name}",
+                flush=True
+            )
+
+            shared_snapshot = (
+                shared_league_models[
+                    agent_name
+                ]
+            )
+
+            snapshot_state = (
+                snapshot.state_dict()
+            )
+
+            shared_snapshot_state = (
+                shared_snapshot.state_dict()
+            )
+
+            for key in snapshot_state:
+
+                shared_snapshot_state[
+                    key
+                ].copy_(
+                    snapshot_state[key]
+                    .detach()
+                    .cpu()
+                )
+
+            shared_snapshot.eval()
+
+            #
+            # =================================================
+            # Activation du snapshot dans la registry
+            # =================================================
+            #
+
+            if agent_name not in league_registry:
+
+                league_registry.append(
+                    agent_name
+                )
+
+            print(
+                f">>> League registry updated: "
+                f"{list(league_registry)}",
+                flush=True
+            )
+
+            #
+            # =================================================
+            # Mise à jour du modèle courant partagé
+            # =================================================
+            #
+
+            print(
+                ">>> Updating shared current model",
+                flush=True
             )
 
             current_state = (
@@ -1926,7 +2157,8 @@ def main():
                 )
 
             print(
-                ">>> Shared current model updated"
+                ">>> Shared current model updated",
+                flush=True
             )
 
             #
@@ -1957,7 +2189,8 @@ def main():
                 )
 
                 print(
-                    "New best checkpoint saved."
+                    "New best checkpoint saved.",
+                    flush=True
                 )
 
             #
@@ -1967,23 +2200,28 @@ def main():
             #
 
             print(
-                f"\n===== Epoch {epoch} summary ====="
+                f"\n===== Epoch {epoch} summary =====",
+                flush=True
             )
 
             print(
                 f"Self-play: "
-                f"{wins}W / {losses}L / {draws}D "
-                f"({selfplay_score_rate:.1%})"
+                f"{wins}W / "
+                f"{losses}L / "
+                f"{draws}D "
+                f"({selfplay_score_rate:.1%})",
+                flush=True
             )
 
     #
     # ========================================================
-    # Manager
+    # Fermeture du Manager
     # ========================================================
     #
 
     manager.shutdown()
 
-
-if __name__ == "__main__":
-    main()
+    print(
+        "\nRL training finished.",
+        flush=True
+    )
