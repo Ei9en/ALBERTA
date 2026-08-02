@@ -55,11 +55,11 @@ DEVICE = (
     else "cpu"
 )
 
-LR = 1e-4
+LR = 5e-5
 
-GAMES_PER_EPOCH = 24
+GAMES_PER_EPOCH = 600
 
-RL_EPOCHS = 3
+RL_EPOCHS = 20
 
 CHECKPOINT_EVERY = 1
 
@@ -67,7 +67,7 @@ VALUE_COEF = 0.1
 
 BATCH_SIZE = 2048
 
-SGD_EPOCHS = 3 # Nombre de passages complets sur le replay buffer pendant un epoch RL.
+SGD_EPOCHS = 1 # Nombre de passages complets sur le replay buffer pendant un epoch RL.
                # Plus élevé = plus d'updates par collecte de parties, mais risque de sur-apprentissage
                # sur les anciennes expériences.
 
