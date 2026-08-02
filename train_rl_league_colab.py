@@ -202,33 +202,6 @@ _WORKER_LEAGUE_AGENTS = None
 # Préparation des modèles CPU partagés
 # ============================================================
 
-def _add_league_worker(
-    args,
-):
-    """
-    Ajoute un nouveau modèle de league à un worker.
-
-    Le modèle est déjà en mémoire CPU partagée.
-    """
-
-    global _WORKER_LEAGUE_MODELS
-    global _WORKER_LEAGUE_AGENTS
-
-    name, model = args
-
-    _WORKER_LEAGUE_MODELS[name] = model
-
-    model.eval()
-
-    _WORKER_LEAGUE_AGENTS[name] = ActorCriticAgent(
-        model,
-        deterministic=False,
-        temperature=0.75,
-        device="cpu",
-    )
-
-    return True
-
 def _prepare_shared_model(model):
     """
     Crée une copie CPU du modèle et place ses paramètres
@@ -256,17 +229,21 @@ def _prepare_shared_model(model):
 def _init_selfplay_worker(
     current_model,
     league_models,
+    league_registry,
 ):
     """
     Initialise un worker multiprocessing.
 
-    Les modèles sont déjà en mémoire CPU partagée.
+    Les modèles sont en mémoire CPU partagée.
+    league_registry contient les noms des modèles
+    actuellement disponibles.
     """
 
     global _WORKER_CURRENT_MODEL
     global _WORKER_LEAGUE_MODELS
     global _WORKER_CURRENT_AGENT
     global _WORKER_LEAGUE_AGENTS
+    global _WORKER_LEAGUE_REGISTRY
 
     #
     # Un seul thread PyTorch par worker.
@@ -276,25 +253,24 @@ def _init_selfplay_worker(
     #
     # Modèle courant
     #
-    _WORKER_CURRENT_MODEL = (
-        current_model
-    )
-
+    _WORKER_CURRENT_MODEL = current_model
     _WORKER_CURRENT_MODEL.eval()
 
     #
-    # League
+    # Modèles league
     #
-    _WORKER_LEAGUE_MODELS = (
-        league_models
-    )
+    _WORKER_LEAGUE_MODELS = league_models
 
     for model in _WORKER_LEAGUE_MODELS.values():
-
         model.eval()
 
     #
-    # Agents
+    # Registry partagée des snapshots
+    #
+    _WORKER_LEAGUE_REGISTRY = league_registry
+
+    #
+    # Agent courant
     #
     _WORKER_CURRENT_AGENT = ActorCriticAgent(
         _WORKER_CURRENT_MODEL,
@@ -303,19 +279,19 @@ def _init_selfplay_worker(
         device="cpu",
     )
 
+    #
+    # Agents league
+    #
     _WORKER_LEAGUE_AGENTS = {}
 
     for name, model in _WORKER_LEAGUE_MODELS.items():
 
-        _WORKER_LEAGUE_AGENTS[name] = (
-            ActorCriticAgent(
-                model,
-                deterministic=False,
-                temperature=0.75,
-                device="cpu",
-            )
+        _WORKER_LEAGUE_AGENTS[name] = ActorCriticAgent(
+            model,
+            deterministic=False,
+            temperature=0.75,
+            device="cpu",
         )
-
 
 # ============================================================
 # Worker : self-play
@@ -341,8 +317,30 @@ def _selfplay_worker(
     global _WORKER_LEAGUE_AGENTS
 
     #
+    # ========================================================
+    # Synchronisation légère de la league
+    # ========================================================
+    #
+
+    for name in _WORKER_LEAGUE_REGISTRY:
+
+        if name not in _WORKER_LEAGUE_AGENTS:
+
+            model = _WORKER_LEAGUE_MODELS[name]
+
+            model.eval()
+
+            _WORKER_LEAGUE_AGENTS[name] = ActorCriticAgent(
+                model,
+                deterministic=False,
+                temperature=0.75,
+                device="cpu",
+            )
+
+    #
     # Seed différent pour chaque worker.
     #
+
     seed = (
         1000003
         + worker_id * 7919
@@ -1595,9 +1593,9 @@ def main():
             draws = 0
 
             #
-            # =========================
+            # =================================================
             # Self-play
-            # =========================
+            # =================================================
             #
 
             games = collect_games_parallel(
@@ -1613,9 +1611,9 @@ def main():
             )
 
             #
-            # =========================
+            # =================================================
             # Replay buffer
-            # =========================
+            # =================================================
             #
 
             for game in games:
@@ -1693,9 +1691,9 @@ def main():
                     )
 
             #
-            # =========================
+            # =================================================
             # Score
-            # =========================
+            # =================================================
             #
 
             selfplay_score_rate = (
@@ -1715,9 +1713,9 @@ def main():
             )
 
             #
-            # =========================
+            # =================================================
             # Training
-            # =========================
+            # =================================================
             #
 
             loss, actor_loss, critic_loss = (
@@ -1735,9 +1733,9 @@ def main():
             )
 
             #
-            # =========================
+            # =================================================
             # Sauvegardes
-            # =========================
+            # =================================================
             #
 
             if epoch % 5 == 0:
@@ -1775,9 +1773,9 @@ def main():
                 )
 
             #
-            # =========================
-            # Nouveau snapshot league
-            # =========================
+            # =================================================
+            # League snapshot
+            # =================================================
             #
 
             print(
@@ -1799,10 +1797,6 @@ def main():
                 snapshot,
             )
 
-            #
-            # Sauvegarde du snapshot
-            #
-
             print(
                 ">>> BEFORE league save"
             )
@@ -1822,6 +1816,14 @@ def main():
             #
             # =================================================
             # Mise à jour du modèle courant partagé
+            #
+            # IMPORTANT :
+            # les workers possèdent déjà ce même objet
+            # en mémoire partagée.
+            #
+            # On ne recrée donc PAS le pool.
+            # On ne fait PAS de pool.map().
+            # On copie uniquement les nouveaux poids.
             # =================================================
             #
 
@@ -1845,52 +1847,14 @@ def main():
                     .cpu()
                 )
 
-            #
-            # =================================================
-            # Nouveau snapshot partagé
-            # =================================================
-            #
-
             print(
-                ">>> Preparing shared league snapshot"
-            )
-
-            shared_league_models[
-                agent_name
-            ] = _prepare_shared_model(
-                snapshot
+                ">>> Shared current model updated"
             )
 
             #
             # =================================================
-            # IMPORTANT :
-            #
-            # On ne fait PLUS :
-            #
-            # pool.map(...)
-            #
-            # Ici.
-            #
-            # Le nouveau modèle sera propagé aux workers
-            # par la mécanique de partage utilisée dans
-            # _add_league_worker.
-            # =================================================
-            #
-
-            #
-            # On conserve uniquement la référence côté
-            # processus principal.
-            #
-
-            print(
-                f">>> Shared league updated: "
-                f"{agent_name}"
-            )
-
-            #
-            # =========================
             # Best checkpoint
-            # =========================
+            # =================================================
             #
 
             if (
@@ -1919,9 +1883,9 @@ def main():
                 )
 
             #
-            # =========================
+            # =================================================
             # Summary
-            # =========================
+            # =================================================
             #
 
             print(
