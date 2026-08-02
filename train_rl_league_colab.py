@@ -239,16 +239,16 @@ def _init_selfplay_worker(
     actuellement disponibles.
     """
 
-    print(
-        "[WORKER INIT] done",
-        flush=True
-    )
-
     global _WORKER_CURRENT_MODEL
     global _WORKER_LEAGUE_MODELS
     global _WORKER_CURRENT_AGENT
     global _WORKER_LEAGUE_AGENTS
     global _WORKER_LEAGUE_REGISTRY
+
+    print(
+        "[WORKER INIT] done",
+        flush=True
+    )
 
     #
     # Un seul thread PyTorch par worker.
@@ -270,7 +270,7 @@ def _init_selfplay_worker(
         model.eval()
 
     #
-    # Registry partagée des snapshots
+    # Registry
     #
     _WORKER_LEAGUE_REGISTRY = league_registry
 
@@ -298,6 +298,12 @@ def _init_selfplay_worker(
             device="cpu",
         )
 
+    print(
+        f"[WORKER INIT] "
+        f"{len(_WORKER_LEAGUE_AGENTS)} league agents ready",
+        flush=True
+    )
+
 # ============================================================
 # Worker : self-play
 # ============================================================
@@ -312,19 +318,23 @@ def _selfplay_worker(
     collect_games_batched().
     """
 
-    print(
-        f"[WORKER {worker_id}] START",
-        flush=True
-    )
-
     (
         n_games,
         worker_id,
         batch_size,
     ) = worker_args
 
+    print(
+        f"[WORKER {worker_id}] START "
+        f"({n_games} games)",
+        flush=True
+    )
+
+    global _WORKER_CURRENT_MODEL
     global _WORKER_CURRENT_AGENT
+    global _WORKER_LEAGUE_MODELS
     global _WORKER_LEAGUE_AGENTS
+    global _WORKER_LEAGUE_REGISTRY
 
     #
     # ========================================================
@@ -348,7 +358,9 @@ def _selfplay_worker(
             )
 
     #
-    # Seed différent pour chaque worker.
+    # ========================================================
+    # Seed
+    # ========================================================
     #
 
     seed = (
@@ -360,9 +372,13 @@ def _selfplay_worker(
     random.seed(seed)
     torch.manual_seed(seed)
 
-    current_agent = (
-        _WORKER_CURRENT_AGENT
-    )
+    current_agent = _WORKER_CURRENT_AGENT
+
+    #
+    # ========================================================
+    # Checksum
+    # ========================================================
+    #
 
     model_checksum = sum(
         p.detach().float().sum().item()
@@ -372,12 +388,11 @@ def _selfplay_worker(
     print(
         f"[WORKER {worker_id}] "
         f"current model checksum = "
-        f"{model_checksum:.10f}"
+        f"{model_checksum:.10f}",
+        flush=True
     )
 
-    league_agents = (
-        _WORKER_LEAGUE_AGENTS
-    )
+    league_agents = _WORKER_LEAGUE_AGENTS
 
     opponent_names = list(
         league_agents.keys()
@@ -448,14 +463,7 @@ def _selfplay_worker(
 
         while active_games:
 
-            #
-            # Positions du modèle courant.
-            #
             model_games = []
-
-            #
-            # Positions des adversaires.
-            #
             opponent_games = []
 
             for game in active_games:
@@ -470,15 +478,11 @@ def _selfplay_worker(
 
                 if agent is current_agent:
 
-                    model_games.append(
-                        game
-                    )
+                    model_games.append(game)
 
                 else:
 
-                    opponent_games.append(
-                        game
-                    )
+                    opponent_games.append(game)
 
             #
             # =================================================
@@ -504,10 +508,8 @@ def _selfplay_worker(
                     for game in batch_games
                 ]
 
-                infos = (
-                    current_agent.choose_moves(
-                        boards
-                    )
+                infos = current_agent.choose_moves(
+                    boards
                 )
 
                 for game, info in zip(
@@ -599,7 +601,7 @@ def _selfplay_worker(
 
             #
             # =================================================
-            # Vérification des parties
+            # Vérification
             # =================================================
             #
 
@@ -628,16 +630,17 @@ def _selfplay_worker(
 
                 else:
 
-                    still_active.append(
-                        game
-                    )
+                    still_active.append(game)
 
-            active_games = (
-                still_active
-            )
+            active_games = still_active
+
+    print(
+        f"[WORKER {worker_id}] DONE "
+        f"({len(completed_games)} games)",
+        flush=True
+    )
 
     return completed_games
-
 
 # ============================================================
 # Collecte parallèle
@@ -1531,6 +1534,18 @@ def main():
 
     #
     # ========================================================
+    # Multiprocessing context
+    # ========================================================
+    #
+
+    ctx = mp.get_context(
+        "spawn"
+    )
+
+    manager = ctx.Manager()
+
+    #
+    # ========================================================
     # Modèles CPU partagés — créés UNE SEULE FOIS
     # ========================================================
     #
@@ -1539,23 +1554,36 @@ def main():
         "Preparing shared CPU models..."
     )
 
-    shared_current_model = (
+    #
+    # Modèle courant
+    #
+    shared_current_model, _ = (
         _prepare_shared_model(
             model
         )
     )
 
+    #
+    # Modèles league
+    #
     shared_league_models = {}
 
     for name, league_model in (
         league.agents.items()
     ):
 
-        shared_league_models[name] = (
+        shared_league_models[name], _ = (
             _prepare_shared_model(
                 league_model
             )
         )
+
+    #
+    # Registry partagé
+    #
+    league_registry = manager.list(
+        league.agents.keys()
+    )
 
     print(
         f"Shared models ready: "
@@ -1568,10 +1596,6 @@ def main():
     # ========================================================
     #
 
-    ctx = mp.get_context(
-        "spawn"
-    )
-
     print(
         f"Starting {NUM_WORKERS} "
         f"self-play workers..."
@@ -1583,6 +1607,7 @@ def main():
         initargs=(
             shared_current_model,
             shared_league_models,
+            league_registry,
         ),
     ) as pool:
 
@@ -1807,6 +1832,52 @@ def main():
                 snapshot,
             )
 
+            #
+            # =================================================
+            # Ajouter le nouveau snapshot à la mémoire
+            # partagée
+            # =================================================
+            #
+
+            print(
+                ">>> Preparing shared league snapshot"
+            )
+
+            shared_snapshot, _ = (
+                _prepare_shared_model(
+                    snapshot
+                )
+            )
+
+            shared_league_models[
+                agent_name
+            ] = shared_snapshot
+
+            #
+            # Ajouter son nom au registry partagé.
+            #
+            # IMPORTANT :
+            # le registry est partagé entre les workers.
+            #
+            #
+
+            if agent_name not in league_registry:
+
+                league_registry.append(
+                    agent_name
+                )
+
+            print(
+                f">>> Shared league updated: "
+                f"{agent_name}"
+            )
+
+            #
+            # =================================================
+            # Sauvegarde league
+            # =================================================
+            #
+
             print(
                 ">>> BEFORE league save"
             )
@@ -1828,12 +1899,9 @@ def main():
             # Mise à jour du modèle courant partagé
             #
             # IMPORTANT :
-            # les workers possèdent déjà ce même objet
-            # en mémoire partagée.
-            #
+            # les workers possèdent déjà ce même objet.
             # On ne recrée donc PAS le pool.
-            # On ne fait PAS de pool.map().
-            # On copie uniquement les nouveaux poids.
+            #
             # =================================================
             #
 
@@ -1907,6 +1975,14 @@ def main():
                 f"{wins}W / {losses}L / {draws}D "
                 f"({selfplay_score_rate:.1%})"
             )
+
+    #
+    # ========================================================
+    # Manager
+    # ========================================================
+    #
+
+    manager.shutdown()
 
 
 if __name__ == "__main__":
