@@ -193,6 +193,69 @@ _WORKER_LEAGUE_AGENTS = None
 # Préparation des modèles CPU partagés
 # ============================================================
 
+def _sync_selfplay_worker(
+    sync_args,
+):
+    """
+    Met à jour l'état des modèles utilisés par un worker.
+
+    Cette fonction est exécutée une fois par worker.
+    """
+
+    global _WORKER_CURRENT_MODEL
+    global _WORKER_LEAGUE_MODELS
+    global _WORKER_CURRENT_AGENT
+    global _WORKER_LEAGUE_AGENTS
+
+    (
+        current_model,
+        league_models,
+    ) = sync_args
+
+    #
+    # Modèle courant
+    #
+
+    _WORKER_CURRENT_MODEL = current_model
+
+    _WORKER_CURRENT_MODEL.eval()
+
+    #
+    # League
+    #
+
+    _WORKER_LEAGUE_MODELS = league_models
+
+    for model in _WORKER_LEAGUE_MODELS.values():
+
+        model.eval()
+
+    #
+    # Agents
+    #
+
+    _WORKER_CURRENT_AGENT = ActorCriticAgent(
+        _WORKER_CURRENT_MODEL,
+        deterministic=False,
+        temperature=0.75,
+        device="cpu",
+    )
+
+    _WORKER_LEAGUE_AGENTS = {}
+
+    for name, model in _WORKER_LEAGUE_MODELS.items():
+
+        _WORKER_LEAGUE_AGENTS[name] = (
+            ActorCriticAgent(
+                model,
+                deterministic=False,
+                temperature=0.75,
+                device="cpu",
+            )
+        )
+
+    return True
+
 def _prepare_shared_model(model):
     """
     Crée une copie CPU du modèle et place ses paramètres
@@ -589,6 +652,9 @@ def _selfplay_worker(
 # ============================================================
 
 def collect_games_parallel(
+    pool,
+    shared_current_model,
+    shared_league_models,
     model,
     league,
     n_games,
@@ -596,31 +662,15 @@ def collect_games_parallel(
     num_workers=12,
     batch_size=256,
 ):
-    """
-    Self-play multiprocessing CPU.
-
-    Le self-play est distribué sur num_workers processus.
-
-    Le calcul de U reste dans le processus principal
-    et utilise DEVICE / A100.
-    """
 
     selfplay_start = time.perf_counter()
 
-    #
-    # ========================================================
-    # Vérifications
-    # ========================================================
-    #
-
     if len(league) == 0:
-
         raise RuntimeError(
             "La league est vide."
         )
 
     if n_games <= 0:
-
         return []
 
     num_workers = min(
@@ -630,41 +680,21 @@ def collect_games_parallel(
 
     #
     # ========================================================
-    # Préparation des modèles CPU partagés
+    # Synchronisation des workers
     # ========================================================
     #
 
-    print(
-        "Preparing shared CPU models..."
+    sync_args = (
+        shared_current_model,
+        shared_league_models,
     )
 
     #
-    # Copie CPU du modèle courant.
+    # On envoie exactement une tâche par worker.
     #
-    shared_current_model = (
-        _prepare_shared_model(
-            model
-        )
-    )
-
-    #
-    # Copies CPU des modèles de la league.
-    #
-    shared_league_models = {}
-
-    for name, league_model in (
-        league.agents.items()
-    ):
-
-        shared_league_models[name] = (
-            _prepare_shared_model(
-                league_model
-            )
-        )
-
-    print(
-        f"Shared models ready: "
-        f"{len(shared_league_models)} league agents"
+    pool.map(
+        _sync_selfplay_worker,
+        [sync_args] * num_workers,
     )
 
     #
@@ -708,53 +738,31 @@ def collect_games_parallel(
 
     #
     # ========================================================
-    # Multiprocessing
+    # Self-play
     # ========================================================
     #
 
-    ctx = mp.get_context(
-        "spawn"
-    )
-
     completed_games = []
 
-    print(
-        f"Starting {num_workers} "
-        f"self-play workers..."
+    progress = tqdm(
+        total=n_games,
+        desc="League self-play",
     )
 
-    with ctx.Pool(
-        processes=num_workers,
-        initializer=_init_selfplay_worker,
-        initargs=(
-            shared_current_model,
-            shared_league_models,
-        ),
-    ) as pool:
+    for worker_games in pool.imap_unordered(
+        _selfplay_worker,
+        worker_args,
+    ):
 
-        progress = tqdm(
-            total=n_games,
-            desc="League self-play",
+        completed_games.extend(
+            worker_games
         )
 
-        #
-        # imap_unordered permet de récupérer
-        # les résultats au fur et à mesure.
-        #
-        for worker_games in pool.imap_unordered(
-            _selfplay_worker,
-            worker_args,
-        ):
+        progress.update(
+            len(worker_games)
+        )
 
-            completed_games.extend(
-                worker_games
-            )
-
-            progress.update(
-                len(worker_games)
-            )
-
-        progress.close()
+    progress.close()
 
     #
     # ========================================================
@@ -799,7 +807,7 @@ def collect_games_parallel(
 
     #
     # ========================================================
-    # Calcul U — processus principal / A100
+    # Calcul U
     # ========================================================
     #
 
@@ -1520,7 +1528,7 @@ def save_replay_buffer(
         path
     )
 
-### Main Loop ###
+# Main Loop
 
 def main():
 
@@ -1534,290 +1542,374 @@ def main():
 
     best_loss = None
 
+    NUM_WORKERS = 12
+    SELFPLAY_BATCH_SIZE = 256
+
     #
-    # =========================
-    # RL loop
-    # =========================
+    # ========================================================
+    # Modèles CPU partagés — créés UNE SEULE FOIS
+    # ========================================================
     #
 
-    for epoch in range(RL_EPOCHS):
+    print(
+        "Preparing shared CPU models..."
+    )
 
-        print(
-            f"\n===== Epoch {epoch} ====="
+    shared_current_model = (
+        _prepare_shared_model(
+            model
+        )
+    )
+
+    shared_league_models = {}
+
+    for name, league_model in (
+        league.agents.items()
+    ):
+
+        shared_league_models[name] = (
+            _prepare_shared_model(
+                league_model
+            )
         )
 
+    print(
+        f"Shared models ready: "
+        f"{len(shared_league_models)} league agents"
+    )
+
+    #
+    # ========================================================
+    # Pool — créé UNE SEULE FOIS
+    # ========================================================
+    #
+
+    ctx = mp.get_context(
+        "spawn"
+    )
+
+    print(
+        f"Starting {NUM_WORKERS} "
+        f"self-play workers..."
+    )
+
+    with ctx.Pool(
+        processes=NUM_WORKERS,
+        initializer=_init_selfplay_worker,
+        initargs=(
+            shared_current_model,
+            shared_league_models,
+        ),
+    ) as pool:
+
         #
-        # IMPORTANT :
-        # On repart uniquement avec les données
-        # collectées pendant cet epoch.
-        #
-        # Cela rend l'entraînement beaucoup plus
-        # proche d'un régime on-policy.
-        #
-        # clear du buffer à chaque époque en enlevant le commentaire à chaque époque
-        # buffer.clear() 
-
-        wins = 0
-        losses = 0
-        draws = 0
-
-        #
-        # =========================
-        # Self-play collection
-        # =========================
+        # ====================================================
+        # RL loop
+        # ====================================================
         #
 
-        games = collect_games_parallel(
-            model,
-            league,
-            GAMES_PER_EPOCH,
-            stats,
-            num_workers=12,
-            batch_size=256,
-        )
+        for epoch in range(RL_EPOCHS):
 
-        #
-        # =========================
-        # Replay buffer
-        # =========================
-        #
+            print(
+                f"\n===== Epoch {epoch} ====="
+            )
 
-        for game in games:
-
-            trajectory = game["trajectory"]
-            result = game["result"]
-            current_white = game["current_white"]
-
-            if result == "1-0":
-
-                if current_white:
-                    wins += 1
-                else:
-                    losses += 1
-
-                white_reward = 1.0
-                black_reward = -1.0
-
-            elif result == "0-1":
-
-                if current_white:
-                    losses += 1
-                else:
-                    wins += 1
-
-                white_reward = -1.0
-                black_reward = 1.0
-
-            else:
-
-                draws += 1
-
-                white_reward = 0.0
-                black_reward = 0.0
+            wins = 0
+            losses = 0
+            draws = 0
 
             #
-            # Reward du point de vue du joueur
-            # ayant joué chaque position.
+            # =========================
+            # Self-play
+            # =========================
             #
-            rewards = []
 
-            for step in trajectory:
+            games = collect_games_parallel(
+                pool,
+                shared_current_model,
+                shared_league_models,
+                model,
+                league,
+                GAMES_PER_EPOCH,
+                stats,
+                num_workers=NUM_WORKERS,
+                batch_size=SELFPLAY_BATCH_SIZE,
+            )
 
-                if step["player"]:
-                    rewards.append(
-                        white_reward
-                    )
+            #
+            # =========================
+            # Replay buffer
+            # =========================
+            #
+
+            for game in games:
+
+                trajectory = game["trajectory"]
+                result = game["result"]
+                current_white = game["current_white"]
+
+                if result == "1-0":
+
+                    if current_white:
+                        wins += 1
+                    else:
+                        losses += 1
+
+                    white_reward = 1.0
+                    black_reward = -1.0
+
+                elif result == "0-1":
+
+                    if current_white:
+                        losses += 1
+                    else:
+                        wins += 1
+
+                    white_reward = -1.0
+                    black_reward = 1.0
 
                 else:
-                    rewards.append(
-                        black_reward
-                    )
 
-            returns = compute_returns(
-                rewards,
-                gamma=0.99,
-            )
+                    draws += 1
 
-            returns = torch.as_tensor(
-                returns,
-                dtype=torch.float32,
-            )
+                    white_reward = 0.0
+                    black_reward = 0.0
 
-            returns = (
-                returns - returns.mean()
-            ) / (
-                returns.std() + 1e-8
-            )
+                rewards = []
 
-            for step, ret in zip(
-                trajectory,
-                returns,
-            ):
+                for step in trajectory:
 
-                buffer.add(
-                    step["fen"],
-                    step["action"],
-                    step["legal_moves"],
-                    ret,
+                    if step["player"]:
+                        rewards.append(
+                            white_reward
+                        )
+                    else:
+                        rewards.append(
+                            black_reward
+                        )
+
+                returns = compute_returns(
+                    rewards,
+                    gamma=0.99,
                 )
 
-        #
-        # =========================
-        # Self-play score
-        # Win = 1.0 ; Draw = 0.5 : Lose = 0.0
-        # =========================
-        #
+                returns = torch.as_tensor(
+                    returns,
+                    dtype=torch.float32,
+                )
 
-        selfplay_score_rate = (
-            wins
-            + 0.5 * draws
-        ) / GAMES_PER_EPOCH
+                returns = (
+                    returns - returns.mean()
+                ) / (
+                    returns.std() + 1e-8
+                )
 
-        print(
-            f"Replay buffer size: {len(buffer)}"
-        )
+                for step, ret in zip(
+                    trajectory,
+                    returns,
+                ):
 
-        print(
-            f"Results: W={wins} "
-            f"L={losses} "
-            f"D={draws} "
-            f"Score rate={selfplay_score_rate:.1%}"
-        )
+                    buffer.add(
+                        step["fen"],
+                        step["action"],
+                        step["legal_moves"],
+                        ret,
+                    )
 
-        #
-        # =========================
-        # Training
-        # =========================
-        #
+            #
+            # =========================
+            # Score
+            # =========================
+            #
 
-        loss, actor_loss, critic_loss = train_epoch(
-            model,
-            optimizer,
-            buffer,
-        )
+            selfplay_score_rate = (
+                wins
+                + 0.5 * draws
+            ) / GAMES_PER_EPOCH
 
-        print(
-            f"Loss={loss:.4f} "
-            f"| Actor={actor_loss:.4f} "
-            f"| Critic={critic_loss:.4f}"
-        )
-
-        #
-        # =========================
-        # Save replay buffer
-        # =========================
-        #
-
-        if epoch % 5 == 0:
-
-            save_replay_buffer(
-                buffer,
-                epoch,
+            print(
+                f"Replay buffer size: {len(buffer)}"
             )
 
-        #
-        # =========================
-        # Save active learning stats
-        # =========================
-        #
-
-        stats.save(
-            PROJECT_ROOT
-            / "checkpoints"
-            / "uncertainty_stats.json"
-        )
-
-        #
-        # =========================
-        # RL checkpoint
-        # =========================
-        #
-
-        if epoch % CHECKPOINT_EVERY == 0:
-
-            save_checkpoint(
-                model,
-                optimizer,
-                epoch,
-                loss,
+            print(
+                f"Results: W={wins} "
+                f"L={losses} "
+                f"D={draws} "
+                f"Score rate={selfplay_score_rate:.1%}"
             )
 
-        #
-        # =========================
-        # League snapshot
-        # =========================
-        #
+            #
+            # =========================
+            # Training
+            # =========================
+            #
 
-        snapshot = copy.deepcopy(
-            model
-        ).to(DEVICE)
+            loss, actor_loss, critic_loss = (
+                train_epoch(
+                    model,
+                    optimizer,
+                    buffer,
+                )
+            )
 
-        snapshot.eval()
+            print(
+                f"Loss={loss:.4f} "
+                f"| Actor={actor_loss:.4f} "
+                f"| Critic={critic_loss:.4f}"
+            )
 
-        agent_name = (
-            f"league_epoch_{epoch:03d}"
-        )
+            #
+            # =========================
+            # Sauvegardes
+            # =========================
+            #
 
-        league.add_agent(
-            agent_name,
-            snapshot,
-        )
+            if epoch % 5 == 0:
 
-        torch.save(
-            {
-                "epoch": epoch,
-                "model_state_dict": snapshot.state_dict(),
-            },
-            PROJECT_ROOT
-            / "checkpoints"
-            / "league"
-            / f"{agent_name}.pt"
-        )
+                save_replay_buffer(
+                    buffer,
+                    epoch,
+                )
 
-        #
-        # =========================
-        # Best checkpoint
-        # =========================
-        #
+            stats.save(
+                PROJECT_ROOT
+                / "checkpoints"
+                / "uncertainty_stats.json"
+            )
 
-        if (
-            best_loss is None
-            or loss < best_loss
-        ):
+            if epoch % CHECKPOINT_EVERY == 0:
 
-            best_loss = loss
+                save_checkpoint(
+                    model,
+                    optimizer,
+                    epoch,
+                    loss,
+                )
+
+            #
+            # =========================
+            # League snapshot
+            # =========================
+            #
+
+            snapshot = copy.deepcopy(
+                model
+            ).to(DEVICE)
+
+            snapshot.eval()
+
+            agent_name = (
+                f"league_epoch_{epoch:03d}"
+            )
+
+            league.add_agent(
+                agent_name,
+                snapshot,
+            )
 
             torch.save(
                 {
                     "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "loss": loss,
+                    "model_state_dict":
+                        snapshot.state_dict(),
                 },
                 PROJECT_ROOT
                 / "checkpoints"
-                / "rl_best.pt",
+                / "league"
+                / f"{agent_name}.pt"
+            )
+
+            #
+            # =================================================
+            # Mise à jour des modèles CPU partagés
+            # =================================================
+            #
+
+            #
+            # 1. Mise à jour du modèle courant
+            #
+            # On ne recrée PAS le modèle.
+            # On copie seulement ses poids.
+            #
+
+            current_state = (
+                model.state_dict()
+            )
+
+            shared_state = (
+                shared_current_model.state_dict()
+            )
+
+            for key in current_state:
+
+                shared_state[key].copy_(
+                    current_state[key]
+                    .detach()
+                    .cpu()
+                )
+
+            #
+            # 2. Nouveau snapshot league
+            #
+
+            shared_league_models[
+                agent_name
+            ] = _prepare_shared_model(
+                snapshot
+            )
+
+            #
+            # 3. Important :
+            # synchronisation effective des workers
+            # au début du prochain collect_games_parallel().
+            #
+
+            #
+            # =========================
+            # Best checkpoint
+            # =========================
+            #
+
+            if (
+                best_loss is None
+                or loss < best_loss
+            ):
+
+                best_loss = loss
+
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state_dict":
+                            model.state_dict(),
+                        "optimizer_state_dict":
+                            optimizer.state_dict(),
+                        "loss": loss,
+                    },
+                    PROJECT_ROOT
+                    / "checkpoints"
+                    / "rl_best.pt",
+                )
+
+                print(
+                    "New best checkpoint saved."
+                )
+
+            #
+            # =========================
+            # Summary
+            # =========================
+            #
+
+            print(
+                f"\n===== Epoch {epoch} summary ====="
             )
 
             print(
-                "New best checkpoint saved."
+                f"Self-play: "
+                f"{wins}W / {losses}L / {draws}D "
+                f"({selfplay_score_rate:.1%})"
             )
-
-        #
-        # =========================
-        # Evaluation summary
-        # =========================
-        #
-
-        print(
-            f"\n===== Epoch {epoch} summary ====="
-        )
-
-        print(
-            f"Self-play: "
-            f"{wins}W / {losses}L / {draws}D "
-            f"({selfplay_score_rate:.1%})"
-        )
 
 
 if __name__ == "__main__":
