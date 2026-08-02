@@ -56,19 +56,19 @@ DEVICE = (
     else "cpu"
 )
 
-LR = 1e-5
+LR = 1e-4
 
-GAMES_PER_EPOCH = 150
+GAMES_PER_EPOCH = 450
 
-RL_EPOCHS = 10
+RL_EPOCHS = 20
 
-CHECKPOINT_EVERY = 5
+CHECKPOINT_EVERY = 2
 
 VALUE_COEF = 0.1
 
-BATCH_SIZE = 1024
+BATCH_SIZE = 2048
 
-SGD_EPOCHS = 1 # Nombre de passages complets sur le replay buffer pendant un epoch RL.
+SGD_EPOCHS = 3 # Nombre de passages complets sur le replay buffer pendant un epoch RL.
                # Plus élevé = plus d'updates par collecte de parties, mais risque de sur-apprentissage
                # sur les anciennes expériences.
 
@@ -367,6 +367,379 @@ def collect_games(
 
     return games
 
+# Batched version
+
+def collect_games_batched(
+    model,
+    league,
+    n_games,
+    stats,
+    batch_size=2048,
+):
+
+    model.eval()
+
+    selfplay_start = time.perf_counter()
+
+    #
+    # =========================
+    # Initialisation des parties
+    # =========================
+    #
+
+    active_games = []
+
+    completed_games = []
+
+    for i in range(n_games):
+
+        opponent_name, opponent = (
+            league.sample_opponent()
+        )
+
+        #
+        # Alterner les couleurs
+        #
+        if i % 2 == 0:
+
+            white_agent = ActorCriticAgent(
+                model,
+                deterministic=False,
+                temperature=0.75,
+                device=DEVICE,
+            )
+
+            black_agent = ActorCriticAgent(
+                opponent,
+                deterministic=False,
+                temperature=0.75,
+                device=DEVICE,
+            )
+
+            current_is_white = True
+
+        else:
+
+            white_agent = ActorCriticAgent(
+                opponent,
+                deterministic=False,
+                temperature=0.75,
+                device=DEVICE,
+            )
+
+            black_agent = ActorCriticAgent(
+                model,
+                deterministic=False,
+                temperature=0.75,
+                device=DEVICE,
+            )
+
+            current_is_white = False
+
+        active_games.append(
+            {
+                "board": chess.variant.AtomicBoard(),
+                "white": white_agent,
+                "black": black_agent,
+                "current_white": current_is_white,
+                "trajectory": [],
+            }
+        )
+
+
+    #
+    # =========================
+    # Self-play parallèle
+    # =========================
+    #
+
+    with torch.no_grad():
+
+        while active_games:
+
+            #
+            # Positions nécessitant un coup
+            # du modèle RL courant.
+            #
+            model_games = []
+
+            #
+            # Positions nécessitant un coup
+            # d'un adversaire.
+            #
+            opponent_games = []
+
+            for game in active_games:
+
+                board = game["board"]
+
+                agent = (
+                    game["white"]
+                    if board.turn
+                    else game["black"]
+                )
+
+                if agent.model is model:
+                    model_games.append(game)
+
+                else:
+                    opponent_games.append(game)
+
+
+            #
+            # =========================
+            # Coups du modèle courant
+            # =========================
+            #
+
+            for start in range(
+                0,
+                len(model_games),
+                batch_size,
+            ):
+
+                batch_games = model_games[
+                    start:start + batch_size
+                ]
+
+                boards = [
+                    game["board"]
+                    for game in batch_games
+                ]
+
+                #
+                # Attention :
+                # choose_moves() utilise le modèle
+                # contenu dans l'agent.
+                #
+                # Ici tous les batch_games utilisent
+                # le même modèle RL, donc on peut
+                # utiliser directement l'agent RL.
+                #
+
+                model_agent = (
+                    batch_games[0]["white"]
+                    if batch_games[0]["white"].model is model
+                    else batch_games[0]["black"]
+                )
+
+                infos = model_agent.choose_moves(
+                    boards
+                )
+
+                for game, info in zip(
+                    batch_games,
+                    infos,
+                ):
+
+                    board = game["board"]
+
+                    game["trajectory"].append(
+                        {
+                            "fen": board.fen(),
+                            "action": info["action"],
+                            "player": board.turn,
+                            "value": info["value"],
+                            "entropy": info["entropy"],
+                            "legal_moves": [
+                                move.uci()
+                                for move
+                                in board.legal_moves
+                            ],
+                        }
+                    )
+
+                    board.push(
+                        info["move"]
+                    )
+
+
+            #
+            # =========================
+            # Coups des adversaires
+            # =========================
+            #
+
+            for game in opponent_games:
+
+                board = game["board"]
+
+                agent = (
+                    game["white"]
+                    if board.turn
+                    else game["black"]
+                )
+
+                info = agent.choose_move(
+                    board
+                )
+
+                game["trajectory"].append(
+                    {
+                        "fen": board.fen(),
+                        "action": info["action"],
+                        "player": board.turn,
+                        "value": info["value"],
+                        "entropy": info["entropy"],
+                        "legal_moves": [
+                            move.uci()
+                            for move
+                            in board.legal_moves
+                        ],
+                    }
+                )
+
+                board.push(
+                    info["move"]
+                )
+
+
+            #
+            # =========================
+            # Retirer les parties terminées
+            # =========================
+            #
+
+            still_active = []
+
+            for game in active_games:
+
+                board = game["board"]
+
+                if board.is_game_over():
+
+                    completed_games.append(
+                        {
+                            "trajectory":
+                                game["trajectory"],
+
+                            "result":
+                                board.result(),
+
+                            "current_white":
+                                game["current_white"],
+                        }
+                    )
+
+                else:
+
+                    still_active.append(
+                        game
+                    )
+
+            active_games = still_active
+
+
+    #
+    # =========================
+    # Statistiques temporelles
+    # =========================
+    #
+
+    selfplay_time = (
+        time.perf_counter()
+        - selfplay_start
+    )
+
+    total_positions = sum(
+        len(game["trajectory"])
+        for game in completed_games
+    )
+
+    print(
+        f"Self-play time: "
+        f"{selfplay_time:.2f}s "
+        f"({selfplay_time / n_games:.2f}s/game)"
+    )
+
+    print(
+        f"Self-play positions: "
+        f"{total_positions} "
+        f"({total_positions / n_games:.1f}/game)"
+    )
+
+
+    #
+    # =========================
+    # Calcul U
+    # =========================
+    #
+
+    uncertainty_start = time.perf_counter()
+
+    all_steps = []
+
+    for game in completed_games:
+
+        result = game["result"]
+
+        for step in game["trajectory"]:
+
+            step["_game_result"] = result
+
+            all_steps.append(step)
+
+
+    if all_steps:
+
+        boards = [
+            chess.variant.AtomicBoard(
+                step["fen"]
+            )
+            for step in all_steps
+        ]
+
+        x = encode_boards(
+            boards
+        ).to(DEVICE)
+
+        uncertainties = (
+            league.uncertainty_batch(
+                x,
+                current_model=model,
+            )
+        )
+
+        for step, U in zip(
+            all_steps,
+            uncertainties,
+        ):
+
+            U = U.item()
+
+            H = step.get(
+                "entropy",
+                0.0,
+            )
+
+            HU = H * U
+
+            step["uncertainty"] = U
+            step["HU"] = HU
+
+            stats.add(
+                step["fen"],
+                step["action"],
+                H,
+                U,
+                HU,
+                step["_game_result"],
+            )
+
+
+    uncertainty_time = (
+        time.perf_counter()
+        - uncertainty_start
+    )
+
+    print(
+        f"U computation time: "
+        f"{uncertainty_time:.2f}s "
+        f"({uncertainty_time / max(len(all_steps), 1) * 1000:.2f}ms/position)"
+    )
+
+    return completed_games
+
 ### Fixed Evaluation ###
 
 def evaluate_against_agent(
@@ -510,7 +883,6 @@ def train_epoch(
             module,
             torch.nn.BatchNorm2d
         ):
-
             module.eval()
 
 
@@ -528,9 +900,11 @@ def train_epoch(
         // BATCH_SIZE
     )
 
-    total_loss = 0
-    total_actor = 0
-    total_critic = 0
+
+    total_loss = 0.0
+    total_actor = 0.0
+    total_critic = 0.0
+
 
     total_updates = (
         TRAIN_STEPS
@@ -545,11 +919,9 @@ def train_epoch(
     #
 
     max_advantage = 0.0
-
     mean_abs_advantage = 0.0
 
     max_log_prob = 0.0
-
     mean_abs_log_prob = 0.0
 
     diagnostic_samples = 0
@@ -560,6 +932,12 @@ def train_epoch(
         desc="Training",
     )
 
+
+    #
+    # =========================
+    # SGD epochs
+    # =========================
+    #
 
     for epoch in range(
         SGD_EPOCHS
@@ -574,210 +952,259 @@ def train_epoch(
             )
 
 
+            #
+            # =========================
+            # Boards
+            # =========================
+            #
+
+            boards = [
+                chess.variant.AtomicBoard(
+                    step["fen"]
+                )
+                for step in batch
+            ]
+
+
+            #
+            # =========================
+            # Vectorized encoding
+            # =========================
+            #
+
+            x = encode_boards(
+                boards
+            ).to(DEVICE)
+
+
+            #
+            # =========================
+            # Forward pass
+            # =========================
+            #
+
             optimizer.zero_grad()
 
-
-            loss = 0
-
-            actor_loss_sum = 0
-
-            critic_loss_sum = 0
+            policy, value = model(x)
 
 
-            for step in batch:
+            #
+            # =========================
+            # Targets
+            # =========================
+            #
 
-                #
-                # =========================
-                # Encoding
-                # =========================
-                #
-
-                x = (
-                    encode_fen(
-                        step["fen"]
-                    )
-                    .unsqueeze(0)
-                    .to(DEVICE)
-                )
-
-
-                #
-                # =========================
-                # Forward
-                # =========================
-                #
-
-                policy, value = model(x)
+            target = torch.tensor(
+                [
+                    step["return"]
+                    for step in batch
+                ],
+                dtype=torch.float32,
+                device=DEVICE,
+            ).view(-1, 1)
 
 
-                target = torch.tensor(
-                    [[step["return"]]],
-                    device=DEVICE,
-                )
+            #
+            # =========================
+            # Advantage
+            # =========================
+            #
+
+            raw_advantage = (
+                target
+                - value.detach()
+            )
 
 
-                #
-                # =========================
-                # Raw advantage
-                # =========================
-                #
+            #
+            # Diagnostics
+            # =========================
+            #
 
-                raw_advantage = (
-                    target
-                    - value.detach()
-                )
+            batch_mean_abs_advantage = (
+                raw_advantage
+                .abs()
+                .mean()
+                .item()
+            )
 
-
-                raw_advantage_value = (
-                    raw_advantage.item()
-                )
-
-
-                max_advantage = max(
-                    max_advantage,
-                    abs(
-                        raw_advantage_value
-                    ),
-                )
+            batch_max_advantage = (
+                raw_advantage
+                .abs()
+                .max()
+                .item()
+            )
 
 
-                mean_abs_advantage += abs(
-                    raw_advantage_value
-                )
+            mean_abs_advantage += (
+                batch_mean_abs_advantage
+                * BATCH_SIZE
+            )
+
+            max_advantage = max(
+                max_advantage,
+                batch_max_advantage,
+            )
 
 
-                diagnostic_samples += 1
+            #
+            # =========================
+            # Legal move mask
+            # =========================
+            #
+
+            legal_mask = torch.zeros(
+                (
+                    BATCH_SIZE,
+                    policy.shape[1],
+                ),
+                dtype=torch.bool,
+                device=DEVICE,
+            )
 
 
-                #
-                # =========================
-                # Legal moves
-                # =========================
-                #
+            actions = torch.empty(
+                BATCH_SIZE,
+                dtype=torch.long,
+                device=DEVICE,
+            )
+
+
+            for i, step in enumerate(batch):
 
                 legal_indices = [
                     ACTION_TO_INDEX[m]
-                    for m in step[
-                        "legal_moves"
-                    ]
+                    for m in step["legal_moves"]
                 ]
 
-
-                legal_logits = policy[
-                    0,
+                legal_mask[
+                    i,
                     legal_indices
-                ]
+                ] = True
 
-
-                log_probs = F.log_softmax(
-                    legal_logits,
-                    dim=0,
-                )
-
-
-                action_position = (
-                    legal_indices.index(
-                        step["action"]
-                    )
-                )
-
-
-                #
-                # =========================
-                # Selected log probability
-                # =========================
-                #
-
-                selected_log_prob = (
-                    log_probs[
-                        action_position
-                    ].item()
-                )
-
-
-                max_log_prob = max(
-                    max_log_prob,
-                    abs(
-                        selected_log_prob
-                    ),
-                )
-
-
-                mean_abs_log_prob += abs(
-                    selected_log_prob
-                )
-
-
-                #
-                # =========================
-                # Advantage clipping
-                # =========================
-                #
-
-                advantage = torch.clamp(
-                    raw_advantage,
-                    -5,
-                    5,
-                )
-
-
-                #
-                # =========================
-                # Actor loss
-                # =========================
-                #
-
-                actor_loss = (
-                    -log_probs[
-                        action_position
-                    ]
-                    *
-                    advantage.squeeze()
-                )
-
-
-                #
-                # =========================
-                # Critic loss
-                # =========================
-                #
-
-                critic_loss = F.mse_loss(
-                    value,
-                    target,
-                )
-
-
-                #
-                # =========================
-                # Total loss
-                # =========================
-                #
-
-                loss += (
-                    actor_loss
-                    +
-                    VALUE_COEF
-                    * critic_loss
-                )
-
-
-                actor_loss_sum += (
-                    actor_loss.item()
-                )
-
-                critic_loss_sum += (
-                    critic_loss.item()
-                )
+                actions[i] = step["action"]
 
 
             #
             # =========================
-            # Mean batch loss
+            # Mask illegal moves
             # =========================
             #
 
-            loss /= BATCH_SIZE
+            legal_logits = policy.masked_fill(
+                ~legal_mask,
+                float("-inf"),
+            )
+
+
+            #
+            # =========================
+            # Log probabilities
+            # =========================
+            #
+
+            log_probs = F.log_softmax(
+                legal_logits,
+                dim=1,
+            )
+
+
+            selected_log_probs = (
+                log_probs
+                .gather(
+                    1,
+                    actions.unsqueeze(1),
+                )
+                .squeeze(1)
+            )
+
+
+            #
+            # =========================
+            # Log probability diagnostics
+            # =========================
+            #
+
+            batch_mean_abs_log_prob = (
+                selected_log_probs
+                .abs()
+                .mean()
+                .item()
+            )
+
+            batch_max_log_prob = (
+                selected_log_probs
+                .abs()
+                .max()
+                .item()
+            )
+
+
+            mean_abs_log_prob += (
+                batch_mean_abs_log_prob
+                * BATCH_SIZE
+            )
+
+            max_log_prob = max(
+                max_log_prob,
+                batch_max_log_prob,
+            )
+
+
+            diagnostic_samples += (
+                BATCH_SIZE
+            )
+
+
+            #
+            # =========================
+            # Advantage clipping
+            # =========================
+            #
+
+            advantage = torch.clamp(
+                raw_advantage,
+                -5,
+                5,
+            ).squeeze(1)
+
+
+            #
+            # =========================
+            # Actor loss
+            # =========================
+            #
+
+            actor_loss = (
+                -selected_log_probs
+                * advantage
+            ).mean()
+
+
+            #
+            # =========================
+            # Critic loss
+            # =========================
+            #
+
+            critic_loss = F.mse_loss(
+                value,
+                target,
+            )
+
+
+            #
+            # =========================
+            # Total loss
+            # =========================
+            #
+
+            loss = (
+                actor_loss
+                +
+                VALUE_COEF
+                * critic_loss
+            )
 
 
             #
@@ -791,7 +1218,7 @@ def train_epoch(
 
             #
             # =========================
-            # Gradient diagnostics
+            # Gradient clipping
             # =========================
             #
 
@@ -805,8 +1232,9 @@ def train_epoch(
 
 
             #
-            # Afficher uniquement
-            # le premier update
+            # =========================
+            # First update diagnostics
+            # =========================
             #
 
             if (
@@ -821,17 +1249,17 @@ def train_epoch(
                 print(
                     f"Raw advantage:"
                     f" mean|A|="
-                    f"{mean_abs_advantage / diagnostic_samples:.4f}"
+                    f"{batch_mean_abs_advantage:.4f}"
                     f" | max|A|="
-                    f"{max_advantage:.4f}"
+                    f"{batch_max_advantage:.4f}"
                 )
 
                 print(
                     f"Selected logπ:"
                     f" mean|logπ|="
-                    f"{mean_abs_log_prob / diagnostic_samples:.4f}"
+                    f"{batch_mean_abs_log_prob:.4f}"
                     f" | max|logπ|="
-                    f"{max_log_prob:.4f}"
+                    f"{batch_max_log_prob:.4f}"
                 )
 
                 print(
@@ -861,13 +1289,11 @@ def train_epoch(
             )
 
             total_actor += (
-                actor_loss_sum
-                / BATCH_SIZE
+                actor_loss.item()
             )
 
             total_critic += (
-                critic_loss_sum
-                / BATCH_SIZE
+                critic_loss.item()
             )
 
 
@@ -961,7 +1387,7 @@ def main():
     model, optimizer, league = load_model()
 
     buffer = ReplayBuffer(
-        capacity=20000
+        capacity=100000
     )
 
     stats = UncertaintyStats()
@@ -997,7 +1423,8 @@ def main():
         # Cela rend l'entraînement beaucoup plus
         # proche d'un régime on-policy.
         #
-        buffer.clear()
+        # clear du buffer à chaque époque en enlevant le commentaire à chaque époque
+        # buffer.clear() 
 
         wins = 0
         losses = 0
@@ -1009,7 +1436,7 @@ def main():
         # =========================
         #
 
-        games = collect_games(
+        games = collect_games_batched(
             model,
             league,
             GAMES_PER_EPOCH,
