@@ -17,7 +17,6 @@ import torch
 import torch.nn.functional as F
 from torch.optim import Adam
 
-from src.encoding import encode_fen
 from src.encoding import encode_boards
 
 from src.models.resnet import ChessResNet
@@ -58,11 +57,11 @@ DEVICE = (
 
 LR = 1e-4
 
-GAMES_PER_EPOCH = 450
+GAMES_PER_EPOCH = 24
 
-RL_EPOCHS = 20
+RL_EPOCHS = 3
 
-CHECKPOINT_EVERY = 2
+CHECKPOINT_EVERY = 1
 
 VALUE_COEF = 0.1
 
@@ -171,220 +170,168 @@ def load_model():
     return model, optimizer, league
 
 ### Self-play Collection ###
+# Batched version
 
-def collect_games(
-    model,
-    league,
-    n_games,
-    stats,
+# ============================================================
+# Parallel self-play
+# ============================================================
+
+import multiprocessing as mp
+import random
+
+
+#
+# Modèles accessibles par les workers.
+#
+_WORKER_CURRENT_MODEL = None
+_WORKER_LEAGUE_MODELS = None
+_WORKER_CURRENT_AGENT = None
+_WORKER_LEAGUE_AGENTS = None
+
+
+# ============================================================
+# Préparation des modèles CPU partagés
+# ============================================================
+
+def _prepare_shared_model(model):
+    """
+    Crée une copie CPU du modèle et place ses paramètres
+    en mémoire partagée.
+
+    Une seule copie physique est ainsi utilisée par les
+    différents processus workers.
+    """
+
+    cpu_model = copy.deepcopy(
+        model
+    ).to("cpu")
+
+    cpu_model.eval()
+
+    cpu_model.share_memory()
+
+    return cpu_model
+
+
+# ============================================================
+# Initialisation d'un worker
+# ============================================================
+
+def _init_selfplay_worker(
+    current_model,
+    league_models,
 ):
+    """
+    Initialise un worker multiprocessing.
 
-    model.eval()
+    Les modèles sont déjà en mémoire CPU partagée.
+    """
 
-    games = []
-
-    #
-    # Timer self-play
-    #
-    selfplay_start = time.perf_counter()
-
-    with torch.no_grad():
-
-        #
-        # =========================
-        # Self-play
-        # =========================
-        #
-
-        for i in tqdm(
-            range(n_games),
-            desc="League self-play",
-        ):
-
-            opponent_name, opponent = (
-                league.sample_opponent()
-            )
-
-            #
-            # Alterner les couleurs
-            #
-            if i % 2 == 0:
-
-                white_agent = ActorCriticAgent(
-                    model,
-                    deterministic=False,
-                    temperature=0.75,
-                    device=DEVICE,
-                )
-
-                black_agent = ActorCriticAgent(
-                    opponent,
-                    deterministic=False,
-                    temperature=0.75,
-                    device=DEVICE,
-                )
-
-                current_is_white = True
-
-            else:
-
-                white_agent = ActorCriticAgent(
-                    opponent,
-                    deterministic=False,
-                    temperature=0.75,
-                    device=DEVICE,
-                )
-
-                black_agent = ActorCriticAgent(
-                    model,
-                    deterministic=False,
-                    temperature=0.75,
-                    device=DEVICE,
-                )
-
-                current_is_white = False
-
-
-            game = SelfPlayGame(
-                white_agent,
-                black_agent,
-            )
-
-            trajectory, result = game.play()
-
-            #
-            # Garder les informations nécessaires.
-            #
-            games.append(
-                {
-                    "trajectory": trajectory,
-                    "result": result,
-                    "current_white": current_is_white,
-                }
-            )
-
-
-    selfplay_time = (
-        time.perf_counter()
-        - selfplay_start
-    )
-
-    total_positions = sum(
-        len(game["trajectory"])
-        for game in games
-    )
-
-    print(
-        f"Self-play time: {selfplay_time:.2f}s "
-        f"({selfplay_time / n_games:.2f}s/game)"
-    )
-
-    print(
-        f"Self-play positions: {total_positions} "
-        f"({total_positions / n_games:.1f}/game)"
-    )
-
+    global _WORKER_CURRENT_MODEL
+    global _WORKER_LEAGUE_MODELS
+    global _WORKER_CURRENT_AGENT
+    global _WORKER_LEAGUE_AGENTS
 
     #
-    # =========================
-    # Calcul U global
-    # =========================
+    # Un seul thread PyTorch par worker.
     #
+    torch.set_num_threads(1)
 
-    uncertainty_start = time.perf_counter()
+    #
+    # Modèle courant
+    #
+    _WORKER_CURRENT_MODEL = (
+        current_model
+    )
 
-    all_steps = []
+    _WORKER_CURRENT_MODEL.eval()
 
-    for game in games:
+    #
+    # League
+    #
+    _WORKER_LEAGUE_MODELS = (
+        league_models
+    )
 
-        result = game["result"]
+    for model in _WORKER_LEAGUE_MODELS.values():
 
-        for step in game["trajectory"]:
+        model.eval()
 
-            step["_game_result"] = result
+    #
+    # Agents
+    #
+    _WORKER_CURRENT_AGENT = ActorCriticAgent(
+        _WORKER_CURRENT_MODEL,
+        deterministic=False,
+        temperature=0.75,
+        device="cpu",
+    )
 
-            all_steps.append(step)
+    _WORKER_LEAGUE_AGENTS = {}
 
+    for name, model in _WORKER_LEAGUE_MODELS.items():
 
-    if all_steps:
-
-        boards = [
-            chess.variant.AtomicBoard(
-                step["fen"]
-            )
-            for step in all_steps
-        ]
-
-        x = encode_boards(
-            boards
-        ).to(DEVICE)
-
-        uncertainties = (
-            league.uncertainty_batch(
-                x,
-                current_model=model,
+        _WORKER_LEAGUE_AGENTS[name] = (
+            ActorCriticAgent(
+                model,
+                deterministic=False,
+                temperature=0.75,
+                device="cpu",
             )
         )
 
-        for step, U in zip(
-            all_steps,
-            uncertainties,
-        ):
 
-            U = U.item()
+# ============================================================
+# Worker : self-play
+# ============================================================
 
-            H = step.get(
-                "entropy",
-                0.0,
-            )
-
-            HU = H * U
-
-            step["uncertainty"] = U
-            step["HU"] = HU
-
-            stats.add(
-                step["fen"],
-                step["action"],
-                H,
-                U,
-                HU,
-                step["_game_result"],
-            )
-
-
-    uncertainty_time = (
-        time.perf_counter()
-        - uncertainty_start
-    )
-
-    print(
-        f"U computation time: "
-        f"{uncertainty_time:.2f}s "
-        f"({uncertainty_time / max(len(all_steps), 1) * 1000:.2f}ms/position)"
-    )
-
-
-    return games
-
-# Batched version
-
-def collect_games_batched(
-    model,
-    league,
-    n_games,
-    stats,
-    batch_size=256,
+def _selfplay_worker(
+    worker_args,
 ):
+    """
+    Exécute les parties attribuées à un worker.
 
-    model.eval()
+    Retourne exactement le même format que
+    collect_games_batched().
+    """
 
-    selfplay_start = time.perf_counter()
+    (
+        n_games,
+        worker_id,
+        batch_size,
+    ) = worker_args
+
+    global _WORKER_CURRENT_AGENT
+    global _WORKER_LEAGUE_AGENTS
 
     #
-    # =========================
+    # Seed différent pour chaque worker.
+    #
+    seed = (
+        1000003
+        + worker_id * 7919
+        + random.randrange(100000000)
+    )
+
+    random.seed(seed)
+    torch.manual_seed(seed)
+
+    current_agent = (
+        _WORKER_CURRENT_AGENT
+    )
+
+    league_agents = (
+        _WORKER_LEAGUE_AGENTS
+    )
+
+    opponent_names = list(
+        league_agents.keys()
+    )
+
+    #
+    # ========================================================
     # Initialisation des parties
-    # =========================
+    # ========================================================
     #
 
     active_games = []
@@ -392,79 +339,69 @@ def collect_games_batched(
 
     for i in range(n_games):
 
-        opponent_name, opponent = (
-            league.sample_opponent()
+        opponent_name = random.choice(
+            opponent_names
         )
 
+        opponent_agent = (
+            league_agents[opponent_name]
+        )
+
+        #
+        # Alterner les couleurs.
+        #
         if i % 2 == 0:
 
-            white_agent = ActorCriticAgent(
-                model,
-                deterministic=False,
-                temperature=0.75,
-                device=DEVICE,
-            )
-
-            black_agent = ActorCriticAgent(
-                opponent,
-                deterministic=False,
-                temperature=0.75,
-                device=DEVICE,
-            )
+            white_agent = current_agent
+            black_agent = opponent_agent
 
             current_is_white = True
 
         else:
 
-            white_agent = ActorCriticAgent(
-                opponent,
-                deterministic=False,
-                temperature=0.75,
-                device=DEVICE,
-            )
-
-            black_agent = ActorCriticAgent(
-                model,
-                deterministic=False,
-                temperature=0.75,
-                device=DEVICE,
-            )
+            white_agent = opponent_agent
+            black_agent = current_agent
 
             current_is_white = False
 
         active_games.append(
             {
-                "board": chess.variant.AtomicBoard(),
-                "white": white_agent,
-                "black": black_agent,
-                "current_white": current_is_white,
-                "trajectory": [],
+                "board":
+                    chess.variant.AtomicBoard(),
+
+                "white":
+                    white_agent,
+
+                "black":
+                    black_agent,
+
+                "current_white":
+                    current_is_white,
+
+                "trajectory":
+                    [],
             }
         )
 
     #
-    # =========================
+    # ========================================================
     # Self-play
-    # =========================
+    # ========================================================
     #
 
     with torch.no_grad():
 
         while active_games:
 
+            #
+            # Positions du modèle courant.
+            #
             model_games = []
 
             #
-            # Dictionnaire :
-            # modèle adverse -> parties utilisant ce modèle
+            # Positions des adversaires.
             #
-            opponent_groups = {}
-
-            #
-            # =========================
-            # Classification des parties
-            # =========================
-            #
+            opponent_games = []
 
             for game in active_games:
 
@@ -476,29 +413,22 @@ def collect_games_batched(
                     else game["black"]
                 )
 
-                if agent.model is model:
+                if agent is current_agent:
 
-                    model_games.append(game)
+                    model_games.append(
+                        game
+                    )
 
                 else:
 
-                    model_id = id(agent.model)
-
-                    if model_id not in opponent_groups:
-
-                        opponent_groups[model_id] = {
-                            "agent": agent,
-                            "games": [],
-                        }
-
-                    opponent_groups[
-                        model_id
-                    ]["games"].append(game)
+                    opponent_games.append(
+                        game
+                    )
 
             #
-            # =========================
+            # =================================================
             # Coups du modèle courant
-            # =========================
+            # =================================================
             #
 
             for start in range(
@@ -511,19 +441,18 @@ def collect_games_batched(
                     start:start + batch_size
                 ]
 
+                if not batch_games:
+                    continue
+
                 boards = [
                     game["board"]
                     for game in batch_games
                 ]
 
-                model_agent = (
-                    batch_games[0]["white"]
-                    if batch_games[0]["white"].model is model
-                    else batch_games[0]["black"]
-                )
-
-                infos = model_agent.choose_moves(
-                    boards
+                infos = (
+                    current_agent.choose_moves(
+                        boards
+                    )
                 )
 
                 for game, info in zip(
@@ -535,15 +464,27 @@ def collect_games_batched(
 
                     game["trajectory"].append(
                         {
-                            "fen": board.fen(),
-                            "action": info["action"],
-                            "player": board.turn,
-                            "value": info["value"],
-                            "entropy": info["entropy"],
-                            "legal_moves": [
-                                move.uci()
-                                for move in board.legal_moves
-                            ],
+                            "fen":
+                                board.fen(),
+
+                            "action":
+                                info["action"],
+
+                            "player":
+                                board.turn,
+
+                            "value":
+                                info["value"],
+
+                            "entropy":
+                                info["entropy"],
+
+                            "legal_moves":
+                                [
+                                    move.uci()
+                                    for move
+                                    in board.legal_moves
+                                ],
                         }
                     )
 
@@ -552,69 +493,59 @@ def collect_games_batched(
                     )
 
             #
-            # =========================
+            # =================================================
             # Coups des adversaires
-            # =========================
-            #
-            # IMPORTANT :
-            # On batch maintenant les parties
-            # qui utilisent le même snapshot.
+            # =================================================
             #
 
-            for group in opponent_groups.values():
+            for game in opponent_games:
 
-                agent = group["agent"]
-                games = group["games"]
+                board = game["board"]
 
-                for start in range(
-                    0,
-                    len(games),
-                    batch_size,
-                ):
+                agent = (
+                    game["white"]
+                    if board.turn
+                    else game["black"]
+                )
 
-                    batch_games = games[
-                        start:start + batch_size
-                    ]
+                info = agent.choose_move(
+                    board
+                )
 
-                    boards = [
-                        game["board"]
-                        for game in batch_games
-                    ]
+                game["trajectory"].append(
+                    {
+                        "fen":
+                            board.fen(),
 
-                    infos = agent.choose_moves(
-                        boards
-                    )
+                        "action":
+                            info["action"],
 
-                    for game, info in zip(
-                        batch_games,
-                        infos,
-                    ):
+                        "player":
+                            board.turn,
 
-                        board = game["board"]
+                        "value":
+                            info["value"],
 
-                        game["trajectory"].append(
-                            {
-                                "fen": board.fen(),
-                                "action": info["action"],
-                                "player": board.turn,
-                                "value": info["value"],
-                                "entropy": info["entropy"],
-                                "legal_moves": [
-                                    move.uci()
-                                    for move
-                                    in board.legal_moves
-                                ],
-                            }
-                        )
+                        "entropy":
+                            info["entropy"],
 
-                        board.push(
-                            info["move"]
-                        )
+                        "legal_moves":
+                            [
+                                move.uci()
+                                for move
+                                in board.legal_moves
+                            ],
+                    }
+                )
+
+                board.push(
+                    info["move"]
+                )
 
             #
-            # =========================
-            # Parties terminées
-            # =========================
+            # =================================================
+            # Vérification des parties
+            # =================================================
             #
 
             still_active = []
@@ -634,20 +565,214 @@ def collect_games_batched(
                                 board.result(),
 
                             "current_white":
-                                game["current_white"],
+                                game[
+                                    "current_white"
+                                ],
                         }
                     )
 
                 else:
 
-                    still_active.append(game)
+                    still_active.append(
+                        game
+                    )
 
-            active_games = still_active
+            active_games = (
+                still_active
+            )
+
+    return completed_games
+
+
+# ============================================================
+# Collecte parallèle
+# ============================================================
+
+def collect_games_parallel(
+    model,
+    league,
+    n_games,
+    stats,
+    num_workers=12,
+    batch_size=256,
+):
+    """
+    Self-play multiprocessing CPU.
+
+    Le self-play est distribué sur num_workers processus.
+
+    Le calcul de U reste dans le processus principal
+    et utilise DEVICE / A100.
+    """
+
+    selfplay_start = time.perf_counter()
 
     #
-    # =========================
-    # Statistiques temporelles
-    # =========================
+    # ========================================================
+    # Vérifications
+    # ========================================================
+    #
+
+    if len(league) == 0:
+
+        raise RuntimeError(
+            "La league est vide."
+        )
+
+    if n_games <= 0:
+
+        return []
+
+    num_workers = min(
+        num_workers,
+        n_games,
+    )
+
+    #
+    # ========================================================
+    # Préparation des modèles CPU partagés
+    # ========================================================
+    #
+
+    print(
+        "Preparing shared CPU models..."
+    )
+
+    #
+    # Copie CPU du modèle courant.
+    #
+    shared_current_model = (
+        _prepare_shared_model(
+            model
+        )
+    )
+
+    #
+    # Copies CPU des modèles de la league.
+    #
+    shared_league_models = {}
+
+    for name, league_model in (
+        league.agents.items()
+    ):
+
+        shared_league_models[name] = (
+            _prepare_shared_model(
+                league_model
+            )
+        )
+
+    print(
+        f"Shared models ready: "
+        f"{len(shared_league_models)} league agents"
+    )
+
+    #
+    # ========================================================
+    # Répartition des parties
+    # ========================================================
+    #
+
+    base_games = (
+        n_games // num_workers
+    )
+
+    remainder = (
+        n_games % num_workers
+    )
+
+    worker_args = []
+
+    for worker_id in range(
+        num_workers
+    ):
+
+        worker_games = (
+            base_games
+            + (
+                1
+                if worker_id < remainder
+                else 0
+            )
+        )
+
+        if worker_games > 0:
+
+            worker_args.append(
+                (
+                    worker_games,
+                    worker_id,
+                    batch_size,
+                )
+            )
+
+    #
+    # ========================================================
+    # Multiprocessing
+    # ========================================================
+    #
+
+    ctx = mp.get_context(
+        "spawn"
+    )
+
+    completed_games = []
+
+    print(
+        f"Starting {num_workers} "
+        f"self-play workers..."
+    )
+
+    with ctx.Pool(
+        processes=num_workers,
+        initializer=_init_selfplay_worker,
+        initargs=(
+            shared_current_model,
+            shared_league_models,
+        ),
+    ) as pool:
+
+        progress = tqdm(
+            total=n_games,
+            desc="League self-play",
+        )
+
+        #
+        # imap_unordered permet de récupérer
+        # les résultats au fur et à mesure.
+        #
+        for worker_games in pool.imap_unordered(
+            _selfplay_worker,
+            worker_args,
+        ):
+
+            completed_games.extend(
+                worker_games
+            )
+
+            progress.update(
+                len(worker_games)
+            )
+
+        progress.close()
+
+    #
+    # ========================================================
+    # Vérification
+    # ========================================================
+    #
+
+    if len(completed_games) != n_games:
+
+        raise RuntimeError(
+            f"Nombre de parties incorrect : "
+            f"{len(completed_games)} / {n_games}"
+        )
+
+    #
+    # ========================================================
+    # Statistiques self-play
+    # ========================================================
     #
 
     selfplay_time = (
@@ -673,12 +798,14 @@ def collect_games_batched(
     )
 
     #
-    # =========================
-    # Calcul U
-    # =========================
+    # ========================================================
+    # Calcul U — processus principal / A100
+    # ========================================================
     #
 
-    uncertainty_start = time.perf_counter()
+    uncertainty_start = (
+        time.perf_counter()
+    )
 
     all_steps = []
 
@@ -690,7 +817,9 @@ def collect_games_batched(
 
             step["_game_result"] = result
 
-            all_steps.append(step)
+            all_steps.append(
+                step
+            )
 
     if all_steps:
 
@@ -1407,15 +1536,6 @@ def main():
 
     #
     # =========================
-    # Fixed evaluation agents
-    # =========================
-    #
-
-    bc4 = league.agents["bc_epoch_4"]
-    bc5 = league.agents["bc_epoch_5"]
-
-    #
-    # =========================
     # RL loop
     # =========================
     #
@@ -1447,11 +1567,13 @@ def main():
         # =========================
         #
 
-        games = collect_games_batched(
+        games = collect_games_parallel(
             model,
             league,
             GAMES_PER_EPOCH,
             stats,
+            num_workers=12,
+            batch_size=256,
         )
 
         #
@@ -1542,7 +1664,7 @@ def main():
         #
         # =========================
         # Self-play score
-        # Draw = 0.5
+        # Win = 1.0 ; Draw = 0.5 : Lose = 0.0
         # =========================
         #
 
@@ -1579,49 +1701,6 @@ def main():
             f"| Actor={actor_loss:.4f} "
             f"| Critic={critic_loss:.4f}"
         )
-
-        #
-        # =========================
-        # Fixed evaluation
-        # =========================
-        #
-
-        print(
-            "\n--- Evaluation vs BC4 ---"
-        )
-
-        evaluation_bc4 = evaluate_against_agent(
-            model,
-            bc4,
-            n_games=100,
-        )
-
-        print(
-            "\n--- Evaluation vs BC5 ---"
-        )
-
-        evaluation_bc5 = evaluate_against_agent(
-            model,
-            bc5,
-            n_games=100,
-        )
-
-        #
-        # =========================
-        # Evaluation scores
-        # Draw = 0.5
-        # =========================
-        #
-
-        bc4_score_rate = (
-            evaluation_bc4["wins"]
-            + 0.5 * evaluation_bc4["draws"]
-        ) / 100
-
-        bc5_score_rate = (
-            evaluation_bc5["wins"]
-            + 0.5 * evaluation_bc5["draws"]
-        ) / 100
 
         #
         # =========================
@@ -1738,22 +1817,6 @@ def main():
             f"Self-play: "
             f"{wins}W / {losses}L / {draws}D "
             f"({selfplay_score_rate:.1%})"
-        )
-
-        print(
-            f"vs BC4: "
-            f"{evaluation_bc4['wins']}W / "
-            f"{evaluation_bc4['losses']}L / "
-            f"{evaluation_bc4['draws']}D "
-            f"({bc4_score_rate:.1%})"
-        )
-
-        print(
-            f"vs BC5: "
-            f"{evaluation_bc5['wins']}W / "
-            f"{evaluation_bc5['losses']}L / "
-            f"{evaluation_bc5['draws']}D "
-            f"({bc5_score_rate:.1%})"
         )
 
 
