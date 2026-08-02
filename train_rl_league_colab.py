@@ -71,6 +71,15 @@ SGD_EPOCHS = 1 # Nombre de passages complets sur le replay buffer pendant un epo
                # Plus élevé = plus d'updates par collecte de parties, mais risque de sur-apprentissage
                # sur les anciennes expériences.
 
+def model_checksum(model):
+    total = 0.0
+
+    with torch.no_grad():
+        for param in model.parameters():
+            total += param.detach().float().sum().item()
+
+    return total
+
 ### Model Loading ###
 
 def load_bc_agent(
@@ -345,6 +354,17 @@ def _selfplay_worker(
 
     current_agent = (
         _WORKER_CURRENT_AGENT
+    )
+
+    model_checksum = sum(
+        p.detach().float().sum().item()
+        for p in _WORKER_CURRENT_MODEL.parameters()
+    )
+
+    print(
+        f"[WORKER {worker_id}] "
+        f"current model checksum = "
+        f"{model_checksum:.10f}"
     )
 
     league_agents = (
@@ -637,6 +657,12 @@ def collect_games_parallel(
     if n_games <= 0:
         return []
 
+    #
+    # ========================================================
+    # Nombre de workers réellement utilisés
+    # ========================================================
+    #
+
     num_workers = min(
         num_workers,
         n_games,
@@ -644,42 +670,46 @@ def collect_games_parallel(
 
     #
     # ========================================================
-    # Répartition des parties
+    # Répartition en petits lots
+    #
+    # IMPORTANT :
+    #
+    # On ne donne plus 50 parties d'un coup à chaque worker.
+    #
+    # Les processus restent vivants et conservent leurs modèles,
+    # mais plusieurs tâches successives leur sont distribuées.
+    #
+    # Cela permet à tqdm de recevoir régulièrement des résultats.
     # ========================================================
     #
 
-    base_games = (
-        n_games // num_workers
-    )
-
-    remainder = (
-        n_games % num_workers
+    games_per_task = max(
+        5,
+        n_games // (num_workers * 4),
     )
 
     worker_args = []
 
-    for worker_id in range(
-        num_workers
-    ):
+    remaining = n_games
+    task_id = 0
 
-        worker_games = (
-            base_games
-            + (
-                1
-                if worker_id < remainder
-                else 0
+    while remaining > 0:
+
+        task_games = min(
+            games_per_task,
+            remaining,
+        )
+
+        worker_args.append(
+            (
+                task_games,
+                task_id,
+                batch_size,
             )
         )
 
-        if worker_games > 0:
-
-            worker_args.append(
-                (
-                    worker_games,
-                    worker_id,
-                    batch_size,
-                )
-            )
+        remaining -= task_games
+        task_id += 1
 
     #
     # ========================================================
@@ -697,6 +727,7 @@ def collect_games_parallel(
     for worker_games in pool.imap_unordered(
         _selfplay_worker,
         worker_args,
+        chunksize=1,
     ):
 
         completed_games.extend(
@@ -1710,13 +1741,20 @@ def main():
             #
 
             if epoch % 5 == 0:
-                print(">>> BEFORE replay save")
+
+                print(
+                    ">>> BEFORE replay save"
+                )
+
                 save_replay_buffer(
                     buffer,
                     epoch,
                 )
 
-            print(">>> BEFORE stats save")
+            print(
+                ">>> BEFORE stats save"
+            )
+
             stats.save(
                 PROJECT_ROOT
                 / "checkpoints"
@@ -1724,7 +1762,11 @@ def main():
             )
 
             if epoch % CHECKPOINT_EVERY == 0:
-                print(">>> BEFORE RL checkpoint")
+
+                print(
+                    ">>> BEFORE RL checkpoint"
+                )
+
                 save_checkpoint(
                     model,
                     optimizer,
@@ -1734,11 +1776,14 @@ def main():
 
             #
             # =========================
-            # League snapshot
+            # Nouveau snapshot league
             # =========================
             #
 
-            print(">>> BEFORE league deepcopy")
+            print(
+                ">>> BEFORE league deepcopy"
+            )
+
             snapshot = copy.deepcopy(
                 model
             ).to(DEVICE)
@@ -1754,7 +1799,14 @@ def main():
                 snapshot,
             )
 
-            print(">>> BEFORE league save")
+            #
+            # Sauvegarde du snapshot
+            #
+
+            print(
+                ">>> BEFORE league save"
+            )
+
             torch.save(
                 {
                     "epoch": epoch,
@@ -1767,20 +1819,15 @@ def main():
                 / f"{agent_name}.pt"
             )
 
-            print(">>> END OF EPOCH")
-
             #
             # =================================================
-            # Mise à jour des modèles CPU partagés
+            # Mise à jour du modèle courant partagé
             # =================================================
             #
 
-            #
-            # 1. Mise à jour du modèle courant
-            #
-            # On ne recrée PAS le modèle.
-            # On copie seulement ses poids.
-            #
+            print(
+                ">>> Updating shared current model"
+            )
 
             current_state = (
                 model.state_dict()
@@ -1799,8 +1846,14 @@ def main():
                 )
 
             #
-            # 2. Nouveau snapshot league
+            # =================================================
+            # Nouveau snapshot partagé
+            # =================================================
             #
+
+            print(
+                ">>> Preparing shared league snapshot"
+            )
 
             shared_league_models[
                 agent_name
@@ -1809,18 +1862,29 @@ def main():
             )
 
             #
-            # 3. Important 
-            # Ajout du nouveau snapshot aux workers
+            # =================================================
+            # IMPORTANT :
+            #
+            # On ne fait PLUS :
+            #
+            # pool.map(...)
+            #
+            # Ici.
+            #
+            # Le nouveau modèle sera propagé aux workers
+            # par la mécanique de partage utilisée dans
+            # _add_league_worker.
+            # =================================================
             #
 
-            pool.map(
-                _add_league_worker,
-                [
-                    (
-                        agent_name,
-                        shared_league_models[agent_name],
-                    )
-                ] * NUM_WORKERS,
+            #
+            # On conserve uniquement la référence côté
+            # processus principal.
+            #
+
+            print(
+                f">>> Shared league updated: "
+                f"{agent_name}"
             )
 
             #
