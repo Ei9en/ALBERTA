@@ -193,66 +193,30 @@ _WORKER_LEAGUE_AGENTS = None
 # Préparation des modèles CPU partagés
 # ============================================================
 
-def _sync_selfplay_worker(
-    sync_args,
+def _add_league_worker(
+    args,
 ):
     """
-    Met à jour l'état des modèles utilisés par un worker.
+    Ajoute un nouveau modèle de league à un worker.
 
-    Cette fonction est exécutée une fois par worker.
+    Le modèle est déjà en mémoire CPU partagée.
     """
 
-    global _WORKER_CURRENT_MODEL
     global _WORKER_LEAGUE_MODELS
-    global _WORKER_CURRENT_AGENT
     global _WORKER_LEAGUE_AGENTS
 
-    (
-        current_model,
-        league_models,
-    ) = sync_args
+    name, model = args
 
-    #
-    # Modèle courant
-    #
+    _WORKER_LEAGUE_MODELS[name] = model
 
-    _WORKER_CURRENT_MODEL = current_model
+    model.eval()
 
-    _WORKER_CURRENT_MODEL.eval()
-
-    #
-    # League
-    #
-
-    _WORKER_LEAGUE_MODELS = league_models
-
-    for model in _WORKER_LEAGUE_MODELS.values():
-
-        model.eval()
-
-    #
-    # Agents
-    #
-
-    _WORKER_CURRENT_AGENT = ActorCriticAgent(
-        _WORKER_CURRENT_MODEL,
+    _WORKER_LEAGUE_AGENTS[name] = ActorCriticAgent(
+        model,
         deterministic=False,
         temperature=0.75,
         device="cpu",
     )
-
-    _WORKER_LEAGUE_AGENTS = {}
-
-    for name, model in _WORKER_LEAGUE_MODELS.items():
-
-        _WORKER_LEAGUE_AGENTS[name] = (
-            ActorCriticAgent(
-                model,
-                deterministic=False,
-                temperature=0.75,
-                device="cpu",
-            )
-        )
 
     return True
 
@@ -676,25 +640,6 @@ def collect_games_parallel(
     num_workers = min(
         num_workers,
         n_games,
-    )
-
-    #
-    # ========================================================
-    # Synchronisation des workers
-    # ========================================================
-    #
-
-    sync_args = (
-        shared_current_model,
-        shared_league_models,
-    )
-
-    #
-    # On envoie exactement une tâche par worker.
-    #
-    pool.map(
-        _sync_selfplay_worker,
-        [sync_args] * num_workers,
     )
 
     #
@@ -1765,12 +1710,13 @@ def main():
             #
 
             if epoch % 5 == 0:
-
+                print(">>> BEFORE replay save")
                 save_replay_buffer(
                     buffer,
                     epoch,
                 )
 
+            print(">>> BEFORE stats save")
             stats.save(
                 PROJECT_ROOT
                 / "checkpoints"
@@ -1778,7 +1724,7 @@ def main():
             )
 
             if epoch % CHECKPOINT_EVERY == 0:
-
+                print(">>> BEFORE RL checkpoint")
                 save_checkpoint(
                     model,
                     optimizer,
@@ -1792,6 +1738,7 @@ def main():
             # =========================
             #
 
+            print(">>> BEFORE league deepcopy")
             snapshot = copy.deepcopy(
                 model
             ).to(DEVICE)
@@ -1807,6 +1754,7 @@ def main():
                 snapshot,
             )
 
+            print(">>> BEFORE league save")
             torch.save(
                 {
                     "epoch": epoch,
@@ -1818,6 +1766,8 @@ def main():
                 / "league"
                 / f"{agent_name}.pt"
             )
+
+            print(">>> END OF EPOCH")
 
             #
             # =================================================
@@ -1859,10 +1809,19 @@ def main():
             )
 
             #
-            # 3. Important :
-            # synchronisation effective des workers
-            # au début du prochain collect_games_parallel().
+            # 3. Important 
+            # Ajout du nouveau snapshot aux workers
             #
+
+            pool.map(
+                _add_league_worker,
+                [
+                    (
+                        agent_name,
+                        shared_league_models[agent_name],
+                    )
+                ] * NUM_WORKERS,
+            )
 
             #
             # =========================
