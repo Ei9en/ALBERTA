@@ -71,15 +71,6 @@ SGD_EPOCHS = 1 # Nombre de passages complets sur le replay buffer pendant un epo
                # Plus élevé = plus d'updates par collecte de parties, mais risque de sur-apprentissage
                # sur les anciennes expériences.
 
-def model_checksum(model):
-    total = 0.0
-
-    with torch.no_grad():
-        for param in model.parameters():
-            total += param.detach().float().sum().item()
-
-    return total
-
 ### Model Loading ###
 
 def load_bc_agent(
@@ -245,11 +236,6 @@ def _init_selfplay_worker(
     global _WORKER_LEAGUE_AGENTS
     global _WORKER_LEAGUE_REGISTRY
 
-    print(
-        "[WORKER INIT] done",
-        flush=True
-    )
-
     #
     # Un seul thread PyTorch par worker.
     #
@@ -302,12 +288,6 @@ def _init_selfplay_worker(
             device="cpu",
         )
 
-    print(
-        f"[WORKER INIT] "
-        f"{len(_WORKER_LEAGUE_AGENTS)} league agents ready",
-        flush=True
-    )
-
 # ============================================================
 # Worker : self-play
 # ============================================================
@@ -334,12 +314,6 @@ def _selfplay_worker(
         worker_id,
         batch_size,
     ) = worker_args
-
-    print(
-        f"[WORKER {worker_id}] START "
-        f"({n_games} games)",
-        flush=True
-    )
 
     global _WORKER_CURRENT_MODEL
     global _WORKER_CURRENT_AGENT
@@ -388,25 +362,6 @@ def _selfplay_worker(
     torch.manual_seed(seed)
 
     current_agent = _WORKER_CURRENT_AGENT
-
-    #
-    # ========================================================
-    # Checksum
-    # ========================================================
-    #
-
-    model_checksum = sum(
-        p.detach().float().sum().item()
-        for p in _WORKER_CURRENT_MODEL.parameters()
-    )
-
-    print(
-        f"[WORKER {worker_id}] "
-        f"current model checksum = "
-        f"{model_checksum:.10f}",
-        flush=True
-    )
-
     league_agents = _WORKER_LEAGUE_AGENTS
 
     #
@@ -589,62 +544,72 @@ def _selfplay_worker(
 
             #
             # =================================================
-            # Coups des adversaires — BATCHÉS PAR AGENT
+            # Coups des adversaires — batchés
             # =================================================
             #
 
-            opponent_batches = {}
+            for start in range(
+                0,
+                len(opponent_games),
+                batch_size,
+            ):
 
-            for game in opponent_games:
+                batch_games = opponent_games[
+                    start:start + batch_size
+                ]
 
-                board = game["board"]
-
-                agent = (
-                    game["white"]
-                    if board.turn
-                    else game["black"]
-                )
-
-                opponent_batches.setdefault(
-                    agent,
-                    []
-                ).append(game)
-
-            #
-            # Un forward batché par agent league.
-            #
-            for agent, games_batch in opponent_batches.items():
-
-                if not games_batch:
+                if not batch_games:
                     continue
 
+                boards = [
+                    game["board"]
+                    for game in batch_games
+                ]
+
                 #
-                # Respecter également batch_size.
+                # Tous les adversaires présents dans ce batch
+                # sont des agents différents, mais leurs modèles
+                # sont déjà disponibles en CPU partagé.
                 #
-                for start in range(
-                    0,
-                    len(games_batch),
-                    batch_size,
-                ):
+                # On groupe toutefois les parties par agent,
+                # car choose_moves() ne peut faire qu'un forward
+                # avec UN modèle donné.
+                #
 
-                    batch_games = games_batch[
-                        start:start + batch_size
-                    ]
+                games_by_agent = {}
 
-                    if not batch_games:
-                        continue
+                for game in batch_games:
 
-                    boards = [
+                    board = game["board"]
+
+                    agent = (
+                        game["white"]
+                        if board.turn
+                        else game["black"]
+                    )
+
+                    games_by_agent.setdefault(
+                        agent,
+                        [],
+                    ).append(game)
+
+                #
+                # Batch inference pour chaque agent adverse
+                #
+
+                for agent, agent_games in games_by_agent.items():
+
+                    agent_boards = [
                         game["board"]
-                        for game in batch_games
+                        for game in agent_games
                     ]
 
                     infos = agent.choose_moves(
-                        boards
+                        agent_boards
                     )
 
                     for game, info in zip(
-                        batch_games,
+                        agent_games,
                         infos,
                     ):
 
@@ -778,8 +743,8 @@ def collect_games_parallel(
     #
 
     games_per_task = max(
-        5,
-        n_games // (num_workers * 4),
+        6,
+        n_games // (num_workers * 6),
     )
 
     worker_args = []
