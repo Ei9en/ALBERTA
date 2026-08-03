@@ -234,16 +234,9 @@ def _init_selfplay_worker(
     """
     Initialise un worker multiprocessing.
 
-    current_model :
-        modèle courant en mémoire CPU partagée.
-
-    league_models :
-        dictionnaire FIXE de slots :
-            slot_name -> modèle partagé.
-
-    league_registry :
-        dictionnaire partagé :
-            agent_name -> slot_name
+    Les modèles sont en mémoire CPU partagée.
+    league_registry contient les noms des modèles
+    actuellement disponibles.
     """
 
     global _WORKER_CURRENT_MODEL
@@ -260,37 +253,30 @@ def _init_selfplay_worker(
     #
     # Un seul thread PyTorch par worker.
     #
-
     torch.set_num_threads(1)
 
     #
     # Modèle courant
     #
-
     _WORKER_CURRENT_MODEL = current_model
-
     _WORKER_CURRENT_MODEL.eval()
 
     #
-    # Slots league
+    # Modèles league
     #
-
     _WORKER_LEAGUE_MODELS = league_models
 
     for model in _WORKER_LEAGUE_MODELS.values():
-
         model.eval()
 
     #
-    # Registry réellement partagé
+    # Registry partagée
     #
-
     _WORKER_LEAGUE_REGISTRY = league_registry
 
     #
     # Agent courant
     #
-
     _WORKER_CURRENT_AGENT = ActorCriticAgent(
         _WORKER_CURRENT_MODEL,
         deterministic=False,
@@ -299,34 +285,26 @@ def _init_selfplay_worker(
     )
 
     #
-    # Agents league actuellement actifs
+    # Agents league
     #
-
     _WORKER_LEAGUE_AGENTS = {}
 
-    for name, slot_name in (
-        _WORKER_LEAGUE_REGISTRY.items()
-    ):
+    for name in _WORKER_LEAGUE_REGISTRY:
 
-        model = (
-            _WORKER_LEAGUE_MODELS[
-                slot_name
-            ]
-        )
+        model = _WORKER_LEAGUE_MODELS[name]
 
-        _WORKER_LEAGUE_AGENTS[name] = (
-            ActorCriticAgent(
-                model,
-                deterministic=False,
-                temperature=0.75,
-                device="cpu",
-            )
+        model.eval()
+
+        _WORKER_LEAGUE_AGENTS[name] = ActorCriticAgent(
+            model,
+            deterministic=False,
+            temperature=0.75,
+            device="cpu",
         )
 
     print(
         f"[WORKER INIT] "
-        f"{len(_WORKER_LEAGUE_AGENTS)} "
-        f"league agents ready",
+        f"{len(_WORKER_LEAGUE_AGENTS)} league agents ready",
         flush=True
     )
 
@@ -340,8 +318,15 @@ def _selfplay_worker(
     """
     Exécute les parties attribuées à un worker.
 
-    Le registry de la league est partagé entre les processus.
-    Les modèles eux-mêmes résident dans des slots CPU partagés.
+    Les coups du modèle courant sont batchés entre toutes
+    les parties où il doit jouer.
+
+    Les coups des adversaires sont batchés par agent :
+    chaque agent league reçoit un seul choose_moves()
+    pour toutes ses positions courantes.
+
+    Retourne exactement le même format que
+    collect_games_batched().
     """
 
     (
@@ -350,82 +335,42 @@ def _selfplay_worker(
         batch_size,
     ) = worker_args
 
-    global _WORKER_CURRENT_MODEL
-    global _WORKER_CURRENT_AGENT
-    global _WORKER_LEAGUE_MODELS
-    global _WORKER_LEAGUE_AGENTS
-    global _WORKER_LEAGUE_REGISTRY
-
     print(
         f"[WORKER {worker_id}] START "
         f"({n_games} games)",
         flush=True
     )
 
+    global _WORKER_CURRENT_MODEL
+    global _WORKER_CURRENT_AGENT
+    global _WORKER_LEAGUE_MODELS
+    global _WORKER_LEAGUE_AGENTS
+    global _WORKER_LEAGUE_REGISTRY
+
     #
     # ========================================================
-    # Synchronisation de la league
+    # Synchronisation légère de la league
     # ========================================================
     #
 
     active_names = list(
-        _WORKER_LEAGUE_REGISTRY.keys()
+        _WORKER_LEAGUE_REGISTRY
     )
-
-    #
-    # Ajouter les nouveaux agents
-    #
 
     for name in active_names:
 
         if name not in _WORKER_LEAGUE_AGENTS:
 
-            slot_name = (
-                _WORKER_LEAGUE_REGISTRY[name]
-            )
-
-            model = (
-                _WORKER_LEAGUE_MODELS[
-                    slot_name
-                ]
-            )
+            model = _WORKER_LEAGUE_MODELS[name]
 
             model.eval()
 
-            _WORKER_LEAGUE_AGENTS[name] = (
-                ActorCriticAgent(
-                    model,
-                    deterministic=False,
-                    temperature=0.75,
-                    device="cpu",
-                )
+            _WORKER_LEAGUE_AGENTS[name] = ActorCriticAgent(
+                model,
+                deterministic=False,
+                temperature=0.75,
+                device="cpu",
             )
-
-    #
-    # Supprimer les agents qui ne sont plus dans
-    # le registry actif.
-    #
-    # Les modèles restent physiquement dans leurs slots,
-    # mais les anciens noms ne doivent plus être tirés.
-    #
-
-    for name in list(
-        _WORKER_LEAGUE_AGENTS.keys()
-    ):
-
-        if name not in active_names:
-
-            del _WORKER_LEAGUE_AGENTS[name]
-
-    #
-    # Sécurité
-    #
-
-    if not _WORKER_LEAGUE_AGENTS:
-
-        raise RuntimeError(
-            "Worker : league vide."
-        )
 
     #
     # ========================================================
@@ -440,26 +385,9 @@ def _selfplay_worker(
     )
 
     random.seed(seed)
-
     torch.manual_seed(seed)
 
-    #
-    # ========================================================
-    # Agents
-    # ========================================================
-    #
-
-    current_agent = (
-        _WORKER_CURRENT_AGENT
-    )
-
-    league_agents = (
-        _WORKER_LEAGUE_AGENTS
-    )
-
-    opponent_names = list(
-        league_agents.keys()
-    )
+    current_agent = _WORKER_CURRENT_AGENT
 
     #
     # ========================================================
@@ -479,6 +407,24 @@ def _selfplay_worker(
         flush=True
     )
 
+    league_agents = _WORKER_LEAGUE_AGENTS
+
+    #
+    # On ne sélectionne que les agents actuellement
+    # présents dans la registry.
+    #
+    opponent_names = [
+        name
+        for name in active_names
+        if name in league_agents
+    ]
+
+    if not opponent_names:
+
+        raise RuntimeError(
+            "Aucun adversaire disponible dans la league."
+        )
+
     #
     # ========================================================
     # Initialisation des parties
@@ -486,7 +432,6 @@ def _selfplay_worker(
     #
 
     active_games = []
-
     completed_games = []
 
     for i in range(n_games):
@@ -496,15 +441,12 @@ def _selfplay_worker(
         )
 
         opponent_agent = (
-            league_agents[
-                opponent_name
-            ]
+            league_agents[opponent_name]
         )
 
         #
         # Alterner les couleurs.
         #
-
         if i % 2 == 0:
 
             white_agent = current_agent
@@ -548,7 +490,14 @@ def _selfplay_worker(
 
         while active_games:
 
+            #
+            # Positions du modèle courant.
+            #
             model_games = []
+
+            #
+            # Positions des adversaires.
+            #
             opponent_games = []
 
             for game in active_games:
@@ -575,7 +524,7 @@ def _selfplay_worker(
 
             #
             # =================================================
-            # Coups modèle courant
+            # Coups du modèle courant
             # =================================================
             #
 
@@ -597,10 +546,8 @@ def _selfplay_worker(
                     for game in batch_games
                 ]
 
-                infos = (
-                    current_agent.choose_moves(
-                        boards
-                    )
+                infos = current_agent.choose_moves(
+                    boards
                 )
 
                 for game, info in zip(
@@ -642,9 +589,11 @@ def _selfplay_worker(
 
             #
             # =================================================
-            # Coups adversaires
+            # Coups des adversaires — BATCHÉS PAR AGENT
             # =================================================
             #
+
+            opponent_batches = {}
 
             for game in opponent_games:
 
@@ -656,43 +605,84 @@ def _selfplay_worker(
                     else game["black"]
                 )
 
-                info = agent.choose_move(
-                    board
-                )
+                opponent_batches.setdefault(
+                    agent,
+                    []
+                ).append(game)
 
-                game["trajectory"].append(
-                    {
-                        "fen":
-                            board.fen(),
+            #
+            # Un forward batché par agent league.
+            #
+            for agent, games_batch in opponent_batches.items():
 
-                        "action":
-                            info["action"],
+                if not games_batch:
+                    continue
 
-                        "player":
-                            board.turn,
+                #
+                # Respecter également batch_size.
+                #
+                for start in range(
+                    0,
+                    len(games_batch),
+                    batch_size,
+                ):
 
-                        "value":
-                            info["value"],
+                    batch_games = games_batch[
+                        start:start + batch_size
+                    ]
 
-                        "entropy":
-                            info["entropy"],
+                    if not batch_games:
+                        continue
 
-                        "legal_moves":
-                            [
-                                move.uci()
-                                for move
-                                in board.legal_moves
-                            ],
-                    }
-                )
+                    boards = [
+                        game["board"]
+                        for game in batch_games
+                    ]
 
-                board.push(
-                    info["move"]
-                )
+                    infos = agent.choose_moves(
+                        boards
+                    )
+
+                    for game, info in zip(
+                        batch_games,
+                        infos,
+                    ):
+
+                        board = game["board"]
+
+                        game["trajectory"].append(
+                            {
+                                "fen":
+                                    board.fen(),
+
+                                "action":
+                                    info["action"],
+
+                                "player":
+                                    board.turn,
+
+                                "value":
+                                    info["value"],
+
+                                "entropy":
+                                    info["entropy"],
+
+                                "legal_moves":
+                                    [
+                                        move.uci()
+                                        for move
+                                        in board.legal_moves
+                                    ],
+                            }
+                        )
+
+                        board.push(
+                            info["move"]
+                        )
 
             #
             # =================================================
-            # Vérification
+            # Vérification des parties
             # =================================================
             #
 
@@ -725,9 +715,7 @@ def _selfplay_worker(
                         game
                     )
 
-            active_games = (
-                still_active
-            )
+            active_games = still_active
 
     print(
         f"[WORKER {worker_id}] DONE "
@@ -2225,3 +2213,6 @@ def main():
         "\nRL training finished.",
         flush=True
     )
+
+if __name__ == "__main__":
+    main()
