@@ -596,6 +596,8 @@ def _selfplay_worker(
 
 def collect_games_parallel(
     pool,
+    shared_current_model,
+    shared_league_models,
     model,
     league,
     n_games,

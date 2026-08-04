@@ -354,18 +354,14 @@ class ActorCriticAgent:
 
         for i in range(batch_size):
 
-            position = positions[
-                i
-            ].item()
+            position = positions[i].item()
 
             action = legal_index_tensor[
                 i,
                 position,
             ].item()
 
-            move = legal_moves[i][
-                action
-            ]
+            move = legal_moves[i][action]
 
             results.append(
                 {
