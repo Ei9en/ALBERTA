@@ -10,7 +10,6 @@ import torch
 from src.encoding import encode_board, encode_boards
 from src.actions_space import (
     ACTION_TO_INDEX,
-    INDEX_TO_ACTION,
 )
 
 
@@ -63,22 +62,22 @@ class ActorCriticAgent:
         ]
 
         #
-        # On ne conserve que les logits légaux.
+        # Logits légaux uniquement
         #
         legal_logits = logits[
             legal_indices
         ]
 
         #
-        # Entropie AVANT température
+        # Entropie avant température
         #
-        probs = torch.softmax(
+        log_probs = torch.log_softmax(
             legal_logits,
             dim=0,
         )
 
-        log_probs = torch.log(
-            probs + 1e-8
+        probs = torch.exp(
+            log_probs
         )
 
         entropy = -(
@@ -88,7 +87,10 @@ class ActorCriticAgent:
         #
         # Choix du coup
         #
-        if self.deterministic:
+        if (
+            self.deterministic
+            or self.temperature <= 0
+        ):
 
             position = torch.argmax(
                 legal_logits
@@ -98,21 +100,16 @@ class ActorCriticAgent:
 
             sampling_logits = (
                 legal_logits
-                - legal_logits.max()
-            )
-
-            sampling_logits = (
-                sampling_logits
                 / self.temperature
             )
 
-            probs = torch.softmax(
+            sampling_probs = torch.softmax(
                 sampling_logits,
                 dim=0,
             )
 
             position = torch.multinomial(
-                probs,
+                sampling_probs,
                 1,
             ).item()
 
@@ -121,7 +118,9 @@ class ActorCriticAgent:
         #
         action = legal_indices[position]
 
-        move_uci = INDEX_TO_ACTION[action]
+        move_uci = list(
+            legal_moves.keys()
+        )[position]
 
         return {
             "move": legal_moves[move_uci],
@@ -131,6 +130,7 @@ class ActorCriticAgent:
             "fen": board.fen(),
         }
 
+
     @torch.no_grad()
     def choose_moves(
         self,
@@ -139,6 +139,8 @@ class ActorCriticAgent:
 
         if len(boards) == 0:
             return []
+
+        batch_size = len(boards)
 
         #
         # ========================================================
@@ -158,22 +160,24 @@ class ActorCriticAgent:
 
         policies, values = self.model(x)
 
-        batch_size = len(boards)
-        action_size = policies.shape[1]
-
         #
         # ========================================================
         # Coups légaux
         # ========================================================
         #
-        # On construit les indices légaux pour chaque position.
+        # On conserve directement :
         #
-        # Cette partie reste nécessairement dépendante de chaque
-        # board, puisque l'ensemble des coups légaux varie.
+        #   - les indices globaux des actions
+        #   - les objets Move correspondants
+        #
+        # afin d'éviter plus tard :
+        #
+        #   action -> INDEX_TO_ACTION -> UCI -> Move
         #
 
         legal_indices = []
         legal_moves = []
+        max_legal_moves = 0
 
         for board in boards:
 
@@ -181,34 +185,66 @@ class ActorCriticAgent:
                 board.legal_moves
             )
 
-            board_legal_moves_dict = {
-                move.uci(): move
-                for move in board_legal_moves
-            }
+            board_indices = []
+            board_moves = {}
 
-            indices = [
-                ACTION_TO_INDEX[uci]
-                for uci in board_legal_moves_dict
-            ]
+            for move in board_legal_moves:
+
+                uci = move.uci()
+
+                action = ACTION_TO_INDEX[
+                    uci
+                ]
+
+                board_indices.append(
+                    action
+                )
+
+                board_moves[action] = move
 
             legal_indices.append(
-                indices
+                board_indices
             )
 
             legal_moves.append(
-                board_legal_moves_dict
+                board_moves
+            )
+
+            max_legal_moves = max(
+                max_legal_moves,
+                len(board_indices),
             )
 
         #
         # ========================================================
-        # Masque légal batché
+        # Indices légaux batchés
         # ========================================================
         #
+        # On construit maintenant un tenseur :
+        #
+        #     [batch_size, max_legal_moves]
+        #
+        # au lieu de :
+        #
+        #     [batch_size, action_size]
+        #
+        # Les positions de padding sont remplies avec 0,
+        # puis masquées avant les calculs de probabilité.
+        #
+
+        legal_index_tensor = torch.zeros(
+            (
+                batch_size,
+                max_legal_moves,
+            ),
+            dtype=torch.long,
+            device=self.device,
+        )
 
         legal_mask = torch.zeros(
             (
                 batch_size,
-                action_size,
+                max_legal_moves,
             ),
             dtype=torch.bool,
             device=self.device,
@@ -218,18 +254,40 @@ class ActorCriticAgent:
             legal_indices
         ):
 
+            n = len(indices)
+
+            legal_index_tensor[
+                i,
+                :n,
+            ] = torch.tensor(
+                indices,
+                dtype=torch.long,
+                device=self.device,
+            )
+
             legal_mask[
                 i,
-                indices,
+                :n,
             ] = True
 
         #
         # ========================================================
-        # Logits illégaux -> -inf
+        # Extraction des logits légaux
         # ========================================================
         #
+        # On ne travaille désormais que sur les coups légaux.
+        #
 
-        masked_logits = policies.masked_fill(
+        legal_logits = policies.gather(
+            1,
+            legal_index_tensor,
+        )
+
+        #
+        # Les positions de padding deviennent -inf.
+        #
+
+        legal_logits = legal_logits.masked_fill(
             ~legal_mask,
             float("-inf"),
         )
@@ -240,13 +298,13 @@ class ActorCriticAgent:
         # ========================================================
         #
 
-        probs = torch.softmax(
-            masked_logits,
+        log_probs = torch.log_softmax(
+            legal_logits,
             dim=1,
         )
 
-        log_probs = torch.log(
-            probs + 1e-8
+        probs = torch.exp(
+            log_probs
         )
 
         entropy = -(
@@ -259,25 +317,20 @@ class ActorCriticAgent:
         # ========================================================
         #
 
-        if self.deterministic:
+        if (
+            self.deterministic
+            or self.temperature <= 0
+        ):
 
-            actions = torch.argmax(
-                masked_logits,
+            positions = torch.argmax(
+                legal_logits,
                 dim=1,
             )
 
         else:
 
             sampling_logits = (
-                masked_logits
-                - masked_logits.max(
-                    dim=1,
-                    keepdim=True,
-                ).values
-            )
-
-            sampling_logits = (
-                sampling_logits
+                legal_logits
                 / self.temperature
             )
 
@@ -286,14 +339,14 @@ class ActorCriticAgent:
                 dim=1,
             )
 
-            actions = torch.multinomial(
+            positions = torch.multinomial(
                 sampling_probs,
                 1,
             ).squeeze(1)
 
         #
         # ========================================================
-        # Conversion action globale -> Move
+        # Conversion position légale -> action -> Move
         # ========================================================
         #
 
@@ -301,16 +354,23 @@ class ActorCriticAgent:
 
         for i in range(batch_size):
 
-            action = actions[i].item()
+            position = positions[
+                i
+            ].item()
 
-            move_uci = INDEX_TO_ACTION[
+            action = legal_index_tensor[
+                i,
+                position,
+            ].item()
+
+            move = legal_moves[i][
                 action
             ]
 
             results.append(
                 {
                     "move":
-                        legal_moves[i][move_uci],
+                        move,
 
                     "action":
                         action,
