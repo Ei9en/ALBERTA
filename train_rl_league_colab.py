@@ -298,12 +298,10 @@ def _selfplay_worker(
     """
     Exécute les parties attribuées à un worker.
 
-    Les coups du modèle courant sont batchés entre toutes
-    les parties où il doit jouer.
-
-    Les coups des adversaires sont batchés par agent :
-    chaque agent league reçoit un seul choose_moves()
-    pour toutes ses positions courantes.
+    À chaque tour, les positions actives sont regroupées
+    par agent. Chaque agent effectue alors un ou plusieurs
+    choose_moves() batchés sur toutes les positions où il
+    doit jouer.
 
     Retourne exactement le même format que
     collect_games_batched().
@@ -446,14 +444,18 @@ def _selfplay_worker(
         while active_games:
 
             #
-            # Positions du modèle courant.
+            # =================================================
+            # Regroupement des positions par agent
+            # =================================================
             #
-            model_games = []
+            # On regarde directement quel agent doit jouer
+            # dans chaque partie active.
+            #
+            # Ainsi, chaque agent reçoit toutes ses positions
+            # disponibles avant son forward.
+            #
 
-            #
-            # Positions des adversaires.
-            #
-            opponent_games = []
+            games_by_agent = {}
 
             for game in active_games:
 
@@ -465,181 +467,79 @@ def _selfplay_worker(
                     else game["black"]
                 )
 
-                if agent is current_agent:
-
-                    model_games.append(
-                        game
-                    )
-
-                else:
-
-                    opponent_games.append(
-                        game
-                    )
+                games_by_agent.setdefault(
+                    agent,
+                    [],
+                ).append(game)
 
             #
             # =================================================
-            # Coups du modèle courant
+            # Batch inference par agent
             # =================================================
             #
 
-            for start in range(
-                0,
-                len(model_games),
-                batch_size,
-            ):
+            for agent, agent_games in games_by_agent.items():
 
-                batch_games = model_games[
-                    start:start + batch_size
-                ]
-
-                if not batch_games:
-                    continue
-
-                boards = [
-                    game["board"]
-                    for game in batch_games
-                ]
-
-                infos = current_agent.choose_moves(
-                    boards
-                )
-
-                for game, info in zip(
-                    batch_games,
-                    infos,
+                for start in range(
+                    0,
+                    len(agent_games),
+                    batch_size,
                 ):
 
-                    board = game["board"]
+                    batch_games = agent_games[
+                        start:start + batch_size
+                    ]
 
-                    game["trajectory"].append(
-                        {
-                            "fen":
-                                board.fen(),
+                    if not batch_games:
+                        continue
 
-                            "action":
-                                info["action"],
-
-                            "player":
-                                board.turn,
-
-                            "value":
-                                info["value"],
-
-                            "entropy":
-                                info["entropy"],
-
-                            "legal_moves":
-                                [
-                                    move.uci()
-                                    for move
-                                    in board.legal_moves
-                                ],
-                        }
-                    )
-
-                    board.push(
-                        info["move"]
-                    )
-
-            #
-            # =================================================
-            # Coups des adversaires — batchés
-            # =================================================
-            #
-
-            for start in range(
-                0,
-                len(opponent_games),
-                batch_size,
-            ):
-
-                batch_games = opponent_games[
-                    start:start + batch_size
-                ]
-
-                if not batch_games:
-                    continue
-
-                boards = [
-                    game["board"]
-                    for game in batch_games
-                ]
-
-                #
-                # Tous les adversaires présents dans ce batch
-                # sont des agents différents, mais leurs modèles
-                # sont déjà disponibles en CPU partagé.
-                #
-                # On groupe toutefois les parties par agent,
-                # car choose_moves() ne peut faire qu'un forward
-                # avec UN modèle donné.
-                #
-
-                games_by_agent = {}
-
-                for game in batch_games:
-
-                    board = game["board"]
-
-                    agent = (
-                        game["white"]
-                        if board.turn
-                        else game["black"]
-                    )
-
-                    games_by_agent.setdefault(
-                        agent,
-                        [],
-                    ).append(game)
-
-                #
-                # Batch inference pour chaque agent adverse
-                #
-
-                for agent, agent_games in games_by_agent.items():
-
-                    agent_boards = [
+                    boards = [
                         game["board"]
-                        for game in agent_games
+                        for game in batch_games
                     ]
 
                     infos = agent.choose_moves(
-                        agent_boards
+                        boards
                     )
 
                     for game, info in zip(
-                        agent_games,
+                        batch_games,
                         infos,
                     ):
 
                         board = game["board"]
 
-                        game["trajectory"].append(
-                            {
-                                "fen":
-                                    board.fen(),
+                        #
+                        # On ne conserve la trajectoire
+                        # que pour les coups du modèle courant.
+                        #
+                        if agent is current_agent:
 
-                                "action":
-                                    info["action"],
+                            game["trajectory"].append(
+                                {
+                                    "fen":
+                                        board.fen(),
 
-                                "player":
-                                    board.turn,
+                                    "action":
+                                        info["action"],
 
-                                "value":
-                                    info["value"],
+                                    "player":
+                                        board.turn,
 
-                                "entropy":
-                                    info["entropy"],
+                                    "value":
+                                        info["value"],
 
-                                "legal_moves":
-                                    [
-                                        move.uci()
-                                        for move
-                                        in board.legal_moves
-                                    ],
-                            }
-                        )
+                                    "entropy":
+                                        info["entropy"],
+
+                                    "legal_moves":
+                                        [
+                                            move.uci()
+                                            for move
+                                            in board.legal_moves
+                                        ],
+                                }
+                            )
 
                         board.push(
                             info["move"]
@@ -743,8 +643,8 @@ def collect_games_parallel(
     #
 
     games_per_task = max(
-        6,
-        n_games // (num_workers * 6),
+        12,
+        n_games // (num_workers * 4),
     )
 
     worker_args = []
