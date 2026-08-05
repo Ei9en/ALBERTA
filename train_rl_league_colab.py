@@ -1151,14 +1151,19 @@ def train_epoch(
             # Mask logits
             #
 
+            # Mask logits
+
             legal_logits = policy.masked_fill(
                 ~legal_mask,
                 float("-inf")
             )
 
+            # Même température que celle utilisée
+            # pendant le self-play
+            ppo_logits = legal_logits / 0.75
 
             log_probs = F.log_softmax(
-                legal_logits,
+                ppo_logits,
                 dim=1
             )
 
@@ -1216,15 +1221,17 @@ def train_epoch(
             #
 
             probs = torch.softmax(
-                legal_logits,
+                ppo_logits,
                 dim=1
             )
-
 
             entropy = -(
                 probs
                 *
-                log_probs
+                log_probs.masked_fill(
+                    ~legal_mask,
+                    0.0
+                )
             ).sum(
                 dim=1
             ).mean()
