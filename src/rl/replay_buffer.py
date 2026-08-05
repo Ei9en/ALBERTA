@@ -1,6 +1,5 @@
-# Replay_Buffer.py
-
 import random
+
 
 class ReplayBuffer:
 
@@ -18,25 +17,44 @@ class ReplayBuffer:
         self.buffer.clear()
 
 
+
     def add(
         self,
         fen,
         action,
         legal_moves,
         target_return,
+        old_value,
+        old_log_prob,
     ):
 
         self.buffer.append(
             {
-                "fen": fen,
-                "action": action,
-                "legal_moves": legal_moves,
-                "return": target_return,
+                "fen":
+                    fen,
+
+                "action":
+                    action,
+
+                "legal_moves":
+                    legal_moves,
+
+                "return":
+                    target_return,
+
+                "old_value":
+                    old_value,
+
+                "old_log_prob":
+                    old_log_prob,
             }
         )
 
+
         if len(self.buffer) > self.capacity:
+
             self.buffer.pop(0)
+
 
 
     def sample(
@@ -48,6 +66,7 @@ class ReplayBuffer:
             self.buffer,
             batch_size,
         )
+
 
 
     def __len__(self):

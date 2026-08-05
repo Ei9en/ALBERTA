@@ -22,7 +22,7 @@ from src.encoding import encode_boards
 from src.models.resnet import ChessResNet
 from src.models.actor_critic import ActorCritic
 
-from src.agents.actor_critic_agent import ActorCriticAgent
+from src.agents.ppo_agent import PPOAgent
 from src.selfplay.game import SelfPlayGame
 
 from src.rl.compute_returns import compute_returns
@@ -57,9 +57,9 @@ DEVICE = (
 
 LR = 5e-5
 
-GAMES_PER_EPOCH = 600
+GAMES_PER_EPOCH = 100
 
-RL_EPOCHS = 20
+RL_EPOCHS = 1
 
 CHECKPOINT_EVERY = 1
 
@@ -67,7 +67,7 @@ VALUE_COEF = 0.1
 
 BATCH_SIZE = 2048
 
-SGD_EPOCHS = 1 # Nombre de passages complets sur le replay buffer pendant un epoch RL.
+SGD_EPOCHS = 3 # Nombre de passages complets sur le replay buffer pendant un epoch RL.
                # Plus élevé = plus d'updates par collecte de parties, mais risque de sur-apprentissage
                # sur les anciennes expériences.
 
@@ -263,7 +263,7 @@ def _init_selfplay_worker(
     #
     # Agent courant
     #
-    _WORKER_CURRENT_AGENT = ActorCriticAgent(
+    _WORKER_CURRENT_AGENT = PPOAgent(
         _WORKER_CURRENT_MODEL,
         deterministic=False,
         temperature=0.75,
@@ -281,7 +281,7 @@ def _init_selfplay_worker(
 
         model.eval()
 
-        _WORKER_LEAGUE_AGENTS[name] = ActorCriticAgent(
+        _WORKER_LEAGUE_AGENTS[name] = PPOAgent(
             model,
             deterministic=False,
             temperature=0.75,
@@ -337,7 +337,7 @@ def _selfplay_worker(
 
             model.eval()
 
-            _WORKER_LEAGUE_AGENTS[name] = ActorCriticAgent(
+            _WORKER_LEAGUE_AGENTS[name] = PPOAgent(
                 model,
                 deterministic=False,
                 temperature=0.75,
@@ -532,6 +532,9 @@ def _selfplay_worker(
                                     "entropy":
                                         info["entropy"],
 
+                                    "old_log_prob":
+                                        info["log_prob"],
+
                                     "legal_moves":
                                         [
                                             move.uci()
@@ -603,7 +606,7 @@ def collect_games_parallel(
     n_games,
     stats,
     num_workers=12,
-    batch_size=256,
+    batch_size=64,
 ):
 
     selfplay_start = time.perf_counter()
@@ -857,14 +860,14 @@ def evaluate_against_agent(
             leave=False,
         ):
 
-            current_agent = ActorCriticAgent(
+            current_agent = PPOAgent(
                 model,
                 deterministic=False,
                 temperature=0.75,
                 device=DEVICE,
             )
 
-            opponent_agent = ActorCriticAgent(
+            opponent_agent = PPOAgent(
                 opponent,
                 deterministic=False,
                 temperature=0.75,
@@ -957,8 +960,9 @@ def train_epoch(
 
     model.train()
 
+
     #
-    # Freeze BatchNorm statistics
+    # Freeze BatchNorm
     #
     for module in model.modules():
 
@@ -969,13 +973,15 @@ def train_epoch(
             module.eval()
 
 
+
     if len(buffer) < BATCH_SIZE:
 
         print(
-            "Replay buffer too small for training."
+            "Replay buffer too small."
         )
 
-        return 0.0, 0.0, 0.0
+        return 0.0,0.0,0.0
+
 
 
     TRAIN_STEPS = (
@@ -984,51 +990,33 @@ def train_epoch(
     )
 
 
-    total_loss = 0.0
-    total_actor = 0.0
-    total_critic = 0.0
+    PPO_CLIP = 0.2
+    ENTROPY_COEF = 0.01
+
+
+    total_loss = 0
+    total_actor = 0
+    total_critic = 0
 
 
     total_updates = (
         TRAIN_STEPS
-        * SGD_EPOCHS
+        *
+        SGD_EPOCHS
     )
-
-
-    #
-    # =========================
-    # Diagnostics
-    # =========================
-    #
-
-    max_advantage = 0.0
-    mean_abs_advantage = 0.0
-
-    max_log_prob = 0.0
-    mean_abs_log_prob = 0.0
-
-    diagnostic_samples = 0
 
 
     progress = tqdm(
         total=total_updates,
-        desc="Training",
+        desc="PPO Training"
     )
 
 
-    #
-    # =========================
-    # SGD epochs
-    # =========================
-    #
+    for _ in range(SGD_EPOCHS):
 
-    for epoch in range(
-        SGD_EPOCHS
-    ):
 
-        for update in range(
-            TRAIN_STEPS
-        ):
+        for _ in range(TRAIN_STEPS):
+
 
             batch = buffer.sample(
                 BATCH_SIZE
@@ -1036,384 +1024,269 @@ def train_epoch(
 
 
             #
-            # =========================
-            # Boards
-            # =========================
+            # Encode boards
             #
 
             boards = [
                 chess.variant.AtomicBoard(
-                    step["fen"]
+                    x["fen"]
                 )
-                for step in batch
+                for x in batch
             ]
 
-
-            #
-            # =========================
-            # Vectorized encoding
-            # =========================
-            #
 
             x = encode_boards(
                 boards
             ).to(DEVICE)
 
 
-            #
-            # =========================
-            # Forward pass
-            # =========================
-            #
 
-            optimizer.zero_grad()
+            policy, values = model(x)
 
-            policy, value = model(x)
 
 
             #
-            # =========================
             # Targets
-            # =========================
             #
 
-            target = torch.tensor(
+            returns = torch.tensor(
                 [
-                    step["return"]
-                    for step in batch
+                    s["return"]
+                    for s in batch
                 ],
-                dtype=torch.float32,
                 device=DEVICE,
-            ).view(-1, 1)
+                dtype=torch.float32,
+            ).unsqueeze(1)
+
+
+
+            old_values = torch.tensor(
+                [
+                    s["old_value"]
+                    for s in batch
+                ],
+                device=DEVICE,
+                dtype=torch.float32,
+            ).unsqueeze(1)
+
+
+
+            old_log_probs = torch.tensor(
+                [
+                    s["old_log_prob"]
+                    for s in batch
+                ],
+                device=DEVICE,
+                dtype=torch.float32,
+            )
+
 
 
             #
-            # =========================
             # Advantage
-            # =========================
             #
 
-            raw_advantage = (
-                target
-                - value.detach()
+            advantages = (
+                returns
+                -
+                old_values
             )
 
 
-            #
-            # Diagnostics
-            # =========================
-            #
-
-            batch_mean_abs_advantage = (
-                raw_advantage
-                .abs()
-                .mean()
-                .item()
-            )
-
-            batch_max_advantage = (
-                raw_advantage
-                .abs()
-                .max()
-                .item()
+            advantages = (
+                advantages
+                -
+                advantages.mean()
+            ) / (
+                advantages.std()
+                +1e-8
             )
 
 
-            mean_abs_advantage += (
-                batch_mean_abs_advantage
-                * BATCH_SIZE
+            advantages = (
+                advantages.squeeze(1)
             )
 
-            max_advantage = max(
-                max_advantage,
-                batch_max_advantage,
-            )
 
 
             #
-            # =========================
-            # Legal move mask
-            # =========================
+            # Legal mask
             #
 
             legal_mask = torch.zeros(
                 (
                     BATCH_SIZE,
-                    policy.shape[1],
+                    policy.shape[1]
                 ),
                 dtype=torch.bool,
                 device=DEVICE,
             )
 
 
-            actions = torch.empty(
-                BATCH_SIZE,
-                dtype=torch.long,
+            actions = torch.tensor(
+                [
+                    s["action"]
+                    for s in batch
+                ],
                 device=DEVICE,
+                dtype=torch.long,
             )
 
 
-            for i, step in enumerate(batch):
+            for i,s in enumerate(batch):
 
-                legal_indices = [
+                ids = [
                     ACTION_TO_INDEX[m]
-                    for m in step["legal_moves"]
+                    for m in s["legal_moves"]
                 ]
 
                 legal_mask[
                     i,
-                    legal_indices
+                    ids
                 ] = True
 
-                actions[i] = step["action"]
 
 
             #
-            # =========================
-            # Mask illegal moves
-            # =========================
+            # Mask logits
             #
 
             legal_logits = policy.masked_fill(
                 ~legal_mask,
-                float("-inf"),
+                float("-inf")
             )
 
-
-            #
-            # =========================
-            # Log probabilities
-            # =========================
-            #
 
             log_probs = F.log_softmax(
                 legal_logits,
-                dim=1,
+                dim=1
             )
+
 
 
             selected_log_probs = (
                 log_probs
                 .gather(
                     1,
-                    actions.unsqueeze(1),
+                    actions.unsqueeze(1)
                 )
                 .squeeze(1)
             )
 
 
+
             #
-            # =========================
-            # Log probability diagnostics
-            # =========================
+            # PPO ratio
             #
 
-            batch_mean_abs_log_prob = (
+            ratio = torch.exp(
                 selected_log_probs
-                .abs()
-                .mean()
-                .item()
-            )
-
-            batch_max_log_prob = (
-                selected_log_probs
-                .abs()
-                .max()
-                .item()
+                -
+                old_log_probs
             )
 
 
-            mean_abs_log_prob += (
-                batch_mean_abs_log_prob
-                * BATCH_SIZE
-            )
-
-            max_log_prob = max(
-                max_log_prob,
-                batch_max_log_prob,
+            unclipped = (
+                ratio
+                *
+                advantages
             )
 
 
-            diagnostic_samples += (
-                BATCH_SIZE
+            clipped = (
+                torch.clamp(
+                    ratio,
+                    1-PPO_CLIP,
+                    1+PPO_CLIP
+                )
+                *
+                advantages
             )
 
 
-            #
-            # =========================
-            # Advantage clipping
-            # =========================
-            #
-
-            advantage = torch.clamp(
-                raw_advantage,
-                -5,
-                5,
-            ).squeeze(1)
-
-
-            #
-            # =========================
-            # Actor loss
-            # =========================
-            #
-
-            actor_loss = (
-                -selected_log_probs
-                * advantage
+            actor_loss = -torch.min(
+                unclipped,
+                clipped
             ).mean()
 
 
+
             #
-            # =========================
-            # Critic loss
-            # =========================
+            # Entropy bonus
             #
 
-            critic_loss = F.mse_loss(
-                value,
-                target,
+            probs = torch.softmax(
+                legal_logits,
+                dim=1
             )
 
 
+            entropy = -(
+                probs
+                *
+                log_probs
+            ).sum(
+                dim=1
+            ).mean()
+
+
+
             #
-            # =========================
-            # Total loss
-            # =========================
+            # Critic
             #
+
+            critic_loss = F.mse_loss(
+                values,
+                returns
+            )
+
+
 
             loss = (
                 actor_loss
                 +
                 VALUE_COEF
-                * critic_loss
+                *
+                critic_loss
+                -
+                ENTROPY_COEF
+                *
+                entropy
             )
 
 
-            #
-            # =========================
-            # Backpropagation
-            # =========================
-            #
+            optimizer.zero_grad()
+
 
             loss.backward()
 
 
-            #
-            # =========================
-            # Gradient clipping
-            # =========================
-            #
-
-            grad_norm = (
-                torch.nn.utils
-                .clip_grad_norm_(
-                    model.parameters(),
-                    1.0,
-                )
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                1.0
             )
 
-
-            #
-            # =========================
-            # First update diagnostics
-            # =========================
-            #
-
-            if (
-                epoch == 0
-                and update == 0
-            ):
-
-                print(
-                    "\nRL diagnostics:"
-                )
-
-                print(
-                    f"Raw advantage:"
-                    f" mean|A|="
-                    f"{batch_mean_abs_advantage:.4f}"
-                    f" | max|A|="
-                    f"{batch_max_advantage:.4f}"
-                )
-
-                print(
-                    f"Selected logπ:"
-                    f" mean|logπ|="
-                    f"{batch_mean_abs_log_prob:.4f}"
-                    f" | max|logπ|="
-                    f"{batch_max_log_prob:.4f}"
-                )
-
-                print(
-                    f"Gradient norm "
-                    f"before clipping: "
-                    f"{grad_norm.item():.4f}"
-                )
-
-
-            #
-            # =========================
-            # Optimizer
-            # =========================
-            #
 
             optimizer.step()
 
 
-            #
-            # =========================
-            # Statistics
-            # =========================
-            #
 
-            total_loss += (
-                loss.item()
-            )
-
-            total_actor += (
-                actor_loss.item()
-            )
-
-            total_critic += (
-                critic_loss.item()
-            )
+            total_loss += loss.item()
+            total_actor += actor_loss.item()
+            total_critic += critic_loss.item()
 
 
             progress.update(1)
 
 
+
     progress.close()
 
 
-    #
-    # =========================
-    # Final diagnostics
-    # =========================
-    #
-
-    print(
-        "\nRL diagnostics:"
-        f" mean|A|="
-        f"{mean_abs_advantage / diagnostic_samples:.4f}"
-        f" | max|A|="
-        f"{max_advantage:.4f}"
-        f" | mean|logπ|="
-        f"{mean_abs_log_prob / diagnostic_samples:.4f}"
-        f" | max|logπ|="
-        f"{max_log_prob:.4f}"
-    )
-
-
     return (
-        total_loss
-        / total_updates,
-
-        total_actor
-        / total_updates,
-
-        total_critic
-        / total_updates,
+        total_loss / total_updates,
+        total_actor / total_updates,
+        total_critic / total_updates,
     )
 
 ### Checkpoints ###
@@ -1480,6 +1353,7 @@ def main():
     NUM_WORKERS = 12
     SELFPLAY_BATCH_SIZE = 256
 
+
     #
     # ========================================================
     # Préparation des modèles CPU partagés
@@ -1491,33 +1365,15 @@ def main():
         flush=True
     )
 
-    #
-    # Modèle courant
-    #
+
     shared_current_model = _prepare_shared_model(
         model
     )
 
-    #
-    # ========================================================
-    # Modèles league partagés
-    #
-    # IMPORTANT :
-    #
-    # On prépare également des slots pour les futurs
-    # snapshots afin de ne jamais avoir à ajouter une entrée
-    # dans le dictionnaire partagé après le lancement du pool.
-    #
-    # Les workers connaissent donc dès le départ tous les
-    # modèles potentiellement disponibles.
-    # ========================================================
-    #
 
     shared_league_models = {}
 
-    #
-    # Modèles déjà présents dans la league
-    #
+
     for name, league_model in league.agents.items():
 
         shared_league_models[name] = (
@@ -1526,23 +1382,9 @@ def main():
             )
         )
 
-    #
-    # ========================================================
-    # Slots réservés aux futurs snapshots
-    # ========================================================
-    #
 
     #
-    # On réserve suffisamment de slots pour toutes les epochs
-    # RL restantes.
-    #
-    # Le nom exact des snapshots créés plus bas est :
-    #
-    # league_epoch_000
-    # league_epoch_001
-    # ...
-    #
-    # Certains peuvent déjà exister dans la league.
+    # Slots futurs snapshots
     #
 
     for epoch in range(RL_EPOCHS):
@@ -1552,21 +1394,19 @@ def main():
         if name in shared_league_models:
             continue
 
-        #
-        # On crée un modèle de même architecture que le modèle
-        # courant.
-        #
+
         placeholder = copy.deepcopy(
             model
         ).to("cpu")
+
 
         placeholder.eval()
 
         placeholder.share_memory()
 
-        shared_league_models[name] = (
-            placeholder
-        )
+
+        shared_league_models[name] = placeholder
+
 
     print(
         f"Shared models ready: "
@@ -1574,33 +1414,25 @@ def main():
         flush=True
     )
 
-    #
-    # ========================================================
-    # Registry dynamique
-    # ========================================================
-    #
 
     #
-    # IMPORTANT :
-    #
-    # Avec spawn, une simple list Python ne serait pas
-    # réellement partagée entre les processus.
-    #
-    # Manager().list() fournit ici une petite registry
-    # inter-processus.
-    #
-    # Les modèles eux-mêmes restent en mémoire partagée.
+    # ========================================================
+    # Registry multiprocessing
+    # ========================================================
     #
 
     ctx = mp.get_context(
         "spawn"
     )
 
+
     manager = ctx.Manager()
+
 
     league_registry = manager.list(
         league.agents.keys()
     )
+
 
     print(
         f"Initial league registry: "
@@ -1608,17 +1440,12 @@ def main():
         flush=True
     )
 
-    #
-    # ========================================================
-    # Pool
-    # ========================================================
-    #
 
-    print(
-        f"Starting {NUM_WORKERS} "
-        f"self-play workers...",
-        flush=True
-    )
+    #
+    # ========================================================
+    # Pool workers
+    # ========================================================
+    #
 
     with ctx.Pool(
         processes=NUM_WORKERS,
@@ -1630,22 +1457,26 @@ def main():
         ),
     ) as pool:
 
+
         #
         # ====================================================
-        # RL loop
+        # RL LOOP
         # ====================================================
         #
 
         for epoch in range(RL_EPOCHS):
+
 
             print(
                 f"\n===== Epoch {epoch} =====",
                 flush=True
             )
 
+
             wins = 0
             losses = 0
             draws = 0
+
 
             #
             # =================================================
@@ -1665,54 +1496,76 @@ def main():
                 batch_size=SELFPLAY_BATCH_SIZE,
             )
 
+
             #
             # =================================================
-            # Replay buffer
+            # Replay buffer construction
             # =================================================
             #
 
             for game in games:
 
+
                 trajectory = game["trajectory"]
+
                 result = game["result"]
+
                 current_white = game["current_white"]
 
+
+
                 #
-                # Résultat du point de vue du modèle courant
+                # Reward final
                 #
+
                 if result == "1-0":
+
 
                     if current_white:
                         wins += 1
                     else:
                         losses += 1
+
 
                     white_reward = 1.0
                     black_reward = -1.0
 
+
+
                 elif result == "0-1":
+
 
                     if current_white:
                         losses += 1
                     else:
                         wins += 1
 
+
                     white_reward = -1.0
                     black_reward = 1.0
 
+
+
                 else:
 
+
                     draws += 1
+
 
                     white_reward = 0.0
                     black_reward = 0.0
 
+
+
                 #
-                # Rewards selon le joueur
+                # Reward par timestep
                 #
+
                 rewards = []
 
+
                 for step in trajectory:
+
 
                     if step["player"]:
 
@@ -1726,53 +1579,65 @@ def main():
                             black_reward
                         )
 
+
+
                 #
-                # Returns
+                # Returns PPO
                 #
+
                 returns = compute_returns(
                     rewards,
                     gamma=0.99,
                 )
+
 
                 returns = torch.as_tensor(
                     returns,
                     dtype=torch.float32,
                 )
 
-                #
-                # Normalisation
-                #
-                returns = (
-                    returns - returns.mean()
-                ) / (
-                    returns.std() + 1e-8
-                )
+
 
                 #
-                # Ajout au replay buffer
+                # Ajout replay
                 #
+
                 for step, ret in zip(
                     trajectory,
                     returns,
                 ):
 
+
                     buffer.add(
+
                         step["fen"],
+
                         step["action"],
+
                         step["legal_moves"],
-                        ret,
+
+                        ret.item(),
+
+                        step["value"],
+
+                        step["old_log_prob"],
+
                     )
 
+
+
             #
             # =================================================
-            # Score
+            # Stats
             # =================================================
             #
 
-            selfplay_score_rate = (
+            score_rate = (
                 wins
                 + 0.5 * draws
             ) / GAMES_PER_EPOCH
+
+
 
             print(
                 f"Replay buffer size: "
@@ -1780,28 +1645,31 @@ def main():
                 flush=True
             )
 
+
             print(
-                f"Results: W={wins} "
+                f"Results: "
+                f"W={wins} "
                 f"L={losses} "
                 f"D={draws} "
-                f"Score rate="
-                f"{selfplay_score_rate:.1%}",
+                f"Score={score_rate:.1%}",
                 flush=True
             )
 
+
+
             #
             # =================================================
-            # Training
+            # PPO update
             # =================================================
             #
 
-            loss, actor_loss, critic_loss = (
-                train_epoch(
-                    model,
-                    optimizer,
-                    buffer,
-                )
+            loss, actor_loss, critic_loss = train_epoch(
+                model,
+                optimizer,
+                buffer,
             )
+
+
 
             print(
                 f"Loss={loss:.4f} "
@@ -1810,34 +1678,21 @@ def main():
                 flush=True
             )
 
+
+
             #
             # =================================================
-            # Sauvegarde replay buffer
+            # Sauvegardes
             # =================================================
             #
 
             if epoch % 5 == 0:
-
-                print(
-                    ">>> BEFORE replay save",
-                    flush=True
-                )
 
                 save_replay_buffer(
                     buffer,
                     epoch,
                 )
 
-            #
-            # =================================================
-            # Sauvegarde statistiques
-            # =================================================
-            #
-
-            print(
-                ">>> BEFORE stats save",
-                flush=True
-            )
 
             stats.save(
                 PROJECT_ROOT
@@ -1845,18 +1700,9 @@ def main():
                 / "uncertainty_stats.json"
             )
 
-            #
-            # =================================================
-            # Checkpoint RL
-            # =================================================
-            #
+
 
             if epoch % CHECKPOINT_EVERY == 0:
-
-                print(
-                    ">>> BEFORE RL checkpoint",
-                    flush=True
-                )
 
                 save_checkpoint(
                     model,
@@ -1865,42 +1711,34 @@ def main():
                     loss,
                 )
 
+
+
             #
             # =================================================
             # Snapshot league
             # =================================================
             #
 
-            print(
-                ">>> BEFORE league deepcopy",
-                flush=True
-            )
-
             snapshot = copy.deepcopy(
                 model
             ).to(DEVICE)
 
+
             snapshot.eval()
+
 
             agent_name = (
                 f"league_epoch_{epoch:03d}"
             )
 
-            #
-            # Ajout à la league Python principale
-            #
+
+
             league.add_agent(
                 agent_name,
                 snapshot,
             )
 
-            #
-            # Sauvegarde disque
-            #
-            print(
-                ">>> BEFORE league save",
-                flush=True
-            )
+
 
             torch.save(
                 {
@@ -1914,29 +1752,11 @@ def main():
                 / f"{agent_name}.pt"
             )
 
-            #
-            # =================================================
-            # Mise à jour du snapshot dans le modèle partagé
-            # =================================================
-            #
-            # Le slot existe déjà depuis le lancement du pool.
-            #
-            # On ne remplace PAS :
-            #
-            # shared_league_models[agent_name] = snapshot
-            #
-            # car les workers possèdent déjà une référence vers
-            # l'ancien objet partagé.
-            #
-            # On copie donc uniquement les poids dans le slot.
-            # =================================================
-            #
 
-            print(
-                f">>> Updating shared league model "
-                f"{agent_name}",
-                flush=True
-            )
+
+            #
+            # Update shared snapshot
+            #
 
             shared_snapshot = (
                 shared_league_models[
@@ -1944,31 +1764,20 @@ def main():
                 ]
             )
 
-            snapshot_state = (
-                snapshot.state_dict()
-            )
 
-            shared_snapshot_state = (
-                shared_snapshot.state_dict()
-            )
+            for key, value in snapshot.state_dict().items():
 
-            for key in snapshot_state:
-
-                shared_snapshot_state[
+                shared_snapshot.state_dict()[
                     key
                 ].copy_(
-                    snapshot_state[key]
-                    .detach()
+                    value.detach()
                     .cpu()
                 )
 
+
             shared_snapshot.eval()
 
-            #
-            # =================================================
-            # Activation du snapshot dans la registry
-            # =================================================
-            #
+
 
             if agent_name not in league_registry:
 
@@ -1976,48 +1785,25 @@ def main():
                     agent_name
                 )
 
-            print(
-                f">>> League registry updated: "
-                f"{list(league_registry)}",
-                flush=True
-            )
+
 
             #
-            # =================================================
-            # Mise à jour du modèle courant partagé
-            # =================================================
+            # Update current model partagé
             #
 
-            print(
-                ">>> Updating shared current model",
-                flush=True
-            )
+            for key, value in model.state_dict().items():
 
-            current_state = (
-                model.state_dict()
-            )
-
-            shared_state = (
-                shared_current_model.state_dict()
-            )
-
-            for key in current_state:
-
-                shared_state[key].copy_(
-                    current_state[key]
-                    .detach()
+                shared_current_model.state_dict()[
+                    key
+                ].copy_(
+                    value.detach()
                     .cpu()
                 )
 
-            print(
-                ">>> Shared current model updated",
-                flush=True
-            )
+
 
             #
-            # =================================================
             # Best checkpoint
-            # =================================================
             #
 
             if (
@@ -2026,6 +1812,7 @@ def main():
             ):
 
                 best_loss = loss
+
 
                 torch.save(
                     {
@@ -2041,38 +1828,33 @@ def main():
                     / "rl_best.pt",
                 )
 
+
                 print(
                     "New best checkpoint saved.",
                     flush=True
                 )
 
-            #
-            # =================================================
-            # Summary
-            # =================================================
-            #
+
 
             print(
                 f"\n===== Epoch {epoch} summary =====",
                 flush=True
             )
 
+
             print(
                 f"Self-play: "
                 f"{wins}W / "
                 f"{losses}L / "
                 f"{draws}D "
-                f"({selfplay_score_rate:.1%})",
+                f"({score_rate:.1%})",
                 flush=True
             )
 
-    #
-    # ========================================================
-    # Fermeture du Manager
-    # ========================================================
-    #
+
 
     manager.shutdown()
+
 
     print(
         "\nRL training finished.",
