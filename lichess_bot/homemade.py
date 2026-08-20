@@ -1,13 +1,17 @@
+from pathlib import Path
 import chess
 from chess.engine import PlayResult
 from lib.engine_wrapper import MinimalEngine
 from lib.lichess_types import HOMEMADE_ARGS_TYPE
 import logging
 
-from atomic_engine.bc_bot import BCBot 
-from atomic_engine.bc_bot_stochastic import BCBotStochastic
+from atomic_engine.rl_bot import RLBot
+
 
 logger = logging.getLogger(__name__)
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class ExampleEngine(MinimalEngine):
@@ -16,17 +20,33 @@ class ExampleEngine(MinimalEngine):
 
 
 class AtomicRandom(ExampleEngine):
-    """Bot Atomic utilisant notre réseau BC."""
+    """Bot Atomic utilisant RL20."""
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        #self.bot = BCBotStochastic(
-        #    temperature=0.75
-        #)
-        self.bot = BCBot()
-        
 
-    def search(self, board: chess.Board, *args: HOMEMADE_ARGS_TYPE) -> PlayResult:
-        move = self.bot.choose_move(board)
-        logger.info(f"BC joue : {move}")
-        return PlayResult(move, None)
+        super().__init__(*args, **kwargs)
+
+        self.bot = RLBot(
+            temperature=0.00001,
+            deterministic=False,
+        )
+
+
+    def search(
+        self,
+        board: chess.Board,
+        *args: HOMEMADE_ARGS_TYPE,
+    ) -> PlayResult:
+
+        info = self.bot.choose_move(board)
+
+        move = info["move"]
+
+        logger.info(
+            f"RL20 joue : {move}"
+        )
+
+        return PlayResult(
+            move,
+            None,
+        )
