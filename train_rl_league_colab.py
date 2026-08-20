@@ -47,18 +47,7 @@ PROJECT_ROOT = Path(
 # Reprise RL
 # ============================================================
 
-CHECKPOINT_EPOCH = 20
-
 START_EPOCH = 24
-
-
-CHECKPOINT = (
-    PROJECT_ROOT
-    / "checkpoints"
-    / "rl_epoch"
-    / f"rl_epoch_{CHECKPOINT_EPOCH}.pt"
-)
-
 
 LEAGUE_DIR = (
     PROJECT_ROOT
@@ -230,33 +219,48 @@ def load_league_agent(
     return model
 
 
+CHECKPOINT_EPOCH = 20
+
+CHECKPOINT = (
+    PROJECT_ROOT
+    / "checkpoints"
+    / "rl_epoch"
+    / f"rl_epoch_{CHECKPOINT_EPOCH}.pt"
+)
+
+
 def load_model():
 
+    print()
+    print("======================================")
+    print("Loading RL checkpoint")
+    print("======================================")
     print(
-        "\n======================================",
-        flush=True,
+        f"Checkpoint: {CHECKPOINT}"
     )
 
-    print(
-        "Loading RL checkpoint",
-        flush=True,
+    #
+    # ========================================================
+    # Créer directement l'architecture ActorCritic
+    # ========================================================
+    #
+
+    bc_model = ChessResNet(
+        num_actions=len(ACTIONS),
+        channels=64,
+        blocks=4,
     )
 
-    print(
-        "======================================",
-        flush=True,
+    model = ActorCritic(
+        bc_model
     )
 
-
-    print(
-        f"Checkpoint: {CHECKPOINT}",
-        flush=True,
-    )
+    model = model.to(DEVICE)
 
 
     #
     # ========================================================
-    # Charger le modèle RL courant
+    # Charger le checkpoint RL
     # ========================================================
     #
 
@@ -265,33 +269,8 @@ def load_model():
         map_location=DEVICE,
     )
 
-
-    bc_model = ChessResNet(
-        num_actions=len(ACTIONS),
-        channels=64,
-        blocks=4,
-    )
-
-
-    bc_model.load_state_dict(
+    model.load_state_dict(
         checkpoint["model_state_dict"]
-    )
-
-
-    model = ActorCritic(
-        bc_model
-    )
-
-
-    model = model.to(DEVICE)
-
-    model.eval()
-
-
-    print(
-        f"Loaded RL model from epoch "
-        f"{checkpoint.get('epoch', 'unknown')}",
-        flush=True,
     )
 
 
@@ -308,7 +287,9 @@ def load_model():
 
 
     #
-    # Restaurer l'état Adam
+    # ========================================================
+    # Reprendre également l'état de l'optimizer
+    # ========================================================
     #
 
     if "optimizer_state_dict" in checkpoint:
@@ -319,64 +300,35 @@ def load_model():
             ]
         )
 
-
-        #
-        # IMPORTANT :
-        #
-        # On veut reprendre l'état interne d'Adam
-        # mais avec le nouveau learning rate.
-        #
-
-        for param_group in optimizer.param_groups:
-
-            param_group["lr"] = LR
-
-
         print(
-            "Optimizer state restored.",
-            flush=True,
+            "Optimizer state loaded."
         )
 
 
-        print(
-            f"Learning rate forced to {LR}",
-            flush=True,
-        )
-
-
-    else:
-
-        print(
-            "WARNING: no optimizer state found.",
-            flush=True,
-        )
+    print(
+        f"RL checkpoint loaded "
+        f"(epoch {checkpoint.get('epoch', '?')})."
+    )
 
 
     #
     # ========================================================
-    # Initialisation de la league
+    # League
     # ========================================================
     #
 
     league = League(
-        max_agents=LEAGUE_MAX_AGENTS
+        max_agents=22
     )
 
 
     #
-    # ========================================================
     # BC baselines
-    # ========================================================
     #
-
-    print(
-        "\nLoading BC baselines...",
-        flush=True,
-    )
-
+    # Toujours conservées.
+    #
 
     bc4 = load_bc_agent(4)
-
 
     league.add_agent(
         "bc_epoch_4",
@@ -384,14 +336,7 @@ def load_model():
     )
 
 
-    print(
-        "Loaded bc_epoch_4",
-        flush=True,
-    )
-
-
     bc5 = load_bc_agent(5)
-
 
     league.add_agent(
         "bc_epoch_5",
@@ -399,117 +344,95 @@ def load_model():
     )
 
 
-    print(
-        "Loaded bc_epoch_5",
-        flush=True,
-    )
-
-
     #
     # ========================================================
-    # RL snapshots 4 -> 23
+    # Charger les snapshots RL
+    #
+    # Ici on veut 4 -> 23 au maximum,
+    # avec max_agents = 22.
+    #
+    # Donc 20 snapshots RL + BC4 + BC5 = 22 agents.
     # ========================================================
     #
 
-    print(
-        "\nLoading RL league snapshots...",
-        flush=True,
-    )
+    for epoch in range(4, 24):
+
+        path = (
+            LEAGUE_DIR
+            / f"league_epoch_{epoch:03d}.pt"
+        )
+
+        if not path.exists():
+
+            print(
+                f"WARNING: missing league snapshot: "
+                f"{path}"
+            )
+
+            continue
 
 
-    for epoch in range(
-        LEAGUE_START_EPOCH,
-        LEAGUE_END_EPOCH + 1,
-    ):
-
-        name = (
-            f"league_epoch_{epoch:03d}"
+        checkpoint = torch.load(
+            path,
+            map_location=DEVICE,
         )
 
 
-        snapshot = load_league_agent(
-            epoch
+        #
+        # Le snapshot contient un ActorCritic complet.
+        #
+
+        snapshot = ChessResNet(
+            num_actions=len(ACTIONS),
+            channels=64,
+            blocks=4,
         )
+
+        snapshot = ActorCritic(
+            snapshot
+        )
+
+        snapshot.load_state_dict(
+            checkpoint[
+                "model_state_dict"
+            ]
+        )
+
+        snapshot = snapshot.to(DEVICE)
+
+        snapshot.eval()
 
 
         league.add_agent(
-            name,
+            f"league_epoch_{epoch:03d}",
             snapshot,
         )
 
 
         print(
-            f"Loaded {name}",
-            flush=True,
+            f"Loaded "
+            f"league_epoch_{epoch:03d}"
         )
 
 
-    #
-    # ========================================================
-    # Vérification
-    # ========================================================
-    #
-
+    print()
     print(
-        "\n======================================",
-        flush=True,
+        f"League loaded: "
+        f"{len(league)} agents"
     )
 
     print(
-        "League restored",
-        flush=True,
+        "League members:"
     )
-
-    print(
-        "======================================",
-        flush=True,
-    )
-
-
-    print(
-        f"League size: {len(league)}",
-        flush=True,
-    )
-
-
-    print(
-        "League members:",
-        flush=True,
-    )
-
 
     for name in league.names():
 
         print(
-            f"  - {name}",
-            flush=True,
+            f"  {name}"
         )
 
 
-    #
-    # On doit avoir exactement :
-    #
-    # BC4
-    # BC5
-    # RL4 ... RL23
-    #
-    # soit 22 agents.
-    #
-
-    if len(league) != LEAGUE_MAX_AGENTS:
-
-        raise RuntimeError(
-            f"Unexpected league size: "
-            f"{len(league)} / "
-            f"{LEAGUE_MAX_AGENTS}"
-        )
-
-
-    return (
-        model,
-        optimizer,
-        league,
-    )
+    return model, optimizer, league
 
 
 ### Self-play Collection ###
