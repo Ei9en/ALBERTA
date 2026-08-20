@@ -200,7 +200,7 @@ def load_league_agent(
 # RL checkpoint
 # ============================================================
 
-CHECKPOINT_EPOCH = 20
+CHECKPOINT_EPOCH = START_EPOCH - 1
 
 CHECKPOINT = (
     PROJECT_ROOT
@@ -1781,12 +1781,17 @@ def main():
     )
 
 
-    #
+        #
     # Shared league models
     #
 
     shared_league_models = {}
 
+
+    #
+    # Modèles déjà présents dans la ligue
+    # (BC4, BC5, snapshots 13 -> 32)
+    #
 
     for (
         name,
@@ -1801,7 +1806,9 @@ def main():
 
 
     #
-    # Préparer futurs slots
+    # Préparer les futurs slots
+    #
+    # Epoch 33 -> 42
     #
 
     future_end = (
@@ -1822,6 +1829,7 @@ def main():
 
 
         if name in shared_league_models:
+
             continue
 
 
