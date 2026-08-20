@@ -24,7 +24,7 @@ BC_CHECKPOINT = (
 RL_CHECKPOINT = (
     CHECKPOINT_DIR
     / "rl_epoch"
-    / "rl_epoch_20.pt"
+    / "rl_epoch_28.pt"
 )
 
 TEMPERATURE = 0.5
@@ -238,7 +238,7 @@ def main():
 
     output_path = (
         PROJECT_ROOT
-        / f"rl20_vs_bc5_{timestamp}.json"
+        / f"rl_vs_bc5_{timestamp}.json"
     )
 
 

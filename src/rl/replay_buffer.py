@@ -17,7 +17,6 @@ class ReplayBuffer:
         self.buffer.clear()
 
 
-
     def add(
         self,
         fen,
@@ -26,6 +25,7 @@ class ReplayBuffer:
         target_return,
         old_value,
         old_log_prob,
+        advantage,
     ):
 
         self.buffer.append(
@@ -47,6 +47,9 @@ class ReplayBuffer:
 
                 "old_log_prob":
                     old_log_prob,
+
+                "advantage":
+                    advantage,
             }
         )
 
@@ -54,7 +57,6 @@ class ReplayBuffer:
         if len(self.buffer) > self.capacity:
 
             self.buffer.pop(0)
-
 
 
     def sample(
@@ -66,7 +68,6 @@ class ReplayBuffer:
             self.buffer,
             batch_size,
         )
-
 
 
     def __len__(self):

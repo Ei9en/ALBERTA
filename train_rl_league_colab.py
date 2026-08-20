@@ -28,7 +28,6 @@ from src.models.actor_critic import ActorCritic
 from src.agents.ppo_agent import PPOAgent
 from src.selfplay.game import SelfPlayGame
 
-from src.rl.compute_returns import compute_returns
 from src.rl.replay_buffer import ReplayBuffer
 from src.rl.uncertainty_stats import UncertaintyStats
 
@@ -67,38 +66,23 @@ DEVICE = (
 # Hyperparameters
 # ============================================================
 
-# Nouveau learning rate
-
 LR = 1e-4
-
 
 GAMES_PER_EPOCH = 900
 
-
-# Nombre de nouveaux epochs.
-#
-# Ici :
-#
-# START_EPOCH = 24
-# RL_EPOCHS   = 10
-#
-# donnera :
-#
-# 24 ... 33
-#
 RL_EPOCHS = 10
-
 
 CHECKPOINT_EVERY = 1
 
-
 VALUE_COEF = 0.1
-
 
 BATCH_SIZE = 4096
 
-
 SGD_EPOCHS = 3
+
+GAMMA = 0.99
+
+GAE_LAMBDA = 0.95
 
 
 # ============================================================
@@ -107,9 +91,7 @@ SGD_EPOCHS = 3
 
 LEAGUE_MAX_AGENTS = 22
 
-
 LEAGUE_START_EPOCH = 4
-
 
 LEAGUE_END_EPOCH = 23
 
@@ -189,11 +171,6 @@ def load_league_agent(
     )
 
 
-    #
-    # Les snapshots contiennent
-    # directement le state_dict ActorCritic.
-    #
-
     base_model = ChessResNet(
         num_actions=len(ACTIONS),
         channels=64,
@@ -219,6 +196,10 @@ def load_league_agent(
     return model
 
 
+# ============================================================
+# RL checkpoint
+# ============================================================
+
 CHECKPOINT_EPOCH = 20
 
 CHECKPOINT = (
@@ -239,10 +220,9 @@ def load_model():
         f"Checkpoint: {CHECKPOINT}"
     )
 
+
     #
-    # ========================================================
-    # Créer directement l'architecture ActorCritic
-    # ========================================================
+    # Architecture
     #
 
     bc_model = ChessResNet(
@@ -251,17 +231,17 @@ def load_model():
         blocks=4,
     )
 
+
     model = ActorCritic(
         bc_model
     )
+
 
     model = model.to(DEVICE)
 
 
     #
-    # ========================================================
-    # Charger le checkpoint RL
-    # ========================================================
+    # Charger checkpoint RL
     #
 
     checkpoint = torch.load(
@@ -269,15 +249,14 @@ def load_model():
         map_location=DEVICE,
     )
 
+
     model.load_state_dict(
         checkpoint["model_state_dict"]
     )
 
 
     #
-    # ========================================================
     # Optimizer
-    # ========================================================
     #
 
     optimizer = Adam(
@@ -287,9 +266,7 @@ def load_model():
 
 
     #
-    # ========================================================
-    # Reprendre également l'état de l'optimizer
-    # ========================================================
+    # Reprendre l'état optimizer
     #
 
     if "optimizer_state_dict" in checkpoint:
@@ -312,20 +289,16 @@ def load_model():
 
 
     #
-    # ========================================================
     # League
-    # ========================================================
     #
 
     league = League(
-        max_agents=22
+        max_agents=LEAGUE_MAX_AGENTS
     )
 
 
     #
     # BC baselines
-    #
-    # Toujours conservées.
     #
 
     bc4 = load_bc_agent(4)
@@ -345,22 +318,19 @@ def load_model():
 
 
     #
-    # ========================================================
-    # Charger les snapshots RL
-    #
-    # Ici on veut 4 -> 23 au maximum,
-    # avec max_agents = 22.
-    #
-    # Donc 20 snapshots RL + BC4 + BC5 = 22 agents.
-    # ========================================================
+    # Snapshots RL 4 -> 23
     #
 
-    for epoch in range(4, 24):
+    for epoch in range(
+        LEAGUE_START_EPOCH,
+        LEAGUE_END_EPOCH + 1,
+    ):
 
         path = (
             LEAGUE_DIR
             / f"league_epoch_{epoch:03d}.pt"
         )
+
 
         if not path.exists():
 
@@ -378,25 +348,24 @@ def load_model():
         )
 
 
-        #
-        # Le snapshot contient un ActorCritic complet.
-        #
-
-        snapshot = ChessResNet(
+        snapshot_base = ChessResNet(
             num_actions=len(ACTIONS),
             channels=64,
             blocks=4,
         )
 
+
         snapshot = ActorCritic(
-            snapshot
+            snapshot_base
         )
+
 
         snapshot.load_state_dict(
             checkpoint[
                 "model_state_dict"
             ]
         )
+
 
         snapshot = snapshot.to(DEVICE)
 
@@ -410,8 +379,7 @@ def load_model():
 
 
         print(
-            f"Loaded "
-            f"league_epoch_{epoch:03d}"
+            f"Loaded league_epoch_{epoch:03d}"
         )
 
 
@@ -421,9 +389,11 @@ def load_model():
         f"{len(league)} agents"
     )
 
+
     print(
         "League members:"
     )
+
 
     for name in league.names():
 
@@ -437,10 +407,6 @@ def load_model():
 
 ### Self-play Collection ###
 
-
-# ============================================================
-# Modèles accessibles par les workers
-# ============================================================
 
 _WORKER_CURRENT_MODEL = None
 
@@ -468,7 +434,6 @@ def _prepare_shared_model(
 
     cpu_model.eval()
 
-
     cpu_model.share_memory()
 
 
@@ -486,37 +451,26 @@ def _init_selfplay_worker(
 ):
 
     global _WORKER_CURRENT_MODEL
-
     global _WORKER_LEAGUE_MODELS
-
     global _WORKER_CURRENT_AGENT
-
     global _WORKER_LEAGUE_AGENTS
-
     global _WORKER_LEAGUE_REGISTRY
 
-
-    #
-    # Un seul thread PyTorch
-    #
 
     torch.set_num_threads(1)
 
 
-    #
-    # Modèle courant
-    #
+    _WORKER_CURRENT_MODEL = (
+        current_model
+    )
 
-    _WORKER_CURRENT_MODEL = current_model
 
     _WORKER_CURRENT_MODEL.eval()
 
 
-    #
-    # Modèles league
-    #
-
-    _WORKER_LEAGUE_MODELS = league_models
+    _WORKER_LEAGUE_MODELS = (
+        league_models
+    )
 
 
     for model in (
@@ -526,18 +480,10 @@ def _init_selfplay_worker(
         model.eval()
 
 
-    #
-    # Registry
-    #
-
     _WORKER_LEAGUE_REGISTRY = (
         league_registry
     )
 
-
-    #
-    # Agent courant
-    #
 
     _WORKER_CURRENT_AGENT = PPOAgent(
         _WORKER_CURRENT_MODEL,
@@ -546,10 +492,6 @@ def _init_selfplay_worker(
         device="cpu",
     )
 
-
-    #
-    # Agents league
-    #
 
     _WORKER_LEAGUE_AGENTS = {}
 
@@ -594,26 +536,15 @@ def _selfplay_worker(
 
 
     global _WORKER_CURRENT_AGENT
-
     global _WORKER_LEAGUE_MODELS
-
     global _WORKER_LEAGUE_AGENTS
-
     global _WORKER_LEAGUE_REGISTRY
 
-
-    #
-    # Registry actuelle
-    #
 
     active_names = list(
         _WORKER_LEAGUE_REGISTRY
     )
 
-
-    #
-    # Ajouter éventuellement les nouveaux agents
-    #
 
     for name in active_names:
 
@@ -641,10 +572,6 @@ def _selfplay_worker(
             )
 
 
-    #
-    # Seed
-    #
-
     seed = (
         1000003
         + worker_id * 7919
@@ -669,10 +596,6 @@ def _selfplay_worker(
     )
 
 
-    #
-    # Adversaires disponibles
-    #
-
     opponent_names = [
         name
         for name in active_names
@@ -687,10 +610,6 @@ def _selfplay_worker(
             "dans la league."
         )
 
-
-    #
-    # Initialisation
-    #
 
     active_games = []
 
@@ -711,10 +630,6 @@ def _selfplay_worker(
         )
 
 
-        #
-        # Alterner couleurs
-        #
-
         if i % 2 == 0:
 
             white_agent = current_agent
@@ -722,7 +637,6 @@ def _selfplay_worker(
             black_agent = opponent_agent
 
             current_is_white = True
-
 
         else:
 
@@ -753,17 +667,9 @@ def _selfplay_worker(
         )
 
 
-    #
-    # Self-play
-    #
-
     with torch.no_grad():
 
         while active_games:
-
-            #
-            # Regroupement par agent
-            #
 
             games_by_agent = {}
 
@@ -785,10 +691,6 @@ def _selfplay_worker(
                     [],
                 ).append(game)
 
-
-            #
-            # Batch inference
-            #
 
             for (
                 agent,
@@ -832,11 +734,6 @@ def _selfplay_worker(
                         board = game["board"]
 
 
-                        #
-                        # Trajectoire uniquement
-                        # du modèle courant
-                        #
-
                         if agent is current_agent:
 
                             game[
@@ -877,10 +774,6 @@ def _selfplay_worker(
                             info["move"]
                         )
 
-
-            #
-            # Vérification parties
-            #
 
             still_active = []
 
@@ -943,7 +836,7 @@ def collect_games_parallel(
     n_games,
     stats,
     num_workers=12,
-    batch_size=64,
+    batch_size=256,
 ):
 
     selfplay_start = time.perf_counter()
@@ -961,19 +854,11 @@ def collect_games_parallel(
         return []
 
 
-    #
-    # Workers
-    #
-
     num_workers = min(
         num_workers,
         n_games,
     )
 
-
-    #
-    # Petites tâches
-    #
 
     games_per_task = max(
         12,
@@ -984,7 +869,6 @@ def collect_games_parallel(
 
 
     worker_args = []
-
 
     remaining = n_games
 
@@ -1012,10 +896,6 @@ def collect_games_parallel(
 
         task_id += 1
 
-
-    #
-    # Self-play
-    #
 
     completed_games = []
 
@@ -1045,10 +925,6 @@ def collect_games_parallel(
     progress.close()
 
 
-    #
-    # Vérification
-    #
-
     if len(completed_games) != n_games:
 
         raise RuntimeError(
@@ -1057,10 +933,6 @@ def collect_games_parallel(
             f"{n_games}"
         )
 
-
-    #
-    # Statistiques
-    #
 
     selfplay_time = (
         time.perf_counter()
@@ -1239,10 +1111,6 @@ def evaluate_against_agent(
             )
 
 
-            #
-            # Couleurs
-            #
-
             if i % 2 == 0:
 
                 white_agent = current_agent
@@ -1250,7 +1118,6 @@ def evaluate_against_agent(
                 black_agent = opponent_agent
 
                 current_is_white = True
-
 
             else:
 
@@ -1276,10 +1143,6 @@ def evaluate_against_agent(
                 trajectory
             )
 
-
-            #
-            # Résultat
-            #
 
             if result == "1-0":
 
@@ -1352,6 +1215,80 @@ def evaluate_against_agent(
     }
 
 
+### GAE ###
+
+def compute_gae(
+    trajectory,
+    rewards,
+    gamma=GAMMA,
+    gae_lambda=GAE_LAMBDA,
+):
+
+    n = len(trajectory)
+
+
+    if n == 0:
+
+        return [], []
+
+
+    values = [
+        float(step["value"])
+        for step in trajectory
+    ]
+
+
+    advantages = [
+        0.0
+    ] * n
+
+    gae = 0.0
+
+
+    for t in reversed(
+        range(n)
+    ):
+
+        if t == n - 1:
+
+            next_value = 0.0
+
+        else:
+
+            next_value = values[t + 1]
+
+
+        delta = (
+            rewards[t]
+            + gamma * next_value
+            - values[t]
+        )
+
+
+        gae = (
+            delta
+            + gamma
+            * gae_lambda
+            * gae
+        )
+
+
+        advantages[t] = gae
+
+
+    returns = [
+        advantages[t]
+        + values[t]
+        for t in range(n)
+    ]
+
+
+    return (
+        advantages,
+        returns,
+    )
+
+
 ### Training ###
 
 def train_epoch(
@@ -1402,11 +1339,11 @@ def train_epoch(
     ENTROPY_COEF = 0.01
 
 
-    total_loss = 0
+    total_loss = 0.0
 
-    total_actor = 0
+    total_actor = 0.0
 
-    total_critic = 0
+    total_critic = 0.0
 
 
     total_updates = (
@@ -1440,9 +1377,9 @@ def train_epoch(
 
             boards = [
                 chess.variant.AtomicBoard(
-                    x["fen"]
+                    s["fen"]
                 )
-                for x in batch
+                for s in batch
             ]
 
 
@@ -1473,21 +1410,34 @@ def train_epoch(
 
 
             #
-            # Old values
+            # Advantages
             #
 
-            old_values = torch.tensor(
+            advantages = torch.tensor(
                 [
-                    s["old_value"]
+                    s["advantage"]
                     for s in batch
                 ],
                 device=DEVICE,
                 dtype=torch.float32,
-            ).unsqueeze(1)
+            )
 
 
             #
-            # Old log probs
+            # Normalisation
+            #
+
+            advantages = (
+                advantages
+                - advantages.mean()
+            ) / (
+                advantages.std()
+                + 1e-8
+            )
+
+
+            #
+            # Old log probabilities
             #
 
             old_log_probs = torch.tensor(
@@ -1501,38 +1451,12 @@ def train_epoch(
 
 
             #
-            # Advantage
-            #
-
-            advantages = (
-                returns
-                -
-                old_values
-            )
-
-
-            advantages = (
-                advantages
-                -
-                advantages.mean()
-            ) / (
-                advantages.std()
-                + 1e-8
-            )
-
-
-            advantages = (
-                advantages.squeeze(1)
-            )
-
-
-            #
             # Legal mask
             #
 
             legal_mask = torch.zeros(
                 (
-                    BATCH_SIZE,
+                    len(batch),
                     policy.shape[1],
                 ),
                 dtype=torch.bool,
@@ -1579,8 +1503,7 @@ def train_epoch(
 
 
             #
-            # Même température
-            # que pendant le self-play
+            # Même température que self-play
             #
 
             ppo_logits = (
@@ -1610,15 +1533,17 @@ def train_epoch(
 
             ratio = torch.exp(
                 selected_log_probs
-                -
-                old_log_probs
+                - old_log_probs
             )
 
 
+            #
+            # PPO objective
+            #
+
             unclipped = (
                 ratio
-                *
-                advantages
+                * advantages
             )
 
 
@@ -1628,8 +1553,7 @@ def train_epoch(
                     1 - PPO_CLIP,
                     1 + PPO_CLIP,
                 )
-                *
-                advantages
+                * advantages
             )
 
 
@@ -1808,9 +1732,7 @@ def save_replay_buffer(
 def main():
 
     #
-    # ========================================================
     # Load model + optimizer + league
-    # ========================================================
     #
 
     model, optimizer, league = (
@@ -1820,9 +1742,6 @@ def main():
 
     #
     # Replay buffer
-    #
-    # On repart volontairement avec un buffer vide :
-    # PPO reste on-policy dans cette version.
     #
 
     buffer = ReplayBuffer(
@@ -1837,9 +1756,7 @@ def main():
 
 
     #
-    # ========================================================
-    # Parallel self-play configuration
-    # ========================================================
+    # Parallel self-play
     #
 
     NUM_WORKERS = 12
@@ -1848,9 +1765,7 @@ def main():
 
 
     #
-    # ========================================================
     # Shared current model
-    # ========================================================
     #
 
     print(
@@ -1867,18 +1782,11 @@ def main():
 
 
     #
-    # ========================================================
     # Shared league models
-    # ========================================================
     #
 
     shared_league_models = {}
 
-
-    #
-    # Tous les agents actuellement
-    # présents dans la league
-    #
 
     for (
         name,
@@ -1893,15 +1801,7 @@ def main():
 
 
     #
-    # ========================================================
-    # Préparer les futurs slots
-    # ========================================================
-    #
-    # On prépare les snapshots futurs :
-    #
-    # 24 ... START_EPOCH + RL_EPOCHS - 1
-    #
-    # Ils seront remplis après chaque update.
+    # Préparer futurs slots
     #
 
     future_end = (
@@ -1934,7 +1834,6 @@ def main():
 
         placeholder.eval()
 
-
         placeholder.share_memory()
 
 
@@ -1951,9 +1850,7 @@ def main():
 
 
     #
-    # ========================================================
-    # Multiprocessing context
-    # ========================================================
+    # Multiprocessing
     #
 
     ctx = mp.get_context(
@@ -1965,9 +1862,7 @@ def main():
 
 
     #
-    # ========================================================
     # Registry
-    # ========================================================
     #
 
     league_registry = manager.list(
@@ -1990,9 +1885,7 @@ def main():
 
 
     #
-    # ========================================================
-    # Pool workers
-    # ========================================================
+    # Pool
     #
 
     with ctx.Pool(
@@ -2006,9 +1899,7 @@ def main():
     ) as pool:
 
         #
-        # ====================================================
-        # RL LOOP
-        # ====================================================
+        # RL loop
         #
 
         for epoch in range(
@@ -2021,10 +1912,12 @@ def main():
                 flush=True,
             )
 
+
             print(
                 f"===== Epoch {epoch} =====",
                 flush=True,
             )
+
 
             print(
                 f"======================================",
@@ -2040,9 +1933,7 @@ def main():
 
 
             #
-            # =================================================
             # Self-play
-            # =================================================
             #
 
             games = collect_games_parallel(
@@ -2059,9 +1950,7 @@ def main():
 
 
             #
-            # =================================================
-            # Replay buffer construction
-            # =================================================
+            # Construction replay buffer
             #
 
             for game in games:
@@ -2070,9 +1959,11 @@ def main():
                     game["trajectory"]
                 )
 
+
                 result = (
                     game["result"]
                 )
+
 
                 current_white = (
                     game["current_white"]
@@ -2080,7 +1971,7 @@ def main():
 
 
                 #
-                # Résultat courant
+                # Résultat
                 #
 
                 if result == "1-0":
@@ -2150,18 +2041,16 @@ def main():
 
 
                 #
-                # Returns
+                # GAE
                 #
 
-                returns = compute_returns(
-                    rewards,
-                    gamma=0.99,
-                )
-
-
-                returns = torch.as_tensor(
-                    returns,
-                    dtype=torch.float32,
+                advantages, returns = (
+                    compute_gae(
+                        trajectory,
+                        rewards,
+                        gamma=GAMMA,
+                        gae_lambda=GAE_LAMBDA,
+                    )
                 )
 
 
@@ -2171,9 +2060,11 @@ def main():
 
                 for (
                     step,
+                    advantage,
                     ret,
                 ) in zip(
                     trajectory,
+                    advantages,
                     returns,
                 ):
 
@@ -2181,16 +2072,15 @@ def main():
                         step["fen"],
                         step["action"],
                         step["legal_moves"],
-                        ret.item(),
+                        ret,
                         step["value"],
                         step["old_log_prob"],
+                        advantage,
                     )
 
 
             #
-            # =================================================
             # Stats
-            # =================================================
             #
 
             score_rate = (
@@ -2217,9 +2107,7 @@ def main():
 
 
             #
-            # =================================================
-            # PPO update
-            # =================================================
+            # PPO
             #
 
             loss, actor_loss, critic_loss = (
@@ -2240,9 +2128,18 @@ def main():
 
 
             #
-            # =================================================
-            # PPO on-policy
-            # =================================================
+            # Replay buffer sauvegarde
+            #
+
+            if epoch % 5 == 0:
+
+                save_replay_buffer(
+                    buffer,
+                    epoch,
+                )
+
+            #
+            # On-policy
             #
 
             buffer.clear()
@@ -2253,25 +2150,8 @@ def main():
                 flush=True,
             )
 
-
             #
-            # =================================================
-            # Replay buffer sauvegarde
-            # =================================================
-            #
-
-            if epoch % 5 == 0:
-
-                save_replay_buffer(
-                    buffer,
-                    epoch,
-                )
-
-
-            #
-            # =================================================
             # Uncertainty stats
-            # =================================================
             #
 
             stats.save(
@@ -2282,9 +2162,7 @@ def main():
 
 
             #
-            # =================================================
             # RL checkpoint
-            # =================================================
             #
 
             if (
@@ -2302,9 +2180,7 @@ def main():
 
 
             #
-            # =================================================
             # Snapshot league
-            # =================================================
             #
 
             snapshot = (
@@ -2322,14 +2198,6 @@ def main():
             )
 
 
-            #
-            # Ajouter à la league
-            #
-            # Avec max_agents=22, si on ajoute
-            # epoch 24, le plus vieux snapshot RL
-            # est automatiquement supprimé.
-            #
-
             league.add_agent(
                 agent_name,
                 snapshot,
@@ -2337,7 +2205,7 @@ def main():
 
 
             #
-            # Sauvegarder snapshot
+            # Sauvegarde
             #
 
             snapshot_path = (
@@ -2366,9 +2234,7 @@ def main():
 
 
             #
-            # =================================================
-            # Mettre à jour le modèle partagé
-            # =================================================
+            # Shared snapshot
             #
 
             if agent_name not in (
@@ -2388,10 +2254,6 @@ def main():
             )
 
 
-            #
-            # Copier les poids GPU -> CPU partagé
-            #
-
             for (
                 key,
                 value,
@@ -2408,17 +2270,7 @@ def main():
 
 
             #
-            # =================================================
-            # Synchroniser la registry
-            # =================================================
-            #
-            # IMPORTANT :
-            #
-            # League.add_agent() peut avoir supprimé
-            # un ancien snapshot.
-            #
-            # La registry multiprocessing doit donc
-            # refléter exactement league.names().
+            # Registry
             #
 
             league_registry[:] = (
@@ -2434,9 +2286,7 @@ def main():
 
 
             #
-            # =================================================
-            # Update modèle courant partagé
-            # =================================================
+            # Shared current model
             #
 
             for (
@@ -2452,9 +2302,7 @@ def main():
 
 
             #
-            # =================================================
             # Best checkpoint
-            # =================================================
             #
 
             if (
@@ -2492,9 +2340,7 @@ def main():
 
 
             #
-            # =================================================
             # Summary
-            # =================================================
             #
 
             print(

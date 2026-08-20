@@ -1,0 +1,11 @@
+{
+    "bc_checkpoint": "/Users/tom/Desktop/Atomic/checkpoints/bc_epoch/bc_v2_5_epoch_5.pt",
+    "rl_checkpoint": "/Users/tom/Desktop/Atomic/checkpoints/rl_epoch/rl_epoch_32.pt",
+    "temperature": 0.5,
+    "games": 40,
+    "bc_wins": 16,
+    "rl_wins": 13,
+    "draws": 11,
+    "bc_score": 0.5375,
+    "rl_score": 0.4625
+}
