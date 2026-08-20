@@ -65,7 +65,7 @@ CHECKPOINT_EVERY = 1
 
 VALUE_COEF = 0.1
 
-BATCH_SIZE = 2048
+BATCH_SIZE = 4096
 
 SGD_EPOCHS = 3 # Nombre de passages complets sur le replay buffer pendant un epoch RL.
                # Plus élevé = plus d'updates par collecte de parties, mais risque de sur-apprentissage
@@ -1092,7 +1092,6 @@ def train_epoch(
                 old_values
             )
 
-
             advantages = (
                 advantages
                 -
@@ -1512,7 +1511,6 @@ def main():
 
             for game in games:
 
-
                 trajectory = game["trajectory"]
 
                 result = game["result"]
@@ -1520,76 +1518,88 @@ def main():
                 current_white = game["current_white"]
 
 
-
                 #
-                # Reward final
+                # =================================================
+                # Résultat du modèle courant
+                # =================================================
                 #
 
                 if result == "1-0":
 
-
                     if current_white:
+
                         wins += 1
+
                     else:
+
                         losses += 1
-
-
-                    white_reward = 1.0
-                    black_reward = -1.0
-
 
 
                 elif result == "0-1":
 
-
                     if current_white:
+
                         losses += 1
+
                     else:
+
                         wins += 1
-
-
-                    white_reward = -1.0
-                    black_reward = 1.0
-
 
 
                 else:
 
-
                     draws += 1
 
 
-                    white_reward = 0.0
-                    black_reward = 0.0
-
-
-
                 #
-                # Reward par timestep
+                # =================================================
+                # Reward terminal
+                #
+                # La trajectoire contient uniquement les positions
+                # où le modèle courant joue.
+                #
+                # On donne donc la récompense terminale au dernier
+                # état de cette trajectoire et zéro ailleurs.
+                # =================================================
                 #
 
-                rewards = []
+                rewards = [
+                    0.0
+                ] * len(trajectory)
 
 
-                for step in trajectory:
+                if trajectory:
 
+                    if result == "1-0":
 
-                    if step["player"]:
-
-                        rewards.append(
-                            white_reward
+                        terminal_reward = (
+                            1.0
+                            if current_white
+                            else -1.0
                         )
+
+
+                    elif result == "0-1":
+
+                        terminal_reward = (
+                            -1.0
+                            if current_white
+                            else 1.0
+                        )
+
 
                     else:
 
-                        rewards.append(
-                            black_reward
-                        )
+                        terminal_reward = 0.0
 
+
+                    rewards[-1] = terminal_reward
 
 
                 #
+                # =================================================
                 # Returns PPO
+                # =================================================
                 #
 
                 returns = compute_returns(
@@ -1604,16 +1614,16 @@ def main():
                 )
 
 
-
                 #
+                # =================================================
                 # Ajout replay
+                # =================================================
                 #
 
                 for step, ret in zip(
                     trajectory,
                     returns,
                 ):
-
 
                     buffer.add(
 
@@ -1632,7 +1642,6 @@ def main():
                     )
 
 
-
             #
             # =================================================
             # Stats
@@ -1643,7 +1652,6 @@ def main():
                 wins
                 + 0.5 * draws
             ) / GAMES_PER_EPOCH
-
 
 
             print(
@@ -1663,7 +1671,6 @@ def main():
             )
 
 
-
             #
             # =================================================
             # PPO update
@@ -1677,7 +1684,6 @@ def main():
             )
 
 
-
             print(
                 f"Loss={loss:.4f} "
                 f"| Actor={actor_loss:.4f} "
@@ -1685,7 +1691,20 @@ def main():
                 flush=True
             )
 
+            #
+            # =================================================
+            # PPO est on-policy :
+            # les expériences utilisées pour cette mise à jour
+            # ne sont plus utilisées après l'update.
+            # =================================================
+            #
 
+            buffer.clear()
+
+            print(
+                "Replay buffer cleared after PPO update.",
+                flush=True
+            )
 
             #
             # =================================================
@@ -1708,7 +1727,6 @@ def main():
             )
 
 
-
             if epoch % CHECKPOINT_EVERY == 0:
 
                 save_checkpoint(
@@ -1717,7 +1735,6 @@ def main():
                     epoch,
                     loss,
                 )
-
 
 
             #
@@ -1739,12 +1756,10 @@ def main():
             )
 
 
-
             league.add_agent(
                 agent_name,
                 snapshot,
             )
-
 
 
             torch.save(
@@ -1760,9 +1775,10 @@ def main():
             )
 
 
-
             #
+            # =================================================
             # Update shared snapshot
+            # =================================================
             #
 
             shared_snapshot = (
@@ -1785,7 +1801,6 @@ def main():
             shared_snapshot.eval()
 
 
-
             if agent_name not in league_registry:
 
                 league_registry.append(
@@ -1793,9 +1808,10 @@ def main():
                 )
 
 
-
             #
+            # =================================================
             # Update current model partagé
+            # =================================================
             #
 
             for key, value in model.state_dict().items():
@@ -1808,9 +1824,10 @@ def main():
                 )
 
 
-
             #
+            # =================================================
             # Best checkpoint
+            # =================================================
             #
 
             if (
@@ -1842,6 +1859,11 @@ def main():
                 )
 
 
+            #
+            # =================================================
+            # Epoch summary
+            # =================================================
+            #
 
             print(
                 f"\n===== Epoch {epoch} summary =====",
@@ -1859,7 +1881,6 @@ def main():
             )
 
 
-
     manager.shutdown()
 
 
@@ -1867,6 +1888,7 @@ def main():
         "\nRL training finished.",
         flush=True
     )
+
 
 if __name__ == "__main__":
     main()
