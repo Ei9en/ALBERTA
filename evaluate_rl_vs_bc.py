@@ -24,11 +24,11 @@ BC_CHECKPOINT = (
 RL_CHECKPOINT = (
     CHECKPOINT_DIR
     / "rl_epoch"
-    / "rl_epoch_28.pt"
+    / "rl_epoch_36.pt"
 )
 
 TEMPERATURE = 0.5
-GAMES = 40
+GAMES = 100
 
 # ============================================================
 # Evaluation

@@ -46,7 +46,10 @@ PROJECT_ROOT = Path(
 # Reprise RL
 # ============================================================
 
-START_EPOCH = 24
+# On reprend depuis rl_epoch_36.pt
+START_EPOCH = 37
+
+CHECKPOINT_EPOCH = 36
 
 LEAGUE_DIR = (
     PROJECT_ROOT
@@ -70,7 +73,9 @@ LR = 1e-4
 
 GAMES_PER_EPOCH = 900
 
-RL_EPOCHS = 10
+# Validation finale du PPO :
+# epochs 37, 38, 39, 40, 41
+RL_EPOCHS = 5
 
 CHECKPOINT_EVERY = 1
 
@@ -86,14 +91,25 @@ GAE_LAMBDA = 0.95
 
 
 # ============================================================
+# PPO diagnostics
+# ============================================================
+
+PPO_CLIP = 0.2
+
+ENTROPY_COEF = 0.01
+
+
+# ============================================================
 # League
 # ============================================================
 
-LEAGUE_MAX_AGENTS = 22
+# BC4 + BC5 + league_epoch_016 -> league_epoch_037
+# = 2 + 22 = 24 agents
+LEAGUE_MAX_AGENTS = 24
 
-LEAGUE_START_EPOCH = 4
+LEAGUE_START_EPOCH = 16
 
-LEAGUE_END_EPOCH = 23
+LEAGUE_END_EPOCH = 37
 
 
 # ============================================================
@@ -199,8 +215,6 @@ def load_league_agent(
 # ============================================================
 # RL checkpoint
 # ============================================================
-
-CHECKPOINT_EPOCH = START_EPOCH - 1
 
 CHECKPOINT = (
     PROJECT_ROOT
@@ -318,7 +332,7 @@ def load_model():
 
 
     #
-    # Snapshots RL 4 -> 23
+    # Snapshots RL 16 -> 37
     #
 
     for epoch in range(
@@ -334,12 +348,9 @@ def load_model():
 
         if not path.exists():
 
-            print(
-                f"WARNING: missing league snapshot: "
-                f"{path}"
+            raise FileNotFoundError(
+                f"Missing league snapshot: {path}"
             )
-
-            continue
 
 
         checkpoint = torch.load(
@@ -1325,6 +1336,7 @@ def train_epoch(
             0.0,
             0.0,
             0.0,
+            0.0,
         )
 
 
@@ -1334,16 +1346,13 @@ def train_epoch(
     )
 
 
-    PPO_CLIP = 0.2
-
-    ENTROPY_COEF = 0.01
-
-
     total_loss = 0.0
 
     total_actor = 0.0
 
     total_critic = 0.0
+
+    total_kl = 0.0
 
 
     total_updates = (
@@ -1528,12 +1537,39 @@ def train_epoch(
 
 
             #
-            # PPO ratio
+            # =================================================
+            # PPO KL diagnostic
+            # =================================================
+            #
+            # log_ratio = log(pi_new / pi_old)
+            #
+            # Approximate KL used by PPO:
+            #
+            # KL ~= E[(r - 1) - log(r)]
+            #
+            # where r = exp(log_ratio)
+            #
+            # This should remain relatively small.
             #
 
-            ratio = torch.exp(
+            log_ratio = (
                 selected_log_probs
                 - old_log_probs
+            )
+
+
+            ratio = torch.exp(
+                log_ratio
+            )
+
+
+            approx_kl = (
+                (
+                    ratio
+                    - 1.0
+                    - log_ratio
+                )
+                .mean()
             )
 
 
@@ -1637,6 +1673,10 @@ def train_epoch(
                 critic_loss.item()
             )
 
+            total_kl += (
+                approx_kl.item()
+            )
+
 
             progress.update(1)
 
@@ -1648,6 +1688,7 @@ def train_epoch(
         total_loss / total_updates,
         total_actor / total_updates,
         total_critic / total_updates,
+        total_kl / total_updates,
     )
 
 
@@ -1693,7 +1734,9 @@ def save_checkpoint(
     )
 
 
-### Saving Replay Buffer ###
+# ============================================================
+# Saving Replay Buffer
+# ============================================================
 
 def save_replay_buffer(
     buffer,
@@ -1781,7 +1824,7 @@ def main():
     )
 
 
-        #
+    #
     # Shared league models
     #
 
@@ -1790,7 +1833,7 @@ def main():
 
     #
     # Modèles déjà présents dans la ligue
-    # (BC4, BC5, snapshots 13 -> 32)
+    # BC4, BC5, snapshots 016 -> 037
     #
 
     for (
@@ -1808,7 +1851,7 @@ def main():
     #
     # Préparer les futurs slots
     #
-    # Epoch 33 -> 42
+    # Epoch 37 -> 41
     #
 
     future_end = (
@@ -2118,19 +2161,23 @@ def main():
             # PPO
             #
 
-            loss, actor_loss, critic_loss = (
-                train_epoch(
-                    model,
-                    optimizer,
-                    buffer,
-                )
+            (
+                loss,
+                actor_loss,
+                critic_loss,
+                approx_kl,
+            ) = train_epoch(
+                model,
+                optimizer,
+                buffer,
             )
 
 
             print(
                 f"Loss={loss:.4f} "
                 f"| Actor={actor_loss:.4f} "
-                f"| Critic={critic_loss:.4f}",
+                f"| Critic={critic_loss:.4f} "
+                f"| KL={approx_kl:.6f}",
                 flush=True,
             )
 
@@ -2146,6 +2193,7 @@ def main():
                     epoch,
                 )
 
+
             #
             # On-policy
             #
@@ -2157,6 +2205,7 @@ def main():
                 "Replay buffer cleared after PPO update.",
                 flush=True,
             )
+
 
             #
             # Uncertainty stats
