@@ -24,7 +24,7 @@ BC_CHECKPOINT = (
 RL_CHECKPOINT = (
     CHECKPOINT_DIR
     / "rl_epoch"
-    / "rl_epoch_39.pt"
+    / "rl_epoch_10.pt"
 )
 
 TEMPERATURE = 0.5

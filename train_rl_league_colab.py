@@ -1,7 +1,6 @@
+# ============================================================
 # Train_RL.py
-
-
-### Imports ###
+# ============================================================
 
 import pickle
 import time
@@ -35,7 +34,9 @@ from src.actions_space import ACTIONS
 from src.actions_space import ACTION_TO_INDEX
 
 
-### Constants ###
+# ============================================================
+# Constants
+# ============================================================
 
 PROJECT_ROOT = Path(
     "/content/drive/MyDrive/ALBERTA"
@@ -43,16 +44,38 @@ PROJECT_ROOT = Path(
 
 
 # ============================================================
+# Temperature
+# ============================================================
+
+# Température utilisée UNIQUEMENT pour le self-play.
+#
+# Elle contrôle la distribution comportementale de PPOAgent.
+#
+# T = 1.0 :
+# distribution normale du réseau
+#
+# T > 1.0 :
+# exploration augmentée
+#
+# T < 1.0 :
+# distribution plus déterministe
+#
+
+TEMPERATURE_SELFPLAY = 1.5
+
+
+# ============================================================
 # Reprise RL
 # ============================================================
 
-# On reprend depuis rl_epoch_36.pt
-
 START_EPOCH = 1
-RESUME_RL = False # True pour reprendre un entrainement
-RESUME_EPOCH = 36 # Seulement si True au dessus
+
+RESUME_RL = False
+
+RESUME_EPOCH = 36
 
 CHECKPOINT_EPOCH = START_EPOCH - 1
+
 
 LEAGUE_DIR = (
     PROJECT_ROOT
@@ -72,20 +95,17 @@ DEVICE = (
 # Hyperparameters
 # ============================================================
 
-LR = 1e-4
+LR = 5e-4
 
 GAMES_PER_EPOCH = 900
 
-# Validation finale du PPO :
-# epochs 37, 38, 39, 40, 41
-
-RL_EPOCHS = 5
+RL_EPOCHS = 10
 
 CHECKPOINT_EVERY = 1
 
 VALUE_COEF = 0.1
 
-BATCH_SIZE = 2048
+BATCH_SIZE = 4096
 
 SGD_EPOCHS = 3
 
@@ -106,8 +126,6 @@ ENTROPY_COEF = 0.01
 # ============================================================
 # League
 # ============================================================
-
-# BC4 + BC5 + league_epoch_016 -> league_epoch_037
 
 LEAGUE_MAX_AGENTS = 22
 
@@ -234,12 +252,19 @@ CHECKPOINT = (
 def load_model():
 
     print()
-    print("======================================")
+    print(
+        "======================================"
+    )
+
 
     if RESUME_RL:
 
         print("Resuming RL")
-        print("======================================")
+
+        print(
+            "======================================"
+        )
+
 
         checkpoint_path = (
             PROJECT_ROOT
@@ -248,9 +273,11 @@ def load_model():
             / f"rl_epoch_{RESUME_EPOCH}.pt"
         )
 
+
         print(
             f"Checkpoint: {checkpoint_path}"
         )
+
 
         bc_model = ChessResNet(
             num_actions=len(ACTIONS),
@@ -258,23 +285,28 @@ def load_model():
             blocks=4,
         )
 
+
         model = ActorCritic(
             bc_model
         ).to(DEVICE)
+
 
         checkpoint = torch.load(
             checkpoint_path,
             map_location=DEVICE,
         )
 
+
         model.load_state_dict(
             checkpoint["model_state_dict"]
         )
+
 
         optimizer = Adam(
             model.parameters(),
             lr=LR,
         )
+
 
         if "optimizer_state_dict" in checkpoint:
 
@@ -284,19 +316,28 @@ def load_model():
                 ]
             )
 
+
             print(
                 "Optimizer state loaded."
             )
+
 
         print(
             f"RL checkpoint loaded "
             f"(epoch {checkpoint.get('epoch', '?')})."
         )
 
+
     else:
 
-        print("Initializing RL from BC5")
-        print("======================================")
+        print(
+            "Initializing RL from BC5"
+        )
+
+        print(
+            "======================================"
+        )
+
 
         bc5_path = (
             PROJECT_ROOT
@@ -305,59 +346,71 @@ def load_model():
             / "bc_v2_5_epoch_5.pt"
         )
 
+
         bc_model = ChessResNet(
             num_actions=len(ACTIONS),
             channels=64,
             blocks=4,
         )
 
+
         checkpoint = torch.load(
             bc5_path,
             map_location=DEVICE,
         )
 
+
         bc_model.load_state_dict(
             checkpoint["model_state_dict"]
         )
 
+
         model = ActorCritic(
             bc_model
         ).to(DEVICE)
+
 
         optimizer = Adam(
             model.parameters(),
             lr=LR,
         )
 
+
         print(
             "Initial policy loaded from BC5."
         )
 
-    # --------------------------------------------------------
-    # League
-    # --------------------------------------------------------
+
+    # ========================================================
+    # League initiale
+    # ========================================================
 
     league = League(
         max_agents=LEAGUE_MAX_AGENTS
     )
 
+
     bc4 = load_bc_agent(4)
+
 
     league.add_agent(
         "bc_epoch_4",
         bc4,
     )
 
+
     bc5 = load_bc_agent(5)
+
 
     league.add_agent(
         "bc_epoch_5",
         bc5,
     )
 
-    # --------------------------------------------------------
-    # En cas de reprise RL : charger les snapshots voulus
-    # --------------------------------------------------------
+
+    # ========================================================
+    # Reprise : charger snapshots
+    # ========================================================
 
     if RESUME_RL:
 
@@ -371,13 +424,16 @@ def load_model():
                 / f"league_epoch_{epoch:03d}.pt"
             )
 
+
             if not path.exists():
                 continue
+
 
             checkpoint = torch.load(
                 path,
                 map_location=DEVICE,
             )
+
 
             snapshot_base = ChessResNet(
                 num_actions=len(ACTIONS),
@@ -385,36 +441,46 @@ def load_model():
                 blocks=4,
             )
 
+
             snapshot = ActorCritic(
                 snapshot_base
             )
+
 
             snapshot.load_state_dict(
                 checkpoint["model_state_dict"]
             )
 
+
             snapshot = snapshot.to(DEVICE)
+
             snapshot.eval()
+
 
             league.add_agent(
                 f"league_epoch_{epoch:03d}",
                 snapshot,
             )
 
+
             print(
                 f"Loaded league_epoch_{epoch:03d}"
             )
 
+
     print()
+
     print(
         f"League loaded: {len(league)} agents"
     )
 
+
     return model, optimizer, league
 
 
-### Self-play Collection ###
-
+# ============================================================
+# Self-play globals
+# ============================================================
 
 _WORKER_CURRENT_MODEL = None
 
@@ -496,7 +562,7 @@ def _init_selfplay_worker(
     _WORKER_CURRENT_AGENT = PPOAgent(
         _WORKER_CURRENT_MODEL,
         deterministic=False,
-        temperature=0.75,
+        temperature=TEMPERATURE_SELFPLAY,
         device="cpu",
     )
 
@@ -522,7 +588,7 @@ def _init_selfplay_worker(
             PPOAgent(
                 model,
                 deterministic=False,
-                temperature=0.75,
+                temperature=TEMPERATURE_SELFPLAY,
                 device="cpu",
             )
         )
@@ -574,7 +640,7 @@ def _selfplay_worker(
                 PPOAgent(
                     model,
                     deterministic=False,
-                    temperature=0.75,
+                    temperature=TEMPERATURE_SELFPLAY,
                     device="cpu",
                 )
             )
@@ -968,11 +1034,9 @@ def collect_games_parallel(
     )
 
 
-    #
     # ========================================================
-    # Calcul U
+    # Calcul U + H + HU
     # ========================================================
-    #
 
     uncertainty_start = (
         time.perf_counter()
@@ -1011,6 +1075,7 @@ def collect_games_parallel(
         ).to(DEVICE)
 
 
+        # U pour TOUTES les positions.
         uncertainties = (
             league.uncertainty_batch(
                 x,
@@ -1030,6 +1095,9 @@ def collect_games_parallel(
             U = U.item()
 
 
+            # H vient de PPOAgent.
+            # Il s'agit de l'entropie de la distribution
+            # réellement utilisée pour le sampling.
             H = step.get(
                 "entropy",
                 0.0,
@@ -1044,6 +1112,7 @@ def collect_games_parallel(
             step["HU"] = HU
 
 
+            # Une entrée pour CHAQUE position.
             stats.add(
                 step["fen"],
                 step["action"],
@@ -1067,10 +1136,19 @@ def collect_games_parallel(
     )
 
 
+    print(
+        f"Uncertainty records added: "
+        f"{len(all_steps)}",
+        flush=True,
+    )
+
+
     return completed_games
 
 
-### Fixed Evaluation ###
+# ============================================================
+# Evaluation
+# ============================================================
 
 def evaluate_against_agent(
     model,
@@ -1106,7 +1184,7 @@ def evaluate_against_agent(
             current_agent = PPOAgent(
                 model,
                 deterministic=False,
-                temperature=0.75,
+                temperature=TEMPERATURE_SELFPLAY,
                 device=DEVICE,
             )
 
@@ -1114,7 +1192,7 @@ def evaluate_against_agent(
             opponent_agent = PPOAgent(
                 opponent,
                 deterministic=False,
-                temperature=0.75,
+                temperature=TEMPERATURE_SELFPLAY,
                 device=DEVICE,
             )
 
@@ -1223,7 +1301,9 @@ def evaluate_against_agent(
     }
 
 
-### GAE ###
+# ============================================================
+# GAE
+# ============================================================
 
 def compute_gae(
     trajectory,
@@ -1297,7 +1377,9 @@ def compute_gae(
     )
 
 
-### Training ###
+# ============================================================
+# PPO training
+# ============================================================
 
 def train_epoch(
     model,
@@ -1308,9 +1390,9 @@ def train_epoch(
     model.train()
 
 
-    #
+    # ========================================================
     # Freeze BatchNorm
-    #
+    # ========================================================
 
     for module in model.modules():
 
@@ -1342,11 +1424,9 @@ def train_epoch(
     )
 
 
-    #
     # ========================================================
     # Accumulators
     # ========================================================
-    #
 
     total_loss = 0.0
     total_actor = 0.0
@@ -1383,11 +1463,9 @@ def train_epoch(
     )
 
 
-    #
     # ========================================================
     # PPO updates
     # ========================================================
-    #
 
     for _ in range(
         SGD_EPOCHS
@@ -1402,11 +1480,9 @@ def train_epoch(
             )
 
 
-            #
             # =================================================
             # Encode boards
             # =================================================
-            #
 
             boards = [
                 chess.variant.AtomicBoard(
@@ -1421,20 +1497,16 @@ def train_epoch(
             ).to(DEVICE)
 
 
-            #
             # =================================================
             # Forward
             # =================================================
-            #
 
             policy, values = model(x)
 
 
-            #
             # =================================================
             # Returns
             # =================================================
-            #
 
             returns = torch.tensor(
                 [
@@ -1446,11 +1518,9 @@ def train_epoch(
             ).unsqueeze(1)
 
 
-            #
             # =================================================
-            # Advantages — RAW
+            # Advantages RAW
             # =================================================
-            #
 
             raw_advantages = torch.tensor(
                 [
@@ -1462,10 +1532,6 @@ def train_epoch(
             )
 
 
-            #
-            # Diagnostics BEFORE normalization
-            #
-
             adv_mean = (
                 raw_advantages.mean()
             )
@@ -1475,11 +1541,9 @@ def train_epoch(
             )
 
 
-            #
             # =================================================
             # Advantage normalization
             # =================================================
-            #
 
             advantages = (
                 raw_advantages
@@ -1490,11 +1554,12 @@ def train_epoch(
             )
 
 
-            #
             # =================================================
             # Old log probabilities
-            # =================================================
             #
+            # Ceux-ci proviennent de la distribution
+            # comportementale avec T = TEMPERATURE_SELFPLAY.
+            # =================================================
 
             old_log_probs = torch.tensor(
                 [
@@ -1506,11 +1571,9 @@ def train_epoch(
             )
 
 
-            #
             # =================================================
             # Legal mask
             # =================================================
-            #
 
             legal_mask = torch.zeros(
                 (
@@ -1548,11 +1611,9 @@ def train_epoch(
                 ] = True
 
 
-            #
             # =================================================
             # Mask logits
             # =================================================
-            #
 
             legal_logits = (
                 policy.masked_fill(
@@ -1562,12 +1623,17 @@ def train_epoch(
             )
 
 
+            # =================================================
+            # Distribution PPO
             #
-            # Même température que self-play
-            #
+            # IMPORTANT :
+            # exactement la même température que celle
+            # utilisée lors du self-play.
+            # =================================================
 
             ppo_logits = (
-                legal_logits / 0.75
+                legal_logits
+                / TEMPERATURE_SELFPLAY
             )
 
 
@@ -1587,11 +1653,9 @@ def train_epoch(
             )
 
 
-            #
             # =================================================
             # PPO ratio
             # =================================================
-            #
 
             log_ratio = (
                 selected_log_probs
@@ -1604,11 +1668,9 @@ def train_epoch(
             )
 
 
-            #
             # =================================================
             # Policy KL
             # =================================================
-            #
 
             approx_kl = (
                 (
@@ -1619,11 +1681,9 @@ def train_epoch(
             )
 
 
-            #
             # =================================================
             # Clip fraction
             # =================================================
-            #
 
             clipped_mask = (
                 (ratio < 1.0 - PPO_CLIP)
@@ -1639,11 +1699,9 @@ def train_epoch(
             )
 
 
-            #
             # =================================================
             # PPO actor objective
             # =================================================
-            #
 
             unclipped = (
                 ratio
@@ -1667,11 +1725,11 @@ def train_epoch(
             ).mean()
 
 
-            #
             # =================================================
             # Entropy
-            # =================================================
             #
+            # Distribution après température.
+            # =================================================
 
             probs = torch.softmax(
                 ppo_logits,
@@ -1691,11 +1749,9 @@ def train_epoch(
             ).mean()
 
 
-            #
             # =================================================
             # Critic
             # =================================================
-            #
 
             critic_loss = F.mse_loss(
                 values,
@@ -1703,11 +1759,9 @@ def train_epoch(
             )
 
 
-            #
             # =================================================
             # Critic diagnostics
             # =================================================
-            #
 
             value_flat = (
                 values.squeeze(1)
@@ -1735,12 +1789,6 @@ def train_epoch(
             )
 
 
-            #
-            # Explained variance
-            #
-            # EV = 1 - Var(y - y_hat) / Var(y)
-            #
-
             return_variance = torch.var(
                 return_flat,
                 unbiased=False,
@@ -1763,11 +1811,9 @@ def train_epoch(
             )
 
 
-            #
             # =================================================
             # Total loss
             # =================================================
-            #
 
             loss = (
                 actor_loss
@@ -1780,21 +1826,9 @@ def train_epoch(
             )
 
 
-            #
             # =================================================
             # Pure PPO actor gradient
             # =================================================
-            #
-            # Gradient of actor_loss ONLY
-            # with respect to model.policy.
-            #
-            # This excludes:
-            #   - critic loss
-            #   - entropy term
-            #
-            # Therefore this directly measures the
-            # policy-gradient signal reaching the policy head.
-            #
 
             actor_gradients = torch.autograd.grad(
                 actor_loss,
@@ -1823,11 +1857,9 @@ def train_epoch(
             )
 
 
-            #
             # =================================================
             # Pure critic gradient
             # =================================================
-            #
 
             critic_gradients = torch.autograd.grad(
                 critic_loss,
@@ -1856,21 +1888,15 @@ def train_epoch(
             )
 
 
-            #
             # =================================================
             # Backward
             # =================================================
-            #
 
             optimizer.zero_grad()
 
 
             loss.backward()
 
-
-            #
-            # Gradient clipping
-            #
 
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
@@ -1881,31 +1907,19 @@ def train_epoch(
             optimizer.step()
 
 
-            #
             # =================================================
             # Accumulate
             # =================================================
-            #
 
-            total_loss += (
-                loss.item()
-            )
+            total_loss += loss.item()
 
-            total_actor += (
-                actor_loss.item()
-            )
+            total_actor += actor_loss.item()
 
-            total_critic += (
-                critic_loss.item()
-            )
+            total_critic += critic_loss.item()
 
-            total_kl += (
-                approx_kl.item()
-            )
+            total_kl += approx_kl.item()
 
-            total_entropy += (
-                entropy.item()
-            )
+            total_entropy += entropy.item()
 
             total_clip_fraction += (
                 clip_fraction.item()
@@ -1954,11 +1968,9 @@ def train_epoch(
     progress.close()
 
 
-    #
     # ========================================================
     # Averages
     # ========================================================
-    #
 
     avg_loss = (
         total_loss
@@ -2036,11 +2048,9 @@ def train_epoch(
     )
 
 
-    #
     # ========================================================
     # Diagnostics
     # ========================================================
-    #
 
     print()
 
@@ -2054,6 +2064,12 @@ def train_epoch(
 
     print(
         "======================================"
+    )
+
+
+    print(
+        f"Self-play temperature: "
+        f"{TEMPERATURE_SELFPLAY:.2f}"
     )
 
 
@@ -2141,7 +2157,9 @@ def train_epoch(
     )
 
 
-### Checkpoints ###
+# ============================================================
+# Checkpoints
+# ============================================================
 
 def save_checkpoint(
     model,
@@ -2184,7 +2202,7 @@ def save_checkpoint(
 
 
 # ============================================================
-# Saving Replay Buffer
+# Replay Buffer
 # ============================================================
 
 def save_replay_buffer(
@@ -2223,23 +2241,30 @@ def save_replay_buffer(
 
 def main():
 
-    #
+    # ========================================================
     # Load model + optimizer + league
-    #
+    # ========================================================
 
     model, optimizer, league = (
         load_model()
     )
 
 
-    #
+    # ========================================================
     # Replay buffer
-    #
+    # ========================================================
 
     buffer = ReplayBuffer(
         capacity=100000
     )
 
+
+    # ========================================================
+    # Uncertainty statistics
+    #
+    # Nouveau run :
+    # on repart avec un JSON entièrement nouveau.
+    # ========================================================
 
     stats = UncertaintyStats()
 
@@ -2247,18 +2272,18 @@ def main():
     best_loss = None
 
 
-    #
+    # ========================================================
     # Parallel self-play
-    #
+    # ========================================================
 
     NUM_WORKERS = 12
 
     SELFPLAY_BATCH_SIZE = 256
 
 
-    #
+    # ========================================================
     # Shared current model
-    #
+    # ========================================================
 
     print(
         "\nPreparing shared CPU models...",
@@ -2273,17 +2298,12 @@ def main():
     )
 
 
-    #
+    # ========================================================
     # Shared league models
-    #
+    # ========================================================
 
     shared_league_models = {}
 
-
-    #
-    # Modèles déjà présents dans la ligue
-    # BC4, BC5, snapshots 016 -> 037
-    #
 
     for (
         name,
@@ -2297,11 +2317,9 @@ def main():
         )
 
 
-    #
-    # Préparer les futurs slots
-    #
-    # Epoch 37 -> 41
-    #
+    # ========================================================
+    # Préparer futurs slots
+    # ========================================================
 
     future_end = (
         START_EPOCH
@@ -2349,9 +2367,9 @@ def main():
     )
 
 
-    #
+    # ========================================================
     # Multiprocessing
-    #
+    # ========================================================
 
     ctx = mp.get_context(
         "spawn"
@@ -2360,10 +2378,6 @@ def main():
 
     manager = ctx.Manager()
 
-
-    #
-    # Registry
-    #
 
     league_registry = manager.list(
         league.names()
@@ -2384,9 +2398,9 @@ def main():
         )
 
 
-    #
+    # ========================================================
     # Pool
-    #
+    # ========================================================
 
     with ctx.Pool(
         processes=NUM_WORKERS,
@@ -2398,9 +2412,9 @@ def main():
         ),
     ) as pool:
 
-        #
+        # ====================================================
         # RL loop
-        #
+        # ====================================================
 
         for epoch in range(
             START_EPOCH,
@@ -2408,7 +2422,7 @@ def main():
         ):
 
             print(
-                f"\n======================================",
+                "\n======================================",
                 flush=True,
             )
 
@@ -2420,7 +2434,7 @@ def main():
 
 
             print(
-                f"======================================",
+                "======================================",
                 flush=True,
             )
 
@@ -2432,9 +2446,9 @@ def main():
             draws = 0
 
 
-            #
+            # =================================================
             # Self-play
-            #
+            # =================================================
 
             games = collect_games_parallel(
                 pool,
@@ -2449,9 +2463,9 @@ def main():
             )
 
 
-            #
+            # =================================================
             # Construction replay buffer
-            #
+            # =================================================
 
             for game in games:
 
@@ -2470,9 +2484,9 @@ def main():
                 )
 
 
-                #
+                # =============================================
                 # Résultat
-                #
+                # =============================================
 
                 if result == "1-0":
 
@@ -2501,9 +2515,9 @@ def main():
                     draws += 1
 
 
-                #
+                # =============================================
                 # Rewards
-                #
+                # =============================================
 
                 rewards = [
                     0.0
@@ -2540,9 +2554,9 @@ def main():
                     )
 
 
-                #
+                # =============================================
                 # GAE
-                #
+                # =============================================
 
                 advantages, returns = (
                     compute_gae(
@@ -2554,9 +2568,9 @@ def main():
                 )
 
 
-                #
+                # =============================================
                 # Replay
-                #
+                # =============================================
 
                 for (
                     step,
@@ -2579,9 +2593,9 @@ def main():
                     )
 
 
-            #
+            # =================================================
             # Stats
-            #
+            # =================================================
 
             score_rate = (
                 wins
@@ -2606,9 +2620,9 @@ def main():
             )
 
 
-            #
+            # =================================================
             # PPO
-            #
+            # =================================================
 
             (
                 loss,
@@ -2631,9 +2645,9 @@ def main():
             )
 
 
-            #
+            # =================================================
             # Replay buffer sauvegarde
-            #
+            # =================================================
 
             if epoch % 5 == 0:
 
@@ -2643,9 +2657,9 @@ def main():
                 )
 
 
-            #
+            # =================================================
             # On-policy
-            #
+            # =================================================
 
             buffer.clear()
 
@@ -2656,20 +2670,36 @@ def main():
             )
 
 
-            #
+            # =================================================
             # Uncertainty stats
             #
+            # save() écrit TOUT stats.data.
+            # Comme stats est conservé pendant tout le run,
+            # le JSON contient toutes les positions du run.
+            # =================================================
 
-            stats.save(
+            stats_path = (
                 PROJECT_ROOT
                 / "checkpoints"
                 / "uncertainty_stats.json"
             )
 
 
-            #
+            stats.save(
+                stats_path
+            )
+
+
+            print(
+                f"Uncertainty JSON updated: "
+                f"{len(stats.data)} positions",
+                flush=True,
+            )
+
+
+            # =================================================
             # RL checkpoint
-            #
+            # =================================================
 
             if (
                 epoch
@@ -2685,9 +2715,9 @@ def main():
                 )
 
 
-            #
+            # =================================================
             # Snapshot league
-            #
+            # =================================================
 
             snapshot = (
                 copy.deepcopy(
@@ -2709,10 +2739,6 @@ def main():
                 snapshot,
             )
 
-
-            #
-            # Sauvegarde
-            #
 
             snapshot_path = (
                 LEAGUE_DIR
@@ -2739,9 +2765,9 @@ def main():
             )
 
 
-            #
+            # =================================================
             # Shared snapshot
-            #
+            # =================================================
 
             if agent_name not in (
                 shared_league_models
@@ -2775,9 +2801,9 @@ def main():
             shared_snapshot.eval()
 
 
-            #
+            # =================================================
             # Registry
-            #
+            # =================================================
 
             league_registry[:] = (
                 league.names()
@@ -2791,9 +2817,9 @@ def main():
             )
 
 
-            #
+            # =================================================
             # Shared current model
-            #
+            # =================================================
 
             for (
                 key,
@@ -2807,9 +2833,9 @@ def main():
                 )
 
 
-            #
+            # =================================================
             # Best checkpoint
-            #
+            # =================================================
 
             if (
                 best_loss is None
@@ -2845,9 +2871,9 @@ def main():
                 )
 
 
-            #
+            # =================================================
             # Summary
-            #
+            # =================================================
 
             print(
                 f"\n===== Epoch {epoch} summary =====",

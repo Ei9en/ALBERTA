@@ -35,11 +35,28 @@ Les quatre expériences principales sont :
 
 En complément :
 - analyse H / U / HU
+- gestion explicite des NaN dans H / U / HU
+- diagnostic de couverture des métriques
 - corrélations Pearson et Spearman sans scipy
 - starting position
 - export CSV
 - graphiques PNG
 - rapport texte complet
+
+IMPORTANT
+---------
+Les NaN de H/U/HU ne suppriment PAS l'observation.
+
+Une observation avec :
+
+    reward = 1
+    H = NaN
+    U = 0.02
+
+reste une observation parfaitement valide pour toutes les
+analyses basées sur le reward.
+
+Elle est simplement ignorée dans les analyses nécessitant H.
 
 Usage
 -----
@@ -63,7 +80,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
 import matplotlib.pyplot as plt
 
 
@@ -106,9 +122,14 @@ def entropy_from_probs(probs):
     Shannon entropy in bits.
     """
 
-    probs = np.asarray(probs, dtype=float)
+    probs = np.asarray(
+        probs,
+        dtype=float,
+    )
 
-    probs = probs[probs > 0]
+    probs = probs[
+        probs > 0
+    ]
 
     if len(probs) == 0:
         return np.nan
@@ -129,7 +150,11 @@ def result_entropy(
     H(R | s) for R in {-1, 0, +1}.
     """
 
-    n = wins + draws + losses
+    n = (
+        wins
+        + draws
+        + losses
+    )
 
     if n == 0:
         return np.nan
@@ -140,7 +165,9 @@ def result_entropy(
         losses / n,
     ])
 
-    return entropy_from_probs(probs)
+    return entropy_from_probs(
+        probs
+    )
 
 
 def result_expected_value(
@@ -156,7 +183,11 @@ def result_expected_value(
         loss = -1
     """
 
-    n = wins + draws + losses
+    n = (
+        wins
+        + draws
+        + losses
+    )
 
     if n == 0:
         return np.nan
@@ -175,7 +206,11 @@ def result_variance(
     Var(R | s), R in {-1, 0, +1}.
     """
 
-    n = wins + draws + losses
+    n = (
+        wins
+        + draws
+        + losses
+    )
 
     if n == 0:
         return np.nan
@@ -248,7 +283,9 @@ def percentile_bootstrap_mean(
         )
 
     if n == 1:
-        value = float(values[0])
+        value = float(
+            values[0]
+        )
 
         return (
             value,
@@ -256,7 +293,9 @@ def percentile_bootstrap_mean(
             value,
         )
 
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(
+        seed
+    )
 
     indices = rng.integers(
         0,
@@ -268,10 +307,15 @@ def percentile_bootstrap_mean(
     )
 
     bootstrap_means = (
-        values[indices].mean(axis=1)
+        values[
+            indices
+        ].mean(axis=1)
     )
 
-    alpha = 1.0 - CONFIDENCE_LEVEL
+    alpha = (
+        1.0
+        - CONFIDENCE_LEVEL
+    )
 
     lower = np.quantile(
         bootstrap_means,
@@ -302,7 +346,9 @@ def rankdata(values):
         dtype=float,
     )
 
-    order = np.argsort(values)
+    order = np.argsort(
+        values
+    )
 
     ranks = np.empty(
         len(values),
@@ -319,7 +365,8 @@ def rankdata(values):
             j < len(values)
             and values[
                 order[j]
-            ] == values[
+            ]
+            == values[
                 order[i]
             ]
         ):
@@ -344,6 +391,9 @@ def pearson_corr(
 ):
     """
     Pearson correlation.
+
+    NaN / infinite values are automatically removed
+    pairwise.
     """
 
     x = np.asarray(
@@ -387,6 +437,9 @@ def spearman_corr(
 ):
     """
     Spearman correlation without scipy.
+
+    NaN / infinite values are automatically removed
+    pairwise.
     """
 
     x = np.asarray(
@@ -417,26 +470,71 @@ def spearman_corr(
 
 
 def safe_mean(series):
+    """
+    Mean ignoring NaN / infinite values.
+    """
+
+    values = pd.to_numeric(
+        series,
+        errors="coerce",
+    )
+
+    values = values[
+        np.isfinite(values)
+    ]
+
+    if len(values) == 0:
+        return np.nan
+
     return float(
-        series.mean()
-    ) if len(series) else np.nan
+        values.mean()
+    )
 
 
 def safe_median(series):
+    """
+    Median ignoring NaN / infinite values.
+    """
+
+    values = pd.to_numeric(
+        series,
+        errors="coerce",
+    )
+
+    values = values[
+        np.isfinite(values)
+    ]
+
+    if len(values) == 0:
+        return np.nan
+
     return float(
-        series.median()
-    ) if len(series) else np.nan
+        values.median()
+    )
 
 
 def safe_quantile(
     series,
     q,
 ):
-    if len(series) == 0:
+    """
+    Quantile ignoring NaN / infinite values.
+    """
+
+    values = pd.to_numeric(
+        series,
+        errors="coerce",
+    )
+
+    values = values[
+        np.isfinite(values)
+    ]
+
+    if len(values) == 0:
         return np.nan
 
     return float(
-        series.quantile(q)
+        values.quantile(q)
     )
 
 
@@ -454,6 +552,7 @@ def load_data():
     print()
     print("Loading uncertainty statistics")
     print("-" * 70)
+
     print(
         f"File: {INPUT_PATH}"
     )
@@ -511,29 +610,55 @@ def load_data():
         rows.append(
             {
                 "fen": fen,
-                "actions": record.get(
-                    "actions",
-                    np.nan,
-                ),
-                "H": record.get(
-                    "H",
-                    np.nan,
-                ),
-                "U": record.get(
-                    "U",
-                    np.nan,
-                ),
-                "HU": record.get(
-                    "HU",
-                    np.nan,
-                ),
-                "result": result,
+
+                "actions":
+                    record.get(
+                        "actions",
+                        np.nan,
+                    ),
+
+                "H":
+                    record.get(
+                        "H",
+                        np.nan,
+                    ),
+
+                "U":
+                    record.get(
+                        "U",
+                        np.nan,
+                    ),
+
+                "HU":
+                    record.get(
+                        "HU",
+                        np.nan,
+                    ),
+
+                "result":
+                    result,
             }
         )
 
     df = pd.DataFrame(
         rows
     )
+
+    # --------------------------------------------------------
+    # Explicit numeric conversion
+    # --------------------------------------------------------
+
+    for column in [
+        "actions",
+        "H",
+        "U",
+        "HU",
+    ]:
+
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce",
+        )
 
     print(
         f"Valid records: {len(df):,}"
@@ -542,6 +667,47 @@ def load_data():
     print(
         f"Invalid records skipped: "
         f"{invalid:,}"
+    )
+
+    # --------------------------------------------------------
+    # Metric coverage
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "METRIC COVERAGE"
+    )
+    print("-" * 70)
+
+    n = len(df)
+
+    for column in [
+        "H",
+        "U",
+        "HU",
+    ]:
+
+        valid = np.isfinite(
+            df[column]
+        ).sum()
+
+        missing = (
+            n - valid
+        )
+
+        print(
+            f"{column:>3}: "
+            f"{valid:,} valid "
+            f"({valid / n:.2%}) | "
+            f"{missing:,} NaN/invalid "
+            f"({missing / n:.2%})"
+        )
+
+    print()
+
+    print(
+        "IMPORTANT: NaN values in H/U/HU "
+        "do not invalidate reward observations."
     )
 
     return df
@@ -614,6 +780,7 @@ def analyze_global_results(
     )
 
     print()
+
     print(
         f"Global result entropy: "
         f"{H:.4f} bits"
@@ -701,29 +868,85 @@ def build_position_table(
             ]
         )
 
+        # ----------------------------------------------------
+        # H / U / HU
+        #
+        # NaN are ignored independently.
+        #
+        # This is important:
+        #
+        # if H is NaN for one observation but U is valid,
+        # that observation still contributes to U_mean.
+        # ----------------------------------------------------
+
+        H_values = pd.to_numeric(
+            group["H"],
+            errors="coerce",
+        )
+
+        U_values = pd.to_numeric(
+            group["U"],
+            errors="coerce",
+        )
+
+        HU_values = pd.to_numeric(
+            group["HU"],
+            errors="coerce",
+        )
+
+        H_valid = H_values[
+            np.isfinite(H_values)
+        ]
+
+        U_valid = U_values[
+            np.isfinite(U_values)
+        ]
+
+        HU_valid = HU_values[
+            np.isfinite(HU_values)
+        ]
+
         H_mean = (
-            pd.to_numeric(
-                group["H"],
-                errors="coerce",
-            )
-            .mean()
+            float(H_valid.mean())
+            if len(H_valid)
+            else np.nan
         )
 
         U_mean = (
-            pd.to_numeric(
-                group["U"],
-                errors="coerce",
-            )
-            .mean()
+            float(U_valid.mean())
+            if len(U_valid)
+            else np.nan
         )
 
         HU_mean = (
-            pd.to_numeric(
-                group["HU"],
-                errors="coerce",
-            )
-            .mean()
+            float(HU_valid.mean())
+            if len(HU_valid)
+            else np.nan
         )
+
+        # ----------------------------------------------------
+        # Coverage
+        # ----------------------------------------------------
+
+        H_count = len(H_valid)
+        U_count = len(U_valid)
+        HU_count = len(HU_valid)
+
+        H_fraction = (
+            H_count / n
+        )
+
+        U_fraction = (
+            U_count / n
+        )
+
+        HU_fraction = (
+            HU_count / n
+        )
+
+        # ----------------------------------------------------
+        # Confidence interval
+        # ----------------------------------------------------
 
         ci_low, ci_high = (
             normal_ci_mean(
@@ -736,6 +959,7 @@ def build_position_table(
         rows.append(
             {
                 "fen": fen,
+
                 "n": n,
 
                 "W": wins,
@@ -770,6 +994,10 @@ def build_position_table(
                         <= ci_high
                     ),
 
+                # --------------------------------------------
+                # Uncertainty metrics
+                # --------------------------------------------
+
                 "H_mean":
                     H_mean,
 
@@ -778,6 +1006,24 @@ def build_position_table(
 
                 "HU_mean":
                     HU_mean,
+
+                "H_count":
+                    H_count,
+
+                "U_count":
+                    U_count,
+
+                "HU_count":
+                    HU_count,
+
+                "H_fraction":
+                    H_fraction,
+
+                "U_fraction":
+                    U_fraction,
+
+                "HU_fraction":
+                    HU_fraction,
             }
         )
 
@@ -951,12 +1197,12 @@ def experiment_1(
 
     print(
         f"Mean:   "
-        f"{repeated['result_entropy'].mean():.4f}"
+        f"{safe_mean(repeated['result_entropy']):.4f}"
     )
 
     print(
         f"Median: "
-        f"{repeated['result_entropy'].median():.4f}"
+        f"{safe_median(repeated['result_entropy']):.4f}"
     )
 
     for q in [
@@ -967,13 +1213,17 @@ def experiment_1(
 
         print(
             f"{int(q*100)}th percentile: "
-            f"{repeated['result_entropy'].quantile(q):.4f}"
+            f"{safe_quantile(repeated['result_entropy'], q):.4f}"
         )
 
     print()
 
     max_entropy = (
         math.log2(3)
+    )
+
+    median_entropy = safe_median(
+        repeated["result_entropy"]
     )
 
     print(
@@ -983,10 +1233,11 @@ def experiment_1(
 
     print(
         f"Median / maximum: "
-        f"{repeated['result_entropy'].median() / max_entropy:.2%}"
+        f"{median_entropy / max_entropy:.2%}"
     )
 
     print()
+
     print(
         "Fraction above entropy thresholds:"
     )
@@ -1009,7 +1260,7 @@ def experiment_1(
             ]
             >= threshold
         ).mean()
-        
+
         print(
             f"H >= {threshold:.2f}: "
             f"{fraction:.2%}"
@@ -1054,45 +1305,63 @@ def experiment_2(
                     len(subset),
 
                 "mean_n":
-                    subset["n"].mean(),
+                    safe_mean(
+                        subset["n"]
+                    ),
 
                 "median_n":
-                    subset["n"].median(),
+                    safe_median(
+                        subset["n"]
+                    ),
 
                 "mean_entropy":
-                    subset[
-                        "result_entropy"
-                    ].mean(),
+                    safe_mean(
+                        subset[
+                            "result_entropy"
+                        ]
+                    ),
 
                 "median_entropy":
-                    subset[
-                        "result_entropy"
-                    ].median(),
+                    safe_median(
+                        subset[
+                            "result_entropy"
+                        ]
+                    ),
 
                 "mean_abs_reward":
-                    subset[
-                        "mean_reward"
-                    ].abs().mean(),
+                    safe_mean(
+                        subset[
+                            "mean_reward"
+                        ].abs()
+                    ),
 
                 "median_abs_reward":
-                    subset[
-                        "mean_reward"
-                    ].abs().median(),
+                    safe_median(
+                        subset[
+                            "mean_reward"
+                        ].abs()
+                    ),
 
                 "mean_ci_width":
-                    subset[
-                        "ci95_width"
-                    ].mean(),
+                    safe_mean(
+                        subset[
+                            "ci95_width"
+                        ]
+                    ),
 
                 "median_ci_width":
-                    subset[
-                        "ci95_width"
-                    ].median(),
+                    safe_median(
+                        subset[
+                            "ci95_width"
+                        ]
+                    ),
 
                 "fraction_ci_contains_zero":
-                    subset[
-                        "ci_contains_zero"
-                    ].mean(),
+                    safe_mean(
+                        subset[
+                            "ci_contains_zero"
+                        ]
+                    ),
             }
         )
 
@@ -1162,12 +1431,12 @@ def experiment_3(
 
     print(
         "Mean CI width: "
-        f"{subset['ci95_width'].mean():.4f}"
+        f"{safe_mean(subset['ci95_width']):.4f}"
     )
 
     print(
         "Median CI width: "
-        f"{subset['ci95_width'].median():.4f}"
+        f"{safe_median(subset['ci95_width']):.4f}"
     )
 
     print()
@@ -1370,6 +1639,7 @@ def experiment_4(
     )
 
     print()
+
     print(
         "Interpretation:"
     )
@@ -1404,14 +1674,9 @@ def analyze_uncertainty_relationships(
         >= MIN_OBSERVATIONS_DEFAULT
     ].copy()
 
-    columns = [
-        "result_entropy",
-        "mean_reward",
-        "abs_mean_reward",
-        "H_mean",
-        "U_mean",
-        "HU_mean",
-    ]
+    # --------------------------------------------------------
+    # Absolute expected reward
+    # --------------------------------------------------------
 
     subset[
         "abs_mean_reward"
@@ -1453,6 +1718,15 @@ def analyze_uncertainty_relationships(
         x = subset[x_name]
         y = subset[y_name]
 
+        mask = (
+            np.isfinite(x)
+            & np.isfinite(y)
+        )
+
+        n_pairs = int(
+            mask.sum()
+        )
+
         rows.append(
             {
                 "x":
@@ -1460,6 +1734,16 @@ def analyze_uncertainty_relationships(
 
                 "y":
                     y_name,
+
+                "n_pairs":
+                    n_pairs,
+
+                "coverage":
+                    (
+                        n_pairs / len(subset)
+                        if len(subset)
+                        else np.nan
+                    ),
 
                 "pearson":
                     pearson_corr(
@@ -1488,6 +1772,145 @@ def analyze_uncertainty_relationships(
     )
 
     return result
+
+
+# ============================================================
+# Metric coverage
+# ============================================================
+
+def analyze_metric_coverage(
+    df,
+    position_df,
+):
+
+    print()
+    print("=" * 70)
+    print("H / U / HU COVERAGE")
+    print("=" * 70)
+
+    n = len(df)
+
+    print()
+    print(
+        "Observation-level coverage:"
+    )
+
+    rows = []
+
+    for metric in [
+        "H",
+        "U",
+        "HU",
+    ]:
+
+        valid = np.isfinite(
+            df[metric]
+        )
+
+        count = int(
+            valid.sum()
+        )
+
+        rows.append(
+            {
+                "metric": metric,
+                "valid_observations": count,
+                "invalid_observations":
+                    n - count,
+                "coverage":
+                    count / n
+                    if n
+                    else np.nan,
+            }
+        )
+
+        print(
+            f"{metric:>3}: "
+            f"{count:,}/{n:,} "
+            f"({count / n:.2%})"
+        )
+
+    result = pd.DataFrame(
+        rows
+    )
+
+    print()
+
+    print(
+        "Position-level coverage "
+        f"(FENs with n >= {MIN_OBSERVATIONS_DEFAULT}):"
+    )
+
+    repeated = position_df[
+        position_df["n"]
+        >= MIN_OBSERVATIONS_DEFAULT
+    ]
+
+    position_rows = []
+
+    for metric in [
+        "H",
+        "U",
+        "HU",
+    ]:
+
+        fraction_column = (
+            f"{metric}_fraction"
+        )
+
+        count_column = (
+            f"{metric}_count"
+        )
+
+        valid_positions = (
+            repeated[
+                count_column
+            ] > 0
+        ).sum()
+
+        complete_positions = (
+            repeated[
+                fraction_column
+            ] == 1.0
+        ).sum()
+
+        position_rows.append(
+            {
+                "metric":
+                    metric,
+
+                "positions_with_data":
+                    int(valid_positions),
+
+                "positions_with_complete_data":
+                    int(complete_positions),
+
+                "mean_fraction_valid":
+                    safe_mean(
+                        repeated[
+                            fraction_column
+                        ]
+                    ),
+            }
+        )
+
+        print(
+            f"{metric:>3}: "
+            f"{valid_positions:,} positions "
+            f"with data | "
+            f"{complete_positions:,} fully observed | "
+            f"mean coverage = "
+            f"{safe_mean(repeated[fraction_column]):.2%}"
+        )
+
+    position_result = pd.DataFrame(
+        position_rows
+    )
+
+    return (
+        result,
+        position_result,
+    )
 
 
 # ============================================================
@@ -1521,6 +1944,9 @@ def print_extremes(
         "U_mean",
         "H_mean",
         "HU_mean",
+        "H_fraction",
+        "U_fraction",
+        "HU_fraction",
         "fen",
     ]
 
@@ -1673,11 +2099,13 @@ def make_plots(
 
     plt.figure()
 
-    plt.scatter(
-        valid["U_mean"],
-        valid["result_entropy"],
-        alpha=0.35,
-    )
+    if len(valid):
+
+        plt.scatter(
+            valid["U_mean"],
+            valid["result_entropy"],
+            alpha=0.35,
+        )
 
     plt.xlabel(
         "Mean uncertainty U"
@@ -1707,11 +2135,22 @@ def make_plots(
 
     plt.figure()
 
-    plt.scatter(
-        valid["U_mean"],
-        valid["mean_reward"].abs(),
-        alpha=0.35,
-    )
+    valid = subset[
+        np.isfinite(
+            subset["U_mean"]
+        )
+        & np.isfinite(
+            subset["mean_reward"]
+        )
+    ]
+
+    if len(valid):
+
+        plt.scatter(
+            valid["U_mean"],
+            valid["mean_reward"].abs(),
+            alpha=0.35,
+        )
 
     plt.xlabel(
         "Mean uncertainty U"
@@ -1739,40 +2178,42 @@ def make_plots(
     # 5. Eta vs threshold
     # --------------------------------------------------------
 
-    plt.figure()
+    if len(variance_df):
 
-    plt.plot(
-        variance_df["min_n"],
-        variance_df["eta_position"],
-        marker="o",
-    )
+        plt.figure()
 
-    plt.xlabel(
-        "Minimum observations per FEN"
-    )
+        plt.plot(
+            variance_df["min_n"],
+            variance_df["eta_position"],
+            marker="o",
+        )
 
-    plt.ylabel(
-        "Variance explained by position"
-    )
+        plt.xlabel(
+            "Minimum observations per FEN"
+        )
 
-    plt.title(
-        "Fraction of reward variance explained by position"
-    )
+        plt.ylabel(
+            "Variance explained by position"
+        )
 
-    plt.ylim(
-        0,
-        1,
-    )
+        plt.title(
+            "Fraction of reward variance explained by position"
+        )
 
-    plt.tight_layout()
+        plt.ylim(
+            0,
+            1,
+        )
 
-    plt.savefig(
-        OUTPUT_DIR
-        / "variance_explained.png",
-        dpi=200,
-    )
+        plt.tight_layout()
 
-    plt.close()
+        plt.savefig(
+            OUTPUT_DIR
+            / "variance_explained.png",
+            dpi=200,
+        )
+
+        plt.close()
 
     print(
         "Plots saved."
@@ -1791,6 +2232,8 @@ def save_csvs(
     experiment_3_df,
     experiment_4_df,
     correlations_df,
+    coverage_df,
+    position_coverage_df,
 ):
 
     OUTPUT_DIR.mkdir(
@@ -1848,6 +2291,18 @@ def save_csvs(
         index=False,
     )
 
+    coverage_df.to_csv(
+        OUTPUT_DIR
+        / "metric_coverage_observations.csv",
+        index=False,
+    )
+
+    position_coverage_df.to_csv(
+        OUTPUT_DIR
+        / "metric_coverage_positions.csv",
+        index=False,
+    )
+
     print()
     print(
         "CSV files saved to:"
@@ -1862,6 +2317,8 @@ def save_csvs(
         "experiment_3_confidence_intervals.csv",
         "experiment_4_variance_explained.csv",
         "uncertainty_correlations.csv",
+        "metric_coverage_observations.csv",
+        "metric_coverage_positions.csv",
     ]:
 
         print(
@@ -1880,6 +2337,8 @@ def build_report(
     experiment_2_df,
     experiment_4_df,
     correlations_df,
+    coverage_df,
+    position_coverage_df,
 ):
 
     lines = []
@@ -1890,7 +2349,9 @@ def build_report(
         )
 
     add("=" * 70)
-    add("ALBERTA - REWARD INFORMATION ANALYSIS")
+    add(
+        "ALBERTA - REWARD INFORMATION ANALYSIS"
+    )
     add("=" * 70)
     add()
 
@@ -1932,6 +2393,39 @@ def build_report(
     add(
         f"Entropy: "
         f"{global_stats['entropy']:.6f} bits"
+    )
+
+    add()
+
+    # --------------------------------------------------------
+    # Metric coverage
+    # --------------------------------------------------------
+
+    add(
+        "METRIC COVERAGE"
+    )
+    add("-" * 70)
+
+    add(
+        coverage_df.to_string(
+            index=False,
+            float_format=lambda x:
+                f"{x:.6f}",
+        )
+    )
+
+    add()
+
+    add(
+        "Position-level coverage:"
+    )
+
+    add(
+        position_coverage_df.to_string(
+            index=False,
+            float_format=lambda x:
+                f"{x:.6f}",
+        )
     )
 
     add()
@@ -2040,12 +2534,12 @@ def build_report(
 
     add(
         f"Mean H(R|s): "
-        f"{subset['result_entropy'].mean():.6f}"
+        f"{safe_mean(subset['result_entropy']):.6f}"
     )
 
     add(
         f"Median H(R|s): "
-        f"{subset['result_entropy'].median():.6f}"
+        f"{safe_median(subset['result_entropy']):.6f}"
     )
 
     add(
@@ -2055,7 +2549,7 @@ def build_report(
 
     add(
         f"Median / maximum: "
-        f"{subset['result_entropy'].median() / math.log2(3):.2%}"
+        f"{safe_median(subset['result_entropy']) / math.log2(3):.2%}"
     )
 
     add()
@@ -2123,12 +2617,12 @@ def build_report(
 
     add(
         f"Mean CI width: "
-        f"{subset['ci95_width'].mean():.6f}"
+        f"{safe_mean(subset['ci95_width']):.6f}"
     )
 
     add(
         f"Median CI width: "
-        f"{subset['ci95_width'].median():.6f}"
+        f"{safe_median(subset['ci95_width']):.6f}"
     )
 
     add()
@@ -2210,6 +2704,28 @@ def build_report(
     add()
 
     add(
+        "NaN HANDLING:"
+    )
+
+    add(
+        "NaN values in H/U/HU are treated as missing "
+        "uncertainty measurements."
+    )
+
+    add(
+        "They do not remove the corresponding reward "
+        "observation from the analysis."
+    )
+
+    add(
+        "H, U and HU are analysed independently, so an "
+        "observation with valid U but NaN H still contributes "
+        "to U-based statistics."
+    )
+
+    add()
+
+    add(
         "IMPORTANT:"
     )
 
@@ -2265,13 +2781,25 @@ def main():
         exist_ok=True,
     )
 
+    # --------------------------------------------------------
+    # Load
+    # --------------------------------------------------------
+
     df = load_data()
+
+    # --------------------------------------------------------
+    # Global reward statistics
+    # --------------------------------------------------------
 
     global_stats = (
         analyze_global_results(
             df
         )
     )
+
+    # --------------------------------------------------------
+    # Group by FEN
+    # --------------------------------------------------------
 
     position_df = (
         build_position_table(
@@ -2318,12 +2846,20 @@ def main():
         f"{position_df['n'].max():,}"
     )
 
+    # --------------------------------------------------------
+    # Starting position
+    # --------------------------------------------------------
+
     start_stats = (
         analyze_starting_position(
             df,
             position_df,
         )
     )
+
+    # --------------------------------------------------------
+    # Main experiments
+    # --------------------------------------------------------
 
     experiment_1_df = (
         experiment_1(
@@ -2350,15 +2886,39 @@ def main():
         )
     )
 
+    # --------------------------------------------------------
+    # H / U / HU
+    # --------------------------------------------------------
+
     correlations_df = (
         analyze_uncertainty_relationships(
             position_df
         )
     )
 
+    # --------------------------------------------------------
+    # Coverage
+    # --------------------------------------------------------
+
+    (
+        coverage_df,
+        position_coverage_df,
+    ) = analyze_metric_coverage(
+        df,
+        position_df,
+    )
+
+    # --------------------------------------------------------
+    # Extremes
+    # --------------------------------------------------------
+
     print_extremes(
         position_df
     )
+
+    # --------------------------------------------------------
+    # Save CSV
+    # --------------------------------------------------------
 
     save_csvs(
         df,
@@ -2368,13 +2928,23 @@ def main():
         experiment_3_df,
         experiment_4_df,
         correlations_df,
+        coverage_df,
+        position_coverage_df,
     )
+
+    # --------------------------------------------------------
+    # Plots
+    # --------------------------------------------------------
 
     make_plots(
         position_df,
         experiment_2_df,
         experiment_4_df,
     )
+
+    # --------------------------------------------------------
+    # Report
+    # --------------------------------------------------------
 
     report = build_report(
         global_stats,
@@ -2383,6 +2953,8 @@ def main():
         experiment_2_df,
         experiment_4_df,
         correlations_df,
+        coverage_df,
+        position_coverage_df,
     )
 
     report_path = (
@@ -2405,7 +2977,7 @@ def main():
     print("=" * 70)
 
     print(
-        f"Full report saved to:"
+        "Full report saved to:"
     )
 
     print(
@@ -2418,6 +2990,7 @@ def main():
     print("=" * 70)
 
     print()
+
     print(
         f"Results written to: "
         f"{OUTPUT_DIR}"
