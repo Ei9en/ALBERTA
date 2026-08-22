@@ -47,9 +47,12 @@ PROJECT_ROOT = Path(
 # ============================================================
 
 # On reprend depuis rl_epoch_36.pt
-START_EPOCH = 37
 
-CHECKPOINT_EPOCH = 36
+START_EPOCH = 1
+RESUME_RL = False # True pour reprendre un entrainement
+RESUME_EPOCH = 36 # Seulement si True au dessus
+
+CHECKPOINT_EPOCH = START_EPOCH - 1
 
 LEAGUE_DIR = (
     PROJECT_ROOT
@@ -75,13 +78,14 @@ GAMES_PER_EPOCH = 900
 
 # Validation finale du PPO :
 # epochs 37, 38, 39, 40, 41
+
 RL_EPOCHS = 5
 
 CHECKPOINT_EVERY = 1
 
 VALUE_COEF = 0.1
 
-BATCH_SIZE = 4096
+BATCH_SIZE = 2048
 
 SGD_EPOCHS = 3
 
@@ -104,12 +108,12 @@ ENTROPY_COEF = 0.01
 # ============================================================
 
 # BC4 + BC5 + league_epoch_016 -> league_epoch_037
-# = 2 + 22 = 24 agents
-LEAGUE_MAX_AGENTS = 24
 
-LEAGUE_START_EPOCH = 16
+LEAGUE_MAX_AGENTS = 22
 
-LEAGUE_END_EPOCH = 37
+LEAGUE_START_EPOCH = 0
+
+LEAGUE_END_EPOCH = 0
 
 
 # ============================================================
@@ -176,9 +180,12 @@ def load_league_agent(
 
     if not path.exists():
 
-        raise FileNotFoundError(
-            f"League snapshot not found: {path}"
+        print(
+            f"WARNING: missing league snapshot: "
+            f"{path}"
         )
+
+        return None
 
 
     checkpoint = torch.load(
@@ -228,92 +235,111 @@ def load_model():
 
     print()
     print("======================================")
-    print("Loading RL checkpoint")
-    print("======================================")
-    print(
-        f"Checkpoint: {CHECKPOINT}"
-    )
 
+    if RESUME_RL:
 
-    #
-    # Architecture
-    #
+        print("Resuming RL")
+        print("======================================")
 
-    bc_model = ChessResNet(
-        num_actions=len(ACTIONS),
-        channels=64,
-        blocks=4,
-    )
-
-
-    model = ActorCritic(
-        bc_model
-    )
-
-
-    model = model.to(DEVICE)
-
-
-    #
-    # Charger checkpoint RL
-    #
-
-    checkpoint = torch.load(
-        CHECKPOINT,
-        map_location=DEVICE,
-    )
-
-
-    model.load_state_dict(
-        checkpoint["model_state_dict"]
-    )
-
-
-    #
-    # Optimizer
-    #
-
-    optimizer = Adam(
-        model.parameters(),
-        lr=LR,
-    )
-
-
-    #
-    # Reprendre l'état optimizer
-    #
-
-    if "optimizer_state_dict" in checkpoint:
-
-        optimizer.load_state_dict(
-            checkpoint[
-                "optimizer_state_dict"
-            ]
+        checkpoint_path = (
+            PROJECT_ROOT
+            / "checkpoints"
+            / "rl_epoch"
+            / f"rl_epoch_{RESUME_EPOCH}.pt"
         )
 
         print(
-            "Optimizer state loaded."
+            f"Checkpoint: {checkpoint_path}"
         )
 
+        bc_model = ChessResNet(
+            num_actions=len(ACTIONS),
+            channels=64,
+            blocks=4,
+        )
 
-    print(
-        f"RL checkpoint loaded "
-        f"(epoch {checkpoint.get('epoch', '?')})."
-    )
+        model = ActorCritic(
+            bc_model
+        ).to(DEVICE)
 
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location=DEVICE,
+        )
 
-    #
+        model.load_state_dict(
+            checkpoint["model_state_dict"]
+        )
+
+        optimizer = Adam(
+            model.parameters(),
+            lr=LR,
+        )
+
+        if "optimizer_state_dict" in checkpoint:
+
+            optimizer.load_state_dict(
+                checkpoint[
+                    "optimizer_state_dict"
+                ]
+            )
+
+            print(
+                "Optimizer state loaded."
+            )
+
+        print(
+            f"RL checkpoint loaded "
+            f"(epoch {checkpoint.get('epoch', '?')})."
+        )
+
+    else:
+
+        print("Initializing RL from BC5")
+        print("======================================")
+
+        bc5_path = (
+            PROJECT_ROOT
+            / "checkpoints"
+            / "bc_epoch"
+            / "bc_v2_5_epoch_5.pt"
+        )
+
+        bc_model = ChessResNet(
+            num_actions=len(ACTIONS),
+            channels=64,
+            blocks=4,
+        )
+
+        checkpoint = torch.load(
+            bc5_path,
+            map_location=DEVICE,
+        )
+
+        bc_model.load_state_dict(
+            checkpoint["model_state_dict"]
+        )
+
+        model = ActorCritic(
+            bc_model
+        ).to(DEVICE)
+
+        optimizer = Adam(
+            model.parameters(),
+            lr=LR,
+        )
+
+        print(
+            "Initial policy loaded from BC5."
+        )
+
+    # --------------------------------------------------------
     # League
-    #
+    # --------------------------------------------------------
 
     league = League(
         max_agents=LEAGUE_MAX_AGENTS
     )
-
-
-    #
-    # BC baselines
-    #
 
     bc4 = load_bc_agent(4)
 
@@ -322,7 +348,6 @@ def load_model():
         bc4,
     )
 
-
     bc5 = load_bc_agent(5)
 
     league.add_agent(
@@ -330,88 +355,60 @@ def load_model():
         bc5,
     )
 
+    # --------------------------------------------------------
+    # En cas de reprise RL : charger les snapshots voulus
+    # --------------------------------------------------------
 
-    #
-    # Snapshots RL 16 -> 37
-    #
+    if RESUME_RL:
 
-    for epoch in range(
-        LEAGUE_START_EPOCH,
-        LEAGUE_END_EPOCH + 1,
-    ):
+        for epoch in range(
+            1,
+            RESUME_EPOCH + 1,
+        ):
 
-        path = (
-            LEAGUE_DIR
-            / f"league_epoch_{epoch:03d}.pt"
-        )
-
-
-        if not path.exists():
-
-            raise FileNotFoundError(
-                f"Missing league snapshot: {path}"
+            path = (
+                LEAGUE_DIR
+                / f"league_epoch_{epoch:03d}.pt"
             )
 
+            if not path.exists():
+                continue
 
-        checkpoint = torch.load(
-            path,
-            map_location=DEVICE,
-        )
+            checkpoint = torch.load(
+                path,
+                map_location=DEVICE,
+            )
 
+            snapshot_base = ChessResNet(
+                num_actions=len(ACTIONS),
+                channels=64,
+                blocks=4,
+            )
 
-        snapshot_base = ChessResNet(
-            num_actions=len(ACTIONS),
-            channels=64,
-            blocks=4,
-        )
+            snapshot = ActorCritic(
+                snapshot_base
+            )
 
+            snapshot.load_state_dict(
+                checkpoint["model_state_dict"]
+            )
 
-        snapshot = ActorCritic(
-            snapshot_base
-        )
+            snapshot = snapshot.to(DEVICE)
+            snapshot.eval()
 
+            league.add_agent(
+                f"league_epoch_{epoch:03d}",
+                snapshot,
+            )
 
-        snapshot.load_state_dict(
-            checkpoint[
-                "model_state_dict"
-            ]
-        )
-
-
-        snapshot = snapshot.to(DEVICE)
-
-        snapshot.eval()
-
-
-        league.add_agent(
-            f"league_epoch_{epoch:03d}",
-            snapshot,
-        )
-
-
-        print(
-            f"Loaded league_epoch_{epoch:03d}"
-        )
-
+            print(
+                f"Loaded league_epoch_{epoch:03d}"
+            )
 
     print()
     print(
-        f"League loaded: "
-        f"{len(league)} agents"
+        f"League loaded: {len(league)} agents"
     )
-
-
-    print(
-        "League members:"
-    )
-
-
-    for name in league.names():
-
-        print(
-            f"  {name}"
-        )
-
 
     return model, optimizer, league
 
@@ -1331,7 +1328,6 @@ def train_epoch(
             "Replay buffer too small."
         )
 
-
         return (
             0.0,
             0.0,
@@ -1346,13 +1342,33 @@ def train_epoch(
     )
 
 
+    #
+    # ========================================================
+    # Accumulators
+    # ========================================================
+    #
+
     total_loss = 0.0
-
     total_actor = 0.0
-
     total_critic = 0.0
-
     total_kl = 0.0
+
+    total_entropy = 0.0
+    total_clip_fraction = 0.0
+
+    total_actor_grad_norm = 0.0
+    total_critic_grad_norm = 0.0
+
+    total_adv_mean = 0.0
+    total_adv_std = 0.0
+
+    total_return_mean = 0.0
+    total_return_std = 0.0
+
+    total_value_mean = 0.0
+    total_value_std = 0.0
+
+    total_explained_variance = 0.0
 
 
     total_updates = (
@@ -1366,6 +1382,12 @@ def train_epoch(
         desc="PPO Training",
     )
 
+
+    #
+    # ========================================================
+    # PPO updates
+    # ========================================================
+    #
 
     for _ in range(
         SGD_EPOCHS
@@ -1381,7 +1403,9 @@ def train_epoch(
 
 
             #
+            # =================================================
             # Encode boards
+            # =================================================
             #
 
             boards = [
@@ -1398,14 +1422,18 @@ def train_epoch(
 
 
             #
+            # =================================================
             # Forward
+            # =================================================
             #
 
             policy, values = model(x)
 
 
             #
+            # =================================================
             # Returns
+            # =================================================
             #
 
             returns = torch.tensor(
@@ -1419,10 +1447,12 @@ def train_epoch(
 
 
             #
-            # Advantages
+            # =================================================
+            # Advantages — RAW
+            # =================================================
             #
 
-            advantages = torch.tensor(
+            raw_advantages = torch.tensor(
                 [
                     s["advantage"]
                     for s in batch
@@ -1433,20 +1463,37 @@ def train_epoch(
 
 
             #
-            # Normalisation
+            # Diagnostics BEFORE normalization
+            #
+
+            adv_mean = (
+                raw_advantages.mean()
+            )
+
+            adv_std = (
+                raw_advantages.std()
+            )
+
+
+            #
+            # =================================================
+            # Advantage normalization
+            # =================================================
             #
 
             advantages = (
-                advantages
-                - advantages.mean()
+                raw_advantages
+                - raw_advantages.mean()
             ) / (
-                advantages.std()
+                raw_advantages.std()
                 + 1e-8
             )
 
 
             #
+            # =================================================
             # Old log probabilities
+            # =================================================
             #
 
             old_log_probs = torch.tensor(
@@ -1460,7 +1507,9 @@ def train_epoch(
 
 
             #
+            # =================================================
             # Legal mask
+            # =================================================
             #
 
             legal_mask = torch.zeros(
@@ -1500,7 +1549,9 @@ def train_epoch(
 
 
             #
+            # =================================================
             # Mask logits
+            # =================================================
             #
 
             legal_logits = (
@@ -1538,18 +1589,8 @@ def train_epoch(
 
             #
             # =================================================
-            # PPO KL diagnostic
+            # PPO ratio
             # =================================================
-            #
-            # log_ratio = log(pi_new / pi_old)
-            #
-            # Approximate KL used by PPO:
-            #
-            # KL ~= E[(r - 1) - log(r)]
-            #
-            # where r = exp(log_ratio)
-            #
-            # This should remain relatively small.
             #
 
             log_ratio = (
@@ -1563,18 +1604,45 @@ def train_epoch(
             )
 
 
+            #
+            # =================================================
+            # Policy KL
+            # =================================================
+            #
+
             approx_kl = (
                 (
                     ratio
                     - 1.0
                     - log_ratio
-                )
+                ).mean()
+            )
+
+
+            #
+            # =================================================
+            # Clip fraction
+            # =================================================
+            #
+
+            clipped_mask = (
+                (ratio < 1.0 - PPO_CLIP)
+                |
+                (ratio > 1.0 + PPO_CLIP)
+            )
+
+
+            clip_fraction = (
+                clipped_mask
+                .float()
                 .mean()
             )
 
 
             #
-            # PPO objective
+            # =================================================
+            # PPO actor objective
+            # =================================================
             #
 
             unclipped = (
@@ -1600,7 +1668,9 @@ def train_epoch(
 
 
             #
+            # =================================================
             # Entropy
+            # =================================================
             #
 
             probs = torch.softmax(
@@ -1622,7 +1692,9 @@ def train_epoch(
 
 
             #
+            # =================================================
             # Critic
+            # =================================================
             #
 
             critic_loss = F.mse_loss(
@@ -1632,7 +1704,69 @@ def train_epoch(
 
 
             #
+            # =================================================
+            # Critic diagnostics
+            # =================================================
+            #
+
+            value_flat = (
+                values.squeeze(1)
+            )
+
+            return_flat = (
+                returns.squeeze(1)
+            )
+
+
+            value_mean = (
+                value_flat.mean()
+            )
+
+            value_std = (
+                value_flat.std()
+            )
+
+            return_mean = (
+                return_flat.mean()
+            )
+
+            return_std = (
+                return_flat.std()
+            )
+
+
+            #
+            # Explained variance
+            #
+            # EV = 1 - Var(y - y_hat) / Var(y)
+            #
+
+            return_variance = torch.var(
+                return_flat,
+                unbiased=False,
+            )
+
+
+            residual_variance = torch.var(
+                return_flat - value_flat,
+                unbiased=False,
+            )
+
+
+            explained_variance = (
+                1.0
+                - residual_variance
+                / (
+                    return_variance
+                    + 1e-8
+                )
+            )
+
+
+            #
+            # =================================================
             # Total loss
+            # =================================================
             #
 
             loss = (
@@ -1646,11 +1780,97 @@ def train_epoch(
             )
 
 
+            #
+            # =================================================
+            # Pure PPO actor gradient
+            # =================================================
+            #
+            # Gradient of actor_loss ONLY
+            # with respect to model.policy.
+            #
+            # This excludes:
+            #   - critic loss
+            #   - entropy term
+            #
+            # Therefore this directly measures the
+            # policy-gradient signal reaching the policy head.
+            #
+
+            actor_gradients = torch.autograd.grad(
+                actor_loss,
+                model.policy.parameters(),
+                retain_graph=True,
+                allow_unused=True,
+            )
+
+
+            actor_grad_sq = 0.0
+
+
+            for grad in actor_gradients:
+
+                if grad is None:
+                    continue
+
+
+                actor_grad_sq += (
+                    grad.detach().norm(2).item() ** 2
+                )
+
+
+            actor_grad_norm = (
+                actor_grad_sq ** 0.5
+            )
+
+
+            #
+            # =================================================
+            # Pure critic gradient
+            # =================================================
+            #
+
+            critic_gradients = torch.autograd.grad(
+                critic_loss,
+                model.value.parameters(),
+                retain_graph=True,
+                allow_unused=True,
+            )
+
+
+            critic_grad_sq = 0.0
+
+
+            for grad in critic_gradients:
+
+                if grad is None:
+                    continue
+
+
+                critic_grad_sq += (
+                    grad.detach().norm(2).item() ** 2
+                )
+
+
+            critic_grad_norm = (
+                critic_grad_sq ** 0.5
+            )
+
+
+            #
+            # =================================================
+            # Backward
+            # =================================================
+            #
+
             optimizer.zero_grad()
 
 
             loss.backward()
 
+
+            #
+            # Gradient clipping
+            #
 
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
@@ -1660,6 +1880,12 @@ def train_epoch(
 
             optimizer.step()
 
+
+            #
+            # =================================================
+            # Accumulate
+            # =================================================
+            #
 
             total_loss += (
                 loss.item()
@@ -1677,6 +1903,50 @@ def train_epoch(
                 approx_kl.item()
             )
 
+            total_entropy += (
+                entropy.item()
+            )
+
+            total_clip_fraction += (
+                clip_fraction.item()
+            )
+
+            total_actor_grad_norm += (
+                actor_grad_norm
+            )
+
+            total_critic_grad_norm += (
+                critic_grad_norm
+            )
+
+            total_adv_mean += (
+                adv_mean.item()
+            )
+
+            total_adv_std += (
+                adv_std.item()
+            )
+
+            total_return_mean += (
+                return_mean.item()
+            )
+
+            total_return_std += (
+                return_std.item()
+            )
+
+            total_value_mean += (
+                value_mean.item()
+            )
+
+            total_value_std += (
+                value_std.item()
+            )
+
+            total_explained_variance += (
+                explained_variance.item()
+            )
+
 
             progress.update(1)
 
@@ -1684,11 +1954,190 @@ def train_epoch(
     progress.close()
 
 
+    #
+    # ========================================================
+    # Averages
+    # ========================================================
+    #
+
+    avg_loss = (
+        total_loss
+        / total_updates
+    )
+
+    avg_actor = (
+        total_actor
+        / total_updates
+    )
+
+    avg_critic = (
+        total_critic
+        / total_updates
+    )
+
+    avg_kl = (
+        total_kl
+        / total_updates
+    )
+
+    avg_entropy = (
+        total_entropy
+        / total_updates
+    )
+
+    avg_clip_fraction = (
+        total_clip_fraction
+        / total_updates
+    )
+
+    avg_actor_grad_norm = (
+        total_actor_grad_norm
+        / total_updates
+    )
+
+    avg_critic_grad_norm = (
+        total_critic_grad_norm
+        / total_updates
+    )
+
+    avg_adv_mean = (
+        total_adv_mean
+        / total_updates
+    )
+
+    avg_adv_std = (
+        total_adv_std
+        / total_updates
+    )
+
+    avg_return_mean = (
+        total_return_mean
+        / total_updates
+    )
+
+    avg_return_std = (
+        total_return_std
+        / total_updates
+    )
+
+    avg_value_mean = (
+        total_value_mean
+        / total_updates
+    )
+
+    avg_value_std = (
+        total_value_std
+        / total_updates
+    )
+
+    avg_explained_variance = (
+        total_explained_variance
+        / total_updates
+    )
+
+
+    #
+    # ========================================================
+    # Diagnostics
+    # ========================================================
+    #
+
+    print()
+
+    print(
+        "======================================"
+    )
+
+    print(
+        "PPO DIAGNOSTICS"
+    )
+
+    print(
+        "======================================"
+    )
+
+
+    print(
+        f"Advantage mean:       "
+        f"{avg_adv_mean:+.6f}"
+    )
+
+    print(
+        f"Advantage std:        "
+        f"{avg_adv_std:.6f}"
+    )
+
+
+    print(
+        f"Return mean:          "
+        f"{avg_return_mean:+.6f}"
+    )
+
+    print(
+        f"Return std:           "
+        f"{avg_return_std:.6f}"
+    )
+
+
+    print(
+        f"Value mean:           "
+        f"{avg_value_mean:+.6f}"
+    )
+
+    print(
+        f"Value std:            "
+        f"{avg_value_std:.6f}"
+    )
+
+
+    print(
+        f"Critic MSE:           "
+        f"{avg_critic:.6f}"
+    )
+
+    print(
+        f"Explained variance:   "
+        f"{avg_explained_variance:+.6f}"
+    )
+
+
+    print(
+        f"Actor gradient norm:  "
+        f"{avg_actor_grad_norm:.6e}"
+    )
+
+    print(
+        f"Critic gradient norm: "
+        f"{avg_critic_grad_norm:.6e}"
+    )
+
+
+    print(
+        f"Policy KL:            "
+        f"{avg_kl:.6e}"
+    )
+
+    print(
+        f"Clip fraction:        "
+        f"{avg_clip_fraction:.2%}"
+    )
+
+    print(
+        f"Entropy:              "
+        f"{avg_entropy:.6f}"
+    )
+
+
+    print(
+        "======================================"
+    )
+
+
     return (
-        total_loss / total_updates,
-        total_actor / total_updates,
-        total_critic / total_updates,
-        total_kl / total_updates,
+        avg_loss,
+        avg_actor,
+        avg_critic,
+        avg_kl,
     )
 
 
