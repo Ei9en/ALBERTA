@@ -15,13 +15,17 @@ class ActorCritic(nn.Module):
 
         self.policy = bc_model.policy
 
+        channels = bc_model.channels
+
         self.value = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(64 * 8 * 8, 256),
+            nn.Linear(
+                channels * 8 * 8,
+                256
+            ),
             nn.ReLU(),
             nn.Linear(256, 1),
         )
-
 
     def forward(self, x):
 
