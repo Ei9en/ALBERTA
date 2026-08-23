@@ -9,7 +9,6 @@ PROMOTIONS = [
     chess.KNIGHT,
 ]
 
-
 def build_action_space():
 
     actions = []
@@ -40,7 +39,6 @@ ACTION_TO_INDEX = {
     move: idx
     for idx, move in enumerate(ACTIONS)
 }
-
 
 INDEX_TO_ACTION = {
     idx: move

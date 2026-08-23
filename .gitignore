@@ -12,3 +12,5 @@ data/processed/
 data/filtered/
 checkpoints/
 lichess_bot_auto_logs/
+*.csv
+data/uncertainty_stats.json

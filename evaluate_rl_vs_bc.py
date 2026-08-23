@@ -27,7 +27,7 @@ RL_CHECKPOINT = (
     / "rl_epoch_10.pt"
 )
 
-TEMPERATURE = 0.5
+TEMPERATURE = 1
 GAMES = 100
 
 # ============================================================
@@ -78,11 +78,11 @@ def play_match(
     # RL = White
     # --------------------------------------------------------
 
-    print("\nRL20 = White")
+    print("\nRL = White")
 
     for _ in tqdm(
         range(half),
-        desc="BC5 White",
+        desc="RL White",
     ):
 
         game = SelfPlayGame(
@@ -116,7 +116,7 @@ def play_match(
 def main():
 
     print("\n==============================")
-    print(" BC5 vs RL20")
+    print(" BC5 vs RL")
     print("==============================")
 
     print("\nBC checkpoint:")
@@ -180,7 +180,7 @@ def main():
     )
 
     print(
-        f"RL20 : {rl_wins} W"
+        f"RL : {rl_wins} W"
     )
 
     print(
@@ -192,7 +192,7 @@ def main():
     )
 
     print(
-        f"RL20 score : {100 * rl_score:.2f}%"
+        f"RL score : {100 * rl_score:.2f}%"
     )
 
 

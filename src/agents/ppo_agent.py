@@ -18,7 +18,7 @@ class PPOAgent:
         model,
         device="cpu",
         deterministic=False,
-        temperature=1.5,
+        temperature=0.75,
     ):
 
         self.device = torch.device(device)
@@ -56,6 +56,7 @@ class PPOAgent:
             for move in board.legal_moves
         }
 
+
         legal_indices = [
             ACTION_TO_INDEX[uci]
             for uci in legal_moves
@@ -63,7 +64,7 @@ class PPOAgent:
 
 
         # ====================================================
-        # Logits légaux
+        # Logits légaux uniquement
         # ====================================================
 
         legal_logits = logits[
@@ -72,10 +73,34 @@ class PPOAgent:
 
 
         # ====================================================
-        # Distribution comportementale
+        # Entropie intrinsèque de la policy
         #
-        # C'est cette distribution qui est réellement utilisée
-        # pour le sampling.
+        # IMPORTANT :
+        # calculée AVANT la température de self-play.
+        #
+        # Il n'y a ici que des coups légaux, donc aucun
+        # -inf provenant d'un masque.
+        # ====================================================
+
+        entropy_log_probs = torch.log_softmax(
+            legal_logits,
+            dim=0,
+        )
+
+        entropy_probs = torch.exp(
+            entropy_log_probs
+        )
+
+        entropy = -(
+            entropy_probs
+            * entropy_log_probs
+        ).sum().item()
+
+
+        # ====================================================
+        # Distribution utilisée pour choisir le coup
+        #
+        # La température ne modifie donc PAS H.
         # ====================================================
 
         if (
@@ -83,24 +108,26 @@ class PPOAgent:
             or self.temperature <= 0
         ):
 
-            sampling_log_probs = torch.log_softmax(
+            position = torch.argmax(
+                legal_logits
+            ).item()
+
+            chosen_log_probs = torch.log_softmax(
                 legal_logits,
                 dim=0,
             )
 
-            sampling_probs = torch.exp(
-                sampling_log_probs
+            chosen_log_prob = (
+                chosen_log_probs[position]
             )
 
-            position = torch.argmax(
-                legal_logits
-            ).item()
 
         else:
 
             sampling_logits = (
                 legal_logits
-                / self.temperature
+                /
+                self.temperature
             )
 
             sampling_log_probs = torch.log_softmax(
@@ -117,30 +144,9 @@ class PPOAgent:
                 1,
             ).item()
 
-
-        # ====================================================
-        # Entropie
-        #
-        # IMPORTANT :
-        # entropie de la distribution effectivement utilisée.
-        # Donc après température.
-        # ====================================================
-
-        entropy = -(
-            sampling_probs
-            * sampling_log_probs
-        ).sum().item()
-
-
-        # ====================================================
-        # Log probability du coup choisi
-        #
-        # Même distribution que celle utilisée pour sampler.
-        # ====================================================
-
-        chosen_log_prob = (
-            sampling_log_probs[position]
-        )
+            chosen_log_prob = (
+                sampling_log_probs[position]
+            )
 
 
         # ====================================================
@@ -183,6 +189,7 @@ class PPOAgent:
     ):
 
         if len(boards) == 0:
+
             return []
 
 
@@ -286,7 +293,6 @@ class PPOAgent:
 
             n = len(indices)
 
-
             legal_index_tensor[
                 i,
                 :n,
@@ -295,7 +301,6 @@ class PPOAgent:
                 dtype=torch.long,
                 device=self.device,
             )
-
 
             legal_mask[
                 i,
@@ -312,7 +317,6 @@ class PPOAgent:
             legal_index_tensor,
         )
 
-
         legal_logits = legal_logits.masked_fill(
             ~legal_mask,
             float("-inf"),
@@ -320,53 +324,78 @@ class PPOAgent:
 
 
         # ====================================================
-        # Distribution comportementale
+        # Entropie intrinsèque de la policy
         #
-        # Température appliquée AVANT softmax.
+        # AVANT température.
+        #
+        # Pour les cases padding :
+        #
+        #     probability = 0
+        #     log_probability = 0
+        #
+        # On évite donc :
+        #
+        #     0 * (-inf) = NaN
         # ====================================================
 
-        if (
+        entropy_log_probs = torch.log_softmax(
+            legal_logits,
+            dim=1,
+        )
+
+        entropy_probs = torch.exp(
+            entropy_log_probs
+        )
+
+        entropy_log_probs_safe = (
+            entropy_log_probs.masked_fill(
+                ~legal_mask,
+                0.0,
+            )
+        )
+
+        entropy = -(
+            entropy_probs
+            * entropy_log_probs_safe
+        ).sum(
+            dim=1
+        )
+
+
+        # ====================================================
+        # Distribution utilisée pour le self-play
+        #
+        # Cette distribution reçoit la température.
+        # ====================================================
+
+        sampling_log_probs = None
+
+        sampling_probs = None
+
+
+        if not (
             self.deterministic
             or self.temperature <= 0
         ):
 
             sampling_logits = (
                 legal_logits
+                /
+                self.temperature
             )
 
-        else:
+            sampling_log_probs = torch.log_softmax(
+                sampling_logits,
+                dim=1,
+            )
 
-            sampling_logits = (
-                legal_logits
-                / self.temperature
+            sampling_probs = torch.exp(
+                sampling_log_probs
             )
 
 
-        sampling_log_probs = torch.log_softmax(
-            sampling_logits,
-            dim=1,
-        )
-
-
-        sampling_probs = torch.exp(
-            sampling_log_probs
-        )
-
-
         # ====================================================
-        # Entropie
-        #
-        # Distribution effectivement utilisée.
-        # ====================================================
-
-        entropy = -(
-            sampling_probs
-            * sampling_log_probs
-        ).sum(dim=1)
-
-
-        # ====================================================
-        # Choix des actions
+        # Choix de l'action
         # ====================================================
 
         if (
@@ -379,12 +408,22 @@ class PPOAgent:
                 dim=1,
             )
 
+            chosen_log_probs = torch.log_softmax(
+                legal_logits,
+                dim=1,
+            )
+
+
         else:
 
             positions = torch.multinomial(
                 sampling_probs,
                 1,
             ).squeeze(1)
+
+            chosen_log_probs = (
+                sampling_log_probs
+            )
 
 
         # ====================================================
@@ -394,9 +433,13 @@ class PPOAgent:
         results = []
 
 
-        for i in range(batch_size):
+        for i in range(
+            batch_size
+        ):
 
-            position = positions[i].item()
+            position = positions[
+                i
+            ].item()
 
 
             action = legal_index_tensor[
@@ -405,7 +448,11 @@ class PPOAgent:
             ].item()
 
 
-            move = legal_moves[i][action]
+            move = legal_moves[
+                i
+            ][
+                action
+            ]
 
 
             results.append(
@@ -418,19 +465,25 @@ class PPOAgent:
                         action,
 
                     "value":
-                        values[i].item(),
+                        values[
+                            i
+                        ].item(),
 
                     "entropy":
-                        entropy[i].item(),
+                        entropy[
+                            i
+                        ].item(),
 
                     "log_prob":
-                        sampling_log_probs[
+                        chosen_log_probs[
                             i,
                             position,
                         ].item(),
 
                     "fen":
-                        boards[i].fen(),
+                        boards[
+                            i
+                        ].fen(),
                 }
             )
 

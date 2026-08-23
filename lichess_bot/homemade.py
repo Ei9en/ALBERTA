@@ -20,14 +20,14 @@ class ExampleEngine(MinimalEngine):
 
 
 class AtomicRandom(ExampleEngine):
-    """Bot Atomic utilisant RL20."""
+    """Bot Atomic utilisant RL."""
 
     def __init__(self, *args, **kwargs):
 
         super().__init__(*args, **kwargs)
 
         self.bot = RLBot(
-            temperature=0.00001,
+            temperature=0.5,
             deterministic=False,
         )
 
@@ -43,7 +43,7 @@ class AtomicRandom(ExampleEngine):
         move = info["move"]
 
         logger.info(
-            f"RL20 joue : {move}"
+            f"RL joue : {move}"
         )
 
         return PlayResult(
