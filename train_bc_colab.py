@@ -14,23 +14,40 @@ from src.models.resnet import ChessResNet
 from src.actions_space import ACTIONS
 
 
-DATASET = "//content/drive/MyDrive/ALBERTA/positions_2300_bc.jsonl"
+# ============================================================
+# Configuration
+# ============================================================
+
+DATASET = (
+    "/content/drive/MyDrive/ALBERTA/positions_2300_bc.jsonl"
+)
 
 CHECKPOINT_DIR = Path(
     "/content/drive/MyDrive/ALBERTA/checkpoints/bc_epoch"
 )
 
-# checkpoint utilisé comme point de départ
-PRETRAINED_CHECKPOINT = Path(
-    "/content/drive/MyDrive/ALBERTA/checkpoints/bc_epoch/bc_v2_5_epoch_6.pt"
+# ============================================================
+# Checkpoint de départ
+# ============================================================
+
+PRETRAINED_CHECKPOINT = (
+    CHECKPOINT_DIR
+    / "bc_v3_epoch_0.pt"
 )
 
 EPOCHS = 10
 
 SAVE_EVERY = 40000
 
-LOSS_LOG = CHECKPOINT_DIR / "training_loss.json"
+LOSS_LOG = (
+    CHECKPOINT_DIR
+    / "training_loss_v3.json"
+)
 
+
+# ============================================================
+# Checkpoint
+# ============================================================
 
 def save_checkpoint(
     path,
@@ -44,9 +61,11 @@ def save_checkpoint(
 
     checkpoint = {
 
-        "epoch": epoch,
+        "epoch":
+            epoch,
 
-        "batch": batch,
+        "batch":
+            batch,
 
         "model_state_dict":
             model.state_dict(),
@@ -64,32 +83,93 @@ def save_checkpoint(
             history,
     }
 
-
     torch.save(
         checkpoint,
         path
     )
 
-
     print()
-    print("Saved checkpoint:", path)
+    print(
+        "Saved checkpoint:",
+        path
+    )
 
 
+# ============================================================
+# Main
+# ============================================================
 
 def main():
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = (
+        "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
+    )
 
-    print("Device:", device)
+    print()
+    print(
+        "======================================"
+    )
+    print(
+        "BC TRAINING - 32 CHANNEL RESNET"
+    )
+    print(
+        "======================================"
+    )
+    print()
 
+    print(
+        "Device:",
+        device
+    )
+
+    if torch.cuda.is_available():
+
+        print(
+            "GPU:",
+            torch.cuda.get_device_name(0)
+        )
+
+        print(
+            "CUDA:",
+            torch.version.cuda
+        )
+
+        torch.backends.cudnn.benchmark = True
+
+
+    # ========================================================
+    # Directories
+    # ========================================================
 
     CHECKPOINT_DIR.mkdir(
+        parents=True,
         exist_ok=True
     )
 
 
-    dataset = ChessDataset(DATASET)
+    # ========================================================
+    # Dataset
+    # ========================================================
 
+    print()
+    print(
+        "Loading dataset..."
+    )
+
+    dataset = ChessDataset(
+        DATASET
+    )
+
+    print(
+        "Dataset loaded."
+    )
+
+
+    # ========================================================
+    # DataLoader
+    # ========================================================
 
     loader = DataLoader(
         dataset,
@@ -99,18 +179,51 @@ def main():
     )
 
 
+    # ========================================================
+    # Model
+    # ========================================================
+
     model = ChessResNet(
         num_actions=len(ACTIONS),
-        channels=64,
+        channels=32,
         blocks=4,
     ).to(device)
 
 
-    print(
-        "Parameters:",
-        sum(p.numel() for p in model.parameters())
+    parameters = sum(
+        p.numel()
+        for p in model.parameters()
     )
 
+    print()
+    print(
+        "Model:"
+    )
+
+    print(
+        "Channels:",
+        32
+    )
+
+    print(
+        "Residual blocks:",
+        4
+    )
+
+    print(
+        "Actions:",
+        len(ACTIONS)
+    )
+
+    print(
+        "Parameters:",
+        f"{parameters:,}"
+    )
+
+
+    # ========================================================
+    # Optimizer
+    # ========================================================
 
     optimizer = AdamW(
         model.parameters(),
@@ -119,15 +232,27 @@ def main():
     )
 
 
-    # =========================
+    # ========================================================
     # LOAD CHECKPOINT
-    # =========================
+    # ========================================================
 
     if PRETRAINED_CHECKPOINT.exists():
 
+        print()
         print(
-            "Loading:",
+            "======================================"
+        )
+
+        print(
+            "Loading checkpoint:"
+        )
+
+        print(
             PRETRAINED_CHECKPOINT
+        )
+
+        print(
+            "======================================"
         )
 
 
@@ -137,22 +262,46 @@ def main():
         )
 
 
+        # ----------------------------------------------------
+        # Vérification action space
+        # ----------------------------------------------------
+
         assert checkpoint["actions"] == len(ACTIONS), (
             "Action space mismatch"
         )
 
+
+        # ----------------------------------------------------
+        # Charger modèle
+        # ----------------------------------------------------
 
         model.load_state_dict(
             checkpoint["model_state_dict"]
         )
 
 
-        optimizer.load_state_dict(
-            checkpoint["optimizer_state_dict"]
+        # ----------------------------------------------------
+        # Charger optimizer
+        # ----------------------------------------------------
+
+        if "optimizer_state_dict" in checkpoint:
+
+            optimizer.load_state_dict(
+                checkpoint["optimizer_state_dict"]
+            )
+
+            print(
+                "Optimizer state loaded."
+            )
+
+
+        # ----------------------------------------------------
+        # Reprendre après l'epoch du checkpoint
+        # ----------------------------------------------------
+
+        START_EPOCH = (
+            checkpoint["epoch"] + 1
         )
-
-
-        START_EPOCH = checkpoint["epoch"] + 1
 
 
         print(
@@ -161,33 +310,52 @@ def main():
         )
 
         print(
-            "Resume from epoch:",
-            START_EPOCH
+            "Previous loss:",
+            checkpoint["loss"]
         )
 
         print(
-            "Previous loss:",
-            checkpoint["loss"]
+            "Resume from epoch:",
+            START_EPOCH
         )
 
 
     else:
 
+        print()
         print(
-            "No checkpoint found, training from scratch"
+            "WARNING: checkpoint not found:"
+        )
+
+        print(
+            PRETRAINED_CHECKPOINT
+        )
+
+        print(
+            "Training from scratch."
         )
 
         START_EPOCH = 0
 
 
+    # ========================================================
+    # Loss
+    # ========================================================
 
     criterion = nn.CrossEntropyLoss()
 
 
+    # ========================================================
+    # History
+    # ========================================================
 
     if LOSS_LOG.exists():
 
-        with open(LOSS_LOG) as f:
+        with open(
+            LOSS_LOG,
+            "r"
+        ) as f:
+
             history = json.load(f)
 
     else:
@@ -195,22 +363,20 @@ def main():
         history = []
 
 
+    # ========================================================
+    # Training
+    # ========================================================
 
     model.train()
-
-
 
     for epoch in range(
         START_EPOCH,
         EPOCHS
     ):
 
-
         start = time.time()
 
-        total_loss = 0
-
-
+        total_loss = 0.0
 
         pbar = tqdm(
             loader,
@@ -218,19 +384,35 @@ def main():
         )
 
 
+        for batch, (x, y) in enumerate(
+            pbar
+        ):
 
-        for batch, (x, y) in enumerate(pbar):
+            # ------------------------------------------------
+            # CPU -> GPU
+            # ------------------------------------------------
+
+            x = x.to(
+                device
+            )
+
+            y = y.to(
+                device
+            )
 
 
-            x = x.to(device)
+            # ------------------------------------------------
+            # Forward
+            # ------------------------------------------------
 
-            y = y.to(device)
+            logits = model(
+                x
+            )
 
 
-
-            logits = model(x)
-
-
+            # ------------------------------------------------
+            # Loss
+            # ------------------------------------------------
 
             loss = criterion(
                 logits,
@@ -238,40 +420,48 @@ def main():
             )
 
 
+            # ------------------------------------------------
+            # Backprop
+            # ------------------------------------------------
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(
+                set_to_none=True
+            )
 
             loss.backward()
 
             optimizer.step()
 
 
+            # ------------------------------------------------
+            # Statistics
+            # ------------------------------------------------
 
-            total_loss += loss.item()
-
-
+            total_loss += (
+                loss.item()
+            )
 
             pbar.set_postfix(
                 loss=f"{loss.item():.4f}"
             )
 
 
-
-            # =========================
-            # TEMP CHECKPOINT
-            # =========================
+            # ------------------------------------------------
+            # Temporary checkpoint
+            # ------------------------------------------------
 
             if (
                 batch > 0
                 and batch % SAVE_EVERY == 0
             ):
 
-
                 temp_path = (
-                    CHECKPOINT_DIR /
-                    f"bc_v2_5_temp_e{epoch}_b{batch}.pt"
+                    CHECKPOINT_DIR
+                    /
+                    f"bc_v3_temp_e"
+                    f"{epoch}_b"
+                    f"{batch}.pt"
                 )
-
 
                 save_checkpoint(
                     temp_path,
@@ -284,23 +474,45 @@ def main():
                 )
 
 
+        # ====================================================
+        # Epoch statistics
+        # ====================================================
 
-        epoch_loss = total_loss / len(loader)
+        epoch_loss = (
+            total_loss
+            /
+            len(loader)
+        )
 
+        epoch_time = (
+            time.time()
+            -
+            start
+        ) / 60
 
 
         history.append(
             {
-                "epoch": epoch,
-                "loss": epoch_loss,
+                "epoch":
+                    epoch,
+
+                "loss":
+                    epoch_loss,
+
                 "time_min":
-                    (time.time()-start)/60
+                    epoch_time
             }
         )
 
 
+        # ====================================================
+        # Save loss history
+        # ====================================================
 
-        with open(LOSS_LOG, "w") as f:
+        with open(
+            LOSS_LOG,
+            "w"
+        ) as f:
 
             json.dump(
                 history,
@@ -309,6 +521,9 @@ def main():
             )
 
 
+        # ====================================================
+        # Print
+        # ====================================================
 
         print()
 
@@ -317,22 +532,21 @@ def main():
             epoch_loss
         )
 
-
         print(
-            f"Epoch time: {(time.time()-start)/60:.1f} min"
+            f"Epoch time: "
+            f"{epoch_time:.1f} min"
         )
 
 
-
-        # =========================
-        # END EPOCH CHECKPOINT
-        # =========================
+        # ====================================================
+        # End epoch checkpoint
+        # ====================================================
 
         path = (
-            CHECKPOINT_DIR /
-            f"bc_v2_5_epoch_{epoch}.pt"
+            CHECKPOINT_DIR
+            /
+            f"bc_v3_epoch_{epoch}.pt"
         )
-
 
         save_checkpoint(
             path,
@@ -345,6 +559,10 @@ def main():
         )
 
 
+# ============================================================
+# Entry point
+# ============================================================
 
 if __name__ == "__main__":
+
     main()

@@ -61,7 +61,7 @@ PROJECT_ROOT = Path(
 # distribution plus déterministe
 #
 
-TEMPERATURE_SELFPLAY = 1.5
+TEMPERATURE_SELFPLAY = 2
 
 
 # ============================================================
@@ -146,13 +146,13 @@ def load_bc_agent(
         PROJECT_ROOT
         / "checkpoints"
         / "bc_epoch"
-        / f"bc_v2_5_epoch_{epoch}.pt"
+        / f"bc_v3_epoch_{epoch}.pt"
     )
 
 
     bc_model = ChessResNet(
         num_actions=len(ACTIONS),
-        channels=64,
+        channels=32,
         blocks=4,
     )
 
@@ -214,7 +214,7 @@ def load_league_agent(
 
     base_model = ChessResNet(
         num_actions=len(ACTIONS),
-        channels=64,
+        channels=32,
         blocks=4,
     )
 
@@ -281,7 +281,7 @@ def load_model():
 
         bc_model = ChessResNet(
             num_actions=len(ACTIONS),
-            channels=64,
+            channels=32,
             blocks=4,
         )
 
@@ -343,13 +343,13 @@ def load_model():
             PROJECT_ROOT
             / "checkpoints"
             / "bc_epoch"
-            / "bc_v2_5_epoch_5.pt"
+            / "bc_v3_epoch_5.pt"
         )
 
 
         bc_model = ChessResNet(
             num_actions=len(ACTIONS),
-            channels=64,
+            channels=32,
             blocks=4,
         )
 
@@ -437,7 +437,7 @@ def load_model():
 
             snapshot_base = ChessResNet(
                 num_actions=len(ACTIONS),
-                channels=64,
+                channels=32,
                 blocks=4,
             )
 
@@ -522,6 +522,7 @@ def _init_selfplay_worker(
     current_model,
     league_models,
     league_registry,
+    bc_model,
 ):
 
     global _WORKER_CURRENT_MODEL
@@ -564,6 +565,9 @@ def _init_selfplay_worker(
         deterministic=False,
         temperature=TEMPERATURE_SELFPLAY,
         device="cpu",
+        bc_model=bc_model,
+        opening_prior_strength=1.0,
+        opening_prior_plies=6,
     )
 
 
@@ -1385,9 +1389,12 @@ def train_epoch(
     model,
     optimizer,
     buffer,
+    bc_model,
 ):
 
     model.train()
+
+    bc_model.eval()
 
 
     # ========================================================
@@ -1498,10 +1505,72 @@ def train_epoch(
 
 
             # =================================================
-            # Forward
+            # Forward RL
             # =================================================
 
             policy, values = model(x)
+
+
+            # =================================================
+            # Forward BC
+            #
+            # Le BC est un prior fixe.
+            # Aucun gradient ne doit passer dedans.
+            # =================================================
+
+            with torch.no_grad():
+
+                bc_policy, _ = bc_model(x)
+
+
+            # =================================================
+            # Ply
+            #
+            # Le BC prior décroît avec l'avancement de la partie.
+            # =================================================
+
+            plys = torch.tensor(
+                [
+                    s["ply"]
+                    for s in batch
+                ],
+                device=DEVICE,
+                dtype=torch.float32,
+            )
+
+
+            # =================================================
+            # BC prior décroissant
+            #
+            # alpha(ply) = (1 -  ply ) / BC_PRIOR
+            #
+            # ply = 0 :
+            #     alpha = 1
+            #
+            # ply = 20 :
+            #     alpha ~= 0.368
+            #
+            # ply = 40 :
+            #     alpha ~= 0.135
+            #
+            # ply = 60 :
+            #     alpha ~= 0.050
+            #
+            # Le BC guide donc fortement l'ouverture,
+            # puis laisse progressivement la place au RL.
+            # =================================================
+
+            BC_PRIOR_STRENGTH = 1.0
+            BC_PRIOR_PLIES = 6.0
+
+            bc_weight = (
+                BC_PRIOR_STRENGTH
+                *
+                torch.clamp(
+                    1.0 - plys / BC_PRIOR_PLIES,
+                    min=0.0,
+                )
+            )
 
 
             # =================================================
@@ -1557,8 +1626,13 @@ def train_epoch(
             # =================================================
             # Old log probabilities
             #
-            # Ceux-ci proviennent de la distribution
-            # comportementale avec T = TEMPERATURE_SELFPLAY.
+            # Ils ont été enregistrés pendant le self-play
+            # avec la distribution :
+            #
+            #     RL + BC prior décroissant + température
+            #
+            # Il faut donc reconstruire EXACTEMENT cette
+            # distribution ci-dessous.
             # =================================================
 
             old_log_probs = torch.tensor(
@@ -1612,10 +1686,10 @@ def train_epoch(
 
 
             # =================================================
-            # Mask logits
+            # Masquage des coups illégaux
             # =================================================
 
-            legal_logits = (
+            legal_policy = (
                 policy.masked_fill(
                     ~legal_mask,
                     float("-inf"),
@@ -1623,17 +1697,81 @@ def train_epoch(
             )
 
 
+            legal_bc_policy = (
+                bc_policy.masked_fill(
+                    ~legal_mask,
+                    float("-inf"),
+                )
+            )
+
+
             # =================================================
-            # Distribution PPO
+            # Normalisation séparée
+            #
+            # Les deux réseaux sont transformés en distributions
+            # sur les seuls coups légaux.
+            # =================================================
+
+            rl_log_probs = F.log_softmax(
+                legal_policy,
+                dim=1,
+            )
+
+
+            bc_log_probs = F.log_softmax(
+                legal_bc_policy,
+                dim=1,
+            )
+
+
+            # =================================================
+            # BC prior
+            #
+            # Produit géométrique :
+            #
+            # P_combined(a)
+            #     ∝
+            #     P_RL(a)
+            #     *
+            #     P_BC(a)^alpha
+            #
+            # avec alpha décroissant selon le ply.
+            # =================================================
+
+            combined_log_probs = (
+                rl_log_probs
+                +
+                bc_weight.unsqueeze(1)
+                *
+                bc_log_probs
+            )
+
+
+            # =================================================
+            # Renormalisation
             #
             # IMPORTANT :
-            # exactement la même température que celle
-            # utilisée lors du self-play.
+            # combined_log_probs n'est pas encore normalisé.
+            # =================================================
+
+            combined_log_probs = F.log_softmax(
+                combined_log_probs,
+                dim=1,
+            )
+
+
+            # =================================================
+            # Température
+            #
+            # Même température que celle utilisée en self-play.
+            #
+            # P_T(a) ∝ exp(log P(a) / T)
             # =================================================
 
             ppo_logits = (
-                legal_logits
-                / TEMPERATURE_SELFPLAY
+                combined_log_probs
+                /
+                TEMPERATURE_SELFPLAY
             )
 
 
@@ -1642,6 +1780,10 @@ def train_epoch(
                 dim=1,
             )
 
+
+            # =================================================
+            # Log-prob du coup réellement joué
+            # =================================================
 
             selected_log_probs = (
                 log_probs
@@ -1728,22 +1870,27 @@ def train_epoch(
             # =================================================
             # Entropy
             #
-            # Distribution après température.
+            # Entropie de la distribution réellement utilisée
+            # par PPO/self-play.
             # =================================================
 
-            probs = torch.softmax(
-                ppo_logits,
-                dim=1,
+            probs = torch.exp(
+                log_probs
+            )
+
+
+            safe_log_probs = (
+                log_probs.masked_fill(
+                    ~legal_mask,
+                    0.0,
+                )
             )
 
 
             entropy = -(
                 probs
                 *
-                log_probs.masked_fill(
-                    ~legal_mask,
-                    0.0,
-                )
+                safe_log_probs
             ).sum(
                 dim=1
             ).mean()
@@ -1803,8 +1950,10 @@ def train_epoch(
 
             explained_variance = (
                 1.0
-                - residual_variance
-                / (
+                -
+                residual_variance
+                /
+                (
                     return_variance
                     + 1e-8
                 )
@@ -2074,6 +2223,17 @@ def train_epoch(
 
 
     print(
+        f"BC prior strength:     "
+        f"{BC_PRIOR_STRENGTH:.2f}"
+    )
+
+    print(
+        f"BC prior decay ply:    "
+        f"{BC_PRIOR_PLIES:.1f}"
+    )
+
+
+    print(
         f"Advantage mean:       "
         f"{avg_adv_mean:+.6f}"
     )
@@ -2101,7 +2261,7 @@ def train_epoch(
     )
 
     print(
-        f"Value std:            "
+        f"Value std:           "
         f"{avg_value_std:.6f}"
     )
 
@@ -2242,12 +2402,20 @@ def save_replay_buffer(
 def main():
 
     # ========================================================
-    # Load model + optimizer + league
+    # Load model + optimizer + league + bc_model
     # ========================================================
 
     model, optimizer, league = (
         load_model()
     )
+
+    bc_model = load_bc_agent(5)
+
+    bc_model_selfplay = copy.deepcopy(
+        bc_model
+    ).to("cpu")
+
+    bc_model_selfplay.eval()
 
 
     # ========================================================
@@ -2409,7 +2577,9 @@ def main():
             shared_current_model,
             shared_league_models,
             league_registry,
+            bc_model_selfplay,
         ),
+
     ) as pool:
 
         # ====================================================
@@ -2590,6 +2760,7 @@ def main():
                         step["value"],
                         step["old_log_prob"],
                         advantage,
+                        step["ply"],
                     )
 
 
@@ -2633,6 +2804,7 @@ def main():
                 model,
                 optimizer,
                 buffer,
+                bc_model,
             )
 
 

@@ -1,4 +1,4 @@
-# tests/test_behavioral_mirror_bc_rl0_rl10.py
+# tests/test_behavioral_mirror_bc.py
 
 import random
 import sys
@@ -20,7 +20,6 @@ import chess.variant
 from train_rl_league_colab import ACTIONS
 
 from src.models.resnet import ChessResNet
-from src.models.actor_critic import ActorCritic
 
 
 # ============================================================
@@ -29,25 +28,11 @@ from src.models.actor_critic import ActorCritic
 
 DEVICE = "cpu"
 
-BC5_CHECKPOINT = (
+BC_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
     / "bc_epoch"
-    / "bc_v2_5_epoch_5.pt"
-)
-
-RL0_CHECKPOINT = (
-    PROJECT_ROOT
-    / "checkpoints"
-    / "rl_epoch"
-    / "rl_epoch_0.pt"
-)
-
-RL10_CHECKPOINT = (
-    PROJECT_ROOT
-    / "checkpoints"
-    / "rl_epoch"
-    / "rl_epoch_10_baseline.pt"
+    / "bc_v3_epoch_4.pt"
 )
 
 NUM_ACTIONS = 20160
@@ -346,46 +331,70 @@ def generate_position():
 
         board = chess.variant.AtomicBoard()
 
-        moves = random.randint(8, 30)
+        moves = random.randint(
+            8,
+            30,
+        )
 
         for _ in range(moves):
 
             if board.is_game_over():
+
                 break
 
-            legal_moves = list(board.legal_moves)
+            legal_moves = list(
+                board.legal_moves
+            )
 
             if not legal_moves:
+
                 break
 
-            move = random.choice(legal_moves)
+            move = random.choice(
+                legal_moves
+            )
 
             board.push(move)
 
-        legal_moves = list(board.legal_moves)
+        legal_moves = list(
+            board.legal_moves
+        )
 
         if legal_moves:
+
             return board
 
 
 # ============================================================
-# Load BC5
+# Load BC
 # ============================================================
 
-def load_bc5():
+def load_bc():
 
     print(
-        "Loading BC5..."
+        f"Loading BC: {BC_CHECKPOINT}"
     )
 
+    if not BC_CHECKPOINT.exists():
+
+        print(
+            "ERROR: BC checkpoint not found."
+        )
+
+        print(
+            f"  {BC_CHECKPOINT}"
+        )
+
+        return None
+
     checkpoint = torch.load(
-        BC5_CHECKPOINT,
+        BC_CHECKPOINT,
         map_location=DEVICE,
     )
 
     model = ChessResNet(
         num_actions=NUM_ACTIONS,
-        channels=64,
+        channels=32,
         blocks=4,
     ).to(DEVICE)
 
@@ -398,48 +407,7 @@ def load_bc5():
     model.eval()
 
     print(
-        f"BC5 epoch: "
-        f"{checkpoint.get('epoch', '?')}"
-    )
-
-    return model
-
-
-# ============================================================
-# Load RL
-# ============================================================
-
-def load_rl(path):
-
-    print(
-        f"Loading RL: {path}"
-    )
-
-    checkpoint = torch.load(
-        path,
-        map_location=DEVICE,
-    )
-
-    backbone = ChessResNet(
-        num_actions=NUM_ACTIONS,
-        channels=64,
-        blocks=4,
-    )
-
-    model = ActorCritic(
-        backbone
-    ).to(DEVICE)
-
-    model.load_state_dict(
-        checkpoint[
-            "model_state_dict"
-        ]
-    )
-
-    model.eval()
-
-    print(
-        f"RL epoch: "
+        f"BC epoch: "
         f"{checkpoint.get('epoch', '?')}"
     )
 
@@ -451,7 +419,7 @@ def load_rl(path):
 # ============================================================
 
 @torch.no_grad()
-def get_bc_policy(
+def get_policy(
     model,
     board,
 ):
@@ -469,27 +437,8 @@ def get_bc_policy(
     return logits.squeeze(0)
 
 
-@torch.no_grad()
-def get_rl_policy(
-    model,
-    board,
-):
-
-    x = encode_board(
-        board
-    ).unsqueeze(
-        0
-    ).to(
-        DEVICE
-    )
-
-    policy, _ = model(x)
-
-    return policy.squeeze(0)
-
-
 # ============================================================
-# Select legal action
+# Select best legal action
 # ============================================================
 
 def select_best_legal_action(
@@ -509,14 +458,23 @@ def select_best_legal_action(
 
         if uci not in action_to_index:
 
-            missing.append(uci)
+            missing.append(
+                uci
+            )
 
             continue
 
-        index = action_to_index[uci]
+        index = action_to_index[
+            uci
+        ]
 
-        legal_indices.append(index)
-        legal_uci.append(uci)
+        legal_indices.append(
+            index
+        )
+
+        legal_uci.append(
+            uci
+        )
 
     if not legal_indices:
 
@@ -531,13 +489,13 @@ def select_best_legal_action(
 
         print()
         print("Turn:")
+
         print(
             "White"
             if board.turn
             else "Black"
         )
 
-        print()
         print(
             f"python-chess legal moves : "
             f"{board.legal_moves.count()}"
@@ -552,6 +510,7 @@ def select_best_legal_action(
         print("Missing moves:")
 
         for uci in missing[:100]:
+
             print(
                 f"  {uci}"
             )
@@ -578,8 +537,12 @@ def select_best_legal_action(
     ).item()
 
     return (
-        legal_uci[best_position],
-        legal_indices[best_position],
+        legal_uci[
+            best_position
+        ],
+        legal_indices[
+            best_position
+        ],
     )
 
 
@@ -624,12 +587,11 @@ def get_top_k_legal_actions(
 
 
 # ============================================================
-# Test one model
+# Test BC
 # ============================================================
 
 def test_model(
     model,
-    is_rl,
     name,
     positions,
     action_to_index,
@@ -647,7 +609,7 @@ def test_model(
     )
 
     print(
-        f"{name}"
+        name
     )
 
     print(
@@ -668,45 +630,23 @@ def test_model(
         # Original
         # ----------------------------------------------------
 
-        if is_rl:
-
-            original_logits = (
-                get_rl_policy(
-                    model,
-                    board,
-                )
+        original_logits = (
+            get_policy(
+                model,
+                board,
             )
-
-        else:
-
-            original_logits = (
-                get_bc_policy(
-                    model,
-                    board,
-                )
-            )
+        )
 
         # ----------------------------------------------------
         # Mirrored
         # ----------------------------------------------------
 
-        if is_rl:
-
-            mirrored_logits = (
-                get_rl_policy(
-                    model,
-                    mirrored,
-                )
+        mirrored_logits = (
+            get_policy(
+                model,
+                mirrored,
             )
-
-        else:
-
-            mirrored_logits = (
-                get_bc_policy(
-                    model,
-                    mirrored,
-                )
-            )
+        )
 
         # ----------------------------------------------------
         # Best original action
@@ -819,8 +759,10 @@ def test_model(
             f"{original_action:6s} -> "
             f"expected={expected_mirror_action:6s} | "
             f"actual={mirrored_action:6s} | "
-            f"top1={'YES' if top1_match else 'NO '} | "
-            f"top5={'YES' if top5_match else 'NO '}"
+            f"top1="
+            f"{'YES' if top1_match else 'NO '} | "
+            f"top5="
+            f"{'YES' if top5_match else 'NO '}"
         )
 
     # --------------------------------------------------------
@@ -828,6 +770,11 @@ def test_model(
     # --------------------------------------------------------
 
     if valid_tests == 0:
+
+        print()
+        print(
+            "No valid tests."
+        )
 
         return
 
@@ -868,8 +815,7 @@ def main():
     )
 
     print(
-        "BC5 vs RL0 vs RL10 — "
-        "BEHAVIORAL MIRROR SYMMETRY"
+        "BC BEHAVIORAL MIRROR SYMMETRY"
     )
 
     print(
@@ -888,26 +834,16 @@ def main():
     ) = build_action_maps()
 
     # --------------------------------------------------------
-    # Models
+    # BC
     # --------------------------------------------------------
 
     print()
 
-    bc5 = load_bc5()
+    model = load_bc()
 
-    print()
+    if model is None:
 
-    rl0 = load_rl(
-        RL0_CHECKPOINT
-    )
-
-    print()
-
-    rl10 = load_rl(
-        RL10_CHECKPOINT
-    )
-
-    print()
+        return
 
     # --------------------------------------------------------
     # Generate identical test positions
@@ -926,39 +862,12 @@ def main():
         )
 
     # --------------------------------------------------------
-    # BC5
+    # Test BC
     # --------------------------------------------------------
 
     test_model(
-        bc5,
-        False,
-        "BC5",
-        positions,
-        action_to_index,
-        mirror_map,
-    )
-
-    # --------------------------------------------------------
-    # RL0
-    # --------------------------------------------------------
-
-    test_model(
-        rl0,
-        True,
-        "RL0",
-        positions,
-        action_to_index,
-        mirror_map,
-    )
-
-    # --------------------------------------------------------
-    # RL10
-    # --------------------------------------------------------
-
-    test_model(
-        rl10,
-        True,
-        "RL10",
+        model,
+        "BC",
         positions,
         action_to_index,
         mirror_map,
@@ -969,7 +878,6 @@ def main():
     # --------------------------------------------------------
 
     print()
-
     print(
         "=" * 70
     )
@@ -985,15 +893,11 @@ def main():
     print()
 
     print(
-        "Interpretation:"
+        "TOP-1 = exact behavioral symmetry"
     )
 
     print(
-        "  TOP-1 = exact behavioral symmetry"
-    )
-
-    print(
-        "  TOP-5 = mirrored action remains "
+        "TOP-5 = mirrored action remains "
         "among the five preferred legal actions"
     )
 

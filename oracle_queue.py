@@ -1,5 +1,3 @@
-# oracle_queue.py
-
 from __future__ import annotations
 
 import json
@@ -12,51 +10,67 @@ from typing import Optional
 
 
 # ============================================================
-# Oracle Query
+# Data model
 # ============================================================
 
 @dataclass
 class OracleQuery:
-    """
-    One position submitted to the human oracle.
-    """
 
     query_id: str
 
     fen: str
 
+    # Active learning raw signals
     H: float
     U: float
     HU: float
 
+    # Active learning score
     score: float
-    threshold: float
 
-    model: str
-    epoch: int
+    # Optional metadata
+    threshold: Optional[float] = None
 
-    game_id: int
-    ply: int
+    model: str = "historical_json"
+    epoch: int = -1
 
-    created_at: str
+    game_id: int = -1
+    ply: int = -1
+
+    created_at: str = ""
 
     status: str = "pending"
 
     oracle_move: Optional[str] = None
+    oracle_confidence: Optional[str] = None
+    oracle_situation: Optional[str] = None
 
     answered_at: Optional[str] = None
 
-
 # ============================================================
-# Oracle Queue
+# Queue
 # ============================================================
 
 class OracleQueue:
+
+    VALID_CONFIDENCE = {
+        "low",
+        "medium",
+        "high",
+    }
+
+    VALID_SITUATION = {
+        "unique_move",
+        "multiple_good",
+        "everything_wins",
+    }
+
 
     def __init__(
         self,
         path: str | Path = "data/oracle_queue.jsonl",
     ):
+
         self.path = Path(path)
 
         self.path.parent.mkdir(
@@ -64,23 +78,63 @@ class OracleQueue:
             exist_ok=True,
         )
 
-        #
-        # Create the file if it does not exist.
-        #
         self.path.touch(
             exist_ok=True,
         )
 
+
     # ========================================================
-    # Internal helpers
+    # Utils
+    # ========================================================
+
+    @staticmethod
+    def _timestamp():
+
+        return datetime.now(
+            timezone.utc
+        ).isoformat()
+
+
+
+    # ========================================================
+    # Serialization
+    # ========================================================
+
+    @staticmethod
+    def _serialize(
+        q: OracleQuery,
+    ) -> dict:
+
+        return asdict(q)
+
+
+
+    @staticmethod
+    def _deserialize(
+        data: dict,
+    ) -> OracleQuery:
+
+        # Backward compatibility: old queue used "I" instead of "score"
+        if "I" in data and "score" not in data:
+            data["score"] = data.pop("I")
+
+        return OracleQuery(
+            **data
+        )
+
+
+
+    # ========================================================
+    # IO
     # ========================================================
 
     def _read_all(self) -> list[OracleQuery]:
-        """
-        Load every query from the JSONL file.
-        """
 
         queries = []
+
+        if not self.path.exists():
+            return queries
+
 
         with open(
             self.path,
@@ -88,62 +142,72 @@ class OracleQueue:
             encoding="utf-8",
         ) as f:
 
-            for line in f:
+            for line_number, line in enumerate(
+                f,
+                start=1,
+            ):
 
                 line = line.strip()
 
                 if not line:
                     continue
 
-                data = json.loads(line)
+
+                try:
+
+                    data = json.loads(
+                        line
+                    )
+
+                except json.JSONDecodeError as e:
+
+                    raise RuntimeError(
+                        f"Invalid JSONL at line {line_number}: {line}"
+                    ) from e
+
 
                 queries.append(
-                    OracleQuery(
-                        **data
-                    )
+                    self._deserialize(data)
                 )
+
 
         return queries
 
-    def _rewrite(
+
+
+    def _write_all(
         self,
         queries: list[OracleQuery],
-    ) -> None:
-        """
-        Rewrite the complete queue.
+    ):
 
-        This is intentionally simple for now.
-        """
-
-        temporary_path = self.path.with_suffix(
+        tmp = self.path.with_suffix(
             ".tmp"
         )
 
+
         with open(
-            temporary_path,
+            tmp,
             "w",
             encoding="utf-8",
         ) as f:
 
-            for query in queries:
+            for q in queries:
 
                 f.write(
                     json.dumps(
-                        asdict(query),
+                        self._serialize(q),
                         ensure_ascii=False,
                     )
-                    + "\n"
                 )
 
-        temporary_path.replace(
+                f.write("\n")
+
+
+        tmp.replace(
             self.path
         )
 
-    @staticmethod
-    def _timestamp() -> str:
-        return datetime.now(
-            timezone.utc
-        ).isoformat()
+
 
     # ========================================================
     # Add
@@ -162,11 +226,10 @@ class OracleQueue:
         game_id: int,
         ply: int,
     ) -> OracleQuery:
-        """
-        Add a new position to the oracle queue.
-        """
 
-        query = OracleQuery(
+
+        q = OracleQuery(
+
             query_id=uuid.uuid4().hex,
 
             fen=fen,
@@ -187,6 +250,7 @@ class OracleQueue:
             created_at=self._timestamp(),
         )
 
+
         with open(
             self.path,
             "a",
@@ -195,63 +259,52 @@ class OracleQueue:
 
             f.write(
                 json.dumps(
-                    asdict(query),
+                    self._serialize(q),
                     ensure_ascii=False,
                 )
-                + "\n"
             )
 
-        return query
+            f.write("\n")
+
+
+        return q
+
+
 
     # ========================================================
-    # Get
+    # Retrieval
     # ========================================================
 
     def get(
         self,
         query_id: str,
     ) -> Optional[OracleQuery]:
-        """
-        Retrieve one query by ID.
-        """
 
-        queries = self._read_all()
+        for q in self._read_all():
 
-        for query in queries:
+            if q.query_id == query_id:
+                return q
 
-            if query.query_id == query_id:
-
-                return query
 
         return None
 
-    # ========================================================
-    # Pending
-    # ========================================================
 
-    def pending(
-        self,
-    ) -> list[OracleQuery]:
-        """
-        Return all unanswered queries.
-        """
+
+    def pending(self):
 
         return [
-            query
-            for query in self._read_all()
-            if query.status == "pending"
+
+            q
+
+            for q in self._read_all()
+
+            if q.status == "pending"
+
         ]
 
-    # ========================================================
-    # Next
-    # ========================================================
 
-    def next(
-        self,
-    ) -> Optional[OracleQuery]:
-        """
-        Return the oldest pending query.
-        """
+
+    def next(self):
 
         pending = self.pending()
 
@@ -259,6 +312,8 @@ class OracleQueue:
             return None
 
         return pending[0]
+
+
 
     # ========================================================
     # Answer
@@ -268,40 +323,64 @@ class OracleQueue:
         self,
         query_id: str,
         oracle_move: str,
-    ) -> OracleQuery:
-        """
-        Register the human oracle's answer.
-        """
+        confidence: str,
+        situation: str,
+    ):
+
+
+        if confidence not in self.VALID_CONFIDENCE:
+
+            raise ValueError(
+                f"Invalid confidence: {confidence}"
+            )
+
+
+        if situation not in self.VALID_SITUATION:
+
+            raise ValueError(
+                f"Invalid situation: {situation}"
+            )
+
 
         queries = self._read_all()
 
-        for query in queries:
 
-            if query.query_id != query_id:
+        for q in queries:
+
+            if q.query_id != query_id:
                 continue
 
-            if query.status != "pending":
+
+            if q.status != "pending":
 
                 raise ValueError(
-                    f"Query {query_id} "
-                    f"is already {query.status}."
+                    "Query already answered"
                 )
 
-            query.oracle_move = oracle_move
 
-            query.status = "answered"
+            q.oracle_move = oracle_move
+            q.oracle_confidence = confidence
+            q.oracle_situation = situation
 
-            query.answered_at = self._timestamp()
+            q.status = "answered"
 
-            self._rewrite(
+            q.answered_at = self._timestamp()
+
+
+            self._write_all(
                 queries
             )
 
-            return query
+
+            return q
+
+
 
         raise KeyError(
-            f"Unknown query ID: {query_id}"
+            f"Unknown query id: {query_id}"
         )
+
+
 
     # ========================================================
     # Discard
@@ -310,159 +389,56 @@ class OracleQueue:
     def discard(
         self,
         query_id: str,
-    ) -> OracleQuery:
-        """
-        Mark a query as discarded.
-
-        The position remains in the queue for traceability.
-        """
+    ):
 
         queries = self._read_all()
 
-        for query in queries:
 
-            if query.query_id != query_id:
+        for q in queries:
+
+            if q.query_id != query_id:
                 continue
 
-            if query.status != "pending":
 
-                raise ValueError(
-                    f"Query {query_id} "
-                    f"is already {query.status}."
-                )
+            q.status = "discarded"
 
-            query.status = "discarded"
-
-            self._rewrite(
+            self._write_all(
                 queries
             )
 
-            return query
+            return q
+
 
         raise KeyError(
-            f"Unknown query ID: {query_id}"
+            f"Unknown query id: {query_id}"
         )
+
+
 
     # ========================================================
     # Statistics
     # ========================================================
 
-    def stats(self) -> dict:
-        """
-        Return queue statistics.
-        """
+    def stats(self):
 
         queries = self._read_all()
 
-        total = len(queries)
-
-        pending = sum(
-            query.status == "pending"
-            for query in queries
-        )
-
-        answered = sum(
-            query.status == "answered"
-            for query in queries
-        )
-
-        discarded = sum(
-            query.status == "discarded"
-            for query in queries
-        )
-
         return {
-            "total": total,
-            "pending": pending,
-            "answered": answered,
-            "discarded": discarded,
+
+            "total": len(queries),
+
+            "pending": sum(
+                q.status == "pending"
+                for q in queries
+            ),
+
+            "answered": sum(
+                q.status == "answered"
+                for q in queries
+            ),
+
+            "discarded": sum(
+                q.status == "discarded"
+                for q in queries
+            ),
         }
-
-
-# ============================================================
-# Test / demonstration
-# ============================================================
-
-if __name__ == "__main__":
-
-    queue = OracleQueue()
-
-    print(
-        "=================================================="
-    )
-    print(
-        "ALBERTA - ORACLE QUEUE"
-    )
-    print(
-        "=================================================="
-    )
-
-    print(
-        f"File: {queue.path}"
-    )
-
-    print()
-
-    print(
-        "Current queue:"
-    )
-
-    print(
-        json.dumps(
-            queue.stats(),
-            indent=2,
-        )
-    )
-
-    #
-    # Create a demonstration query.
-    #
-    query = queue.add(
-        fen="8/8/8/8/8/8/8/4K2k w - - 0 1",
-
-        H=2.5,
-        U=0.08,
-        HU=0.20,
-
-        score=0.981,
-        threshold=0.964,
-
-        model="rl_epoch_10",
-        epoch=10,
-
-        game_id=1,
-        ply=42,
-    )
-
-    print()
-    print(
-        "Created query:"
-    )
-
-    print(
-        json.dumps(
-            asdict(query),
-            indent=2,
-        )
-    )
-
-    print()
-    print(
-        "Pending queries:"
-    )
-
-    for pending_query in queue.pending():
-
-        print(
-            pending_query.query_id,
-            pending_query.status,
-        )
-
-    #
-    # We deliberately do NOT automatically answer
-    # the demonstration query.
-    #
-    print()
-    print(
-        "Queue ready."
-    )

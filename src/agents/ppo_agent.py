@@ -19,18 +19,164 @@ class PPOAgent:
         device="cpu",
         deterministic=False,
         temperature=0.75,
+        bc_model=None,
+        opening_prior_strength=1.0,
+        opening_prior_plies=6,
     ):
 
         self.device = torch.device(device)
 
         self.model = model.to(self.device)
 
+        self.bc_model = (
+            bc_model.to(self.device)
+            if bc_model is not None
+            else None
+        )
+
+        if self.bc_model is not None:
+            self.bc_model.eval()
+
         self.deterministic = deterministic
 
         self.temperature = temperature
 
+        self.opening_prior_strength = (
+            opening_prior_strength
+        )
+
+        self.opening_prior_plies = (
+            opening_prior_plies
+        )
+
         self.model.eval()
 
+
+    # ========================================================
+    # BC opening prior strength
+    # ========================================================
+
+    def _opening_prior_strength(
+        self,
+        ply,
+    ):
+
+        if (
+            self.bc_model is None
+            or self.opening_prior_plies <= 0
+        ):
+
+            return 0.0
+
+
+        if ply >= self.opening_prior_plies:
+
+            return 0.0
+
+
+        # ====================================================
+        # Décroissance linéaire
+        #
+        # ply 0 -> 100 %
+        # ply 1 ->  83 %
+        # ply 2 ->  67 %
+        # ply 3 ->  50 %
+        # ply 4 ->  33 %
+        # ply 5 ->  17 %
+        # ply 6 ->   0 %
+        # ====================================================
+
+        progress = (
+            ply
+            / self.opening_prior_plies
+        )
+
+
+        return (
+            self.opening_prior_strength
+            * (1.0 - progress)
+        )
+
+
+    # ========================================================
+    # BC prior — single position
+    # ========================================================
+
+    @torch.no_grad()
+    def _apply_bc_prior_single(
+        self,
+        board,
+        legal_indices,
+        legal_logits,
+    ):
+
+        alpha = (
+            self._opening_prior_strength(
+                board.ply()
+            )
+        )
+
+
+        if alpha <= 0.0:
+
+            return legal_logits
+
+
+        if self.bc_model is None:
+
+            return legal_logits
+
+
+        x = encode_board(
+            board
+        )
+
+        x = x.unsqueeze(0).to(
+            self.device
+        )
+
+
+        bc_policy, _ = self.bc_model(
+            x
+        )
+
+
+        bc_logits = bc_policy[0]
+
+
+        bc_legal_logits = bc_logits[
+            legal_indices
+        ]
+
+
+        bc_log_probs = torch.log_softmax(
+            bc_legal_logits,
+            dim=0,
+        )
+
+
+        # ====================================================
+        # BC comme prior
+        #
+        # RL logits + alpha * log P_BC
+        #
+        # Le BC influence la préférence mais n'interdit
+        # jamais un coup.
+        # ====================================================
+
+        guided_logits = (
+            legal_logits
+            + alpha
+            * bc_log_probs
+        )
+
+
+        return guided_logits
+
+
+    # ========================================================
+    # Single move
+    # ========================================================
 
     @torch.no_grad()
     def choose_move(
@@ -38,9 +184,14 @@ class PPOAgent:
         board: chess.Board,
     ):
 
-        x = encode_board(board)
+        x = encode_board(
+            board
+        )
 
-        x = x.unsqueeze(0).to(self.device)
+        x = x.unsqueeze(0).to(
+            self.device
+        )
+
 
         policy, value = self.model(x)
 
@@ -73,13 +224,24 @@ class PPOAgent:
 
 
         # ====================================================
-        # Entropie intrinsèque de la policy
+        # BC opening prior
         #
-        # IMPORTANT :
-        # calculée AVANT la température de self-play.
+        # Le prior est appliqué AVANT la température.
+        # ====================================================
+
+        legal_logits = (
+            self._apply_bc_prior_single(
+                board,
+                legal_indices,
+                legal_logits,
+            )
+        )
+
+
+        # ====================================================
+        # Entropie de la policy guidée
         #
-        # Il n'y a ici que des coups légaux, donc aucun
-        # -inf provenant d'un masque.
+        # AVANT température.
         # ====================================================
 
         entropy_log_probs = torch.log_softmax(
@@ -100,7 +262,7 @@ class PPOAgent:
         # ====================================================
         # Distribution utilisée pour choisir le coup
         #
-        # La température ne modifie donc PAS H.
+        # Température appliquée APRÈS le BC prior.
         # ====================================================
 
         if (
@@ -112,10 +274,14 @@ class PPOAgent:
                 legal_logits
             ).item()
 
-            chosen_log_probs = torch.log_softmax(
-                legal_logits,
-                dim=0,
+
+            chosen_log_probs = (
+                torch.log_softmax(
+                    legal_logits,
+                    dim=0,
+                )
             )
+
 
             chosen_log_prob = (
                 chosen_log_probs[position]
@@ -130,19 +296,25 @@ class PPOAgent:
                 self.temperature
             )
 
-            sampling_log_probs = torch.log_softmax(
-                sampling_logits,
-                dim=0,
+
+            sampling_log_probs = (
+                torch.log_softmax(
+                    sampling_logits,
+                    dim=0,
+                )
             )
+
 
             sampling_probs = torch.exp(
                 sampling_log_probs
             )
 
+
             position = torch.multinomial(
                 sampling_probs,
                 1,
             ).item()
+
 
             chosen_log_prob = (
                 sampling_log_probs[position]
@@ -153,7 +325,10 @@ class PPOAgent:
         # Conversion position légale -> action globale
         # ====================================================
 
-        action = legal_indices[position]
+        action = legal_indices[
+            position
+        ]
+
 
         move_uci = list(
             legal_moves.keys()
@@ -179,8 +354,15 @@ class PPOAgent:
 
             "fen":
                 board.fen(),
+
+            "ply":
+                board.ply(),
         }
 
+
+    # ========================================================
+    # Batch moves
+    # ========================================================
 
     @torch.no_grad()
     def choose_moves(
@@ -206,7 +388,7 @@ class PPOAgent:
 
 
         # ====================================================
-        # Forward
+        # Forward RL
         # ====================================================
 
         policies, values = self.model(x)
@@ -238,24 +420,31 @@ class PPOAgent:
 
                 uci = move.uci()
 
+
                 action = ACTION_TO_INDEX[
                     uci
                 ]
+
 
                 board_indices.append(
                     action
                 )
 
-                board_moves[action] = move
+
+                board_moves[action] = (
+                    move
+                )
 
 
             legal_indices.append(
                 board_indices
             )
 
+
             legal_moves.append(
                 board_moves
             )
+
 
             max_legal_moves = max(
                 max_legal_moves,
@@ -293,6 +482,7 @@ class PPOAgent:
 
             n = len(indices)
 
+
             legal_index_tensor[
                 i,
                 :n,
@@ -301,6 +491,7 @@ class PPOAgent:
                 dtype=torch.long,
                 device=self.device,
             )
+
 
             legal_mask[
                 i,
@@ -317,35 +508,133 @@ class PPOAgent:
             legal_index_tensor,
         )
 
-        legal_logits = legal_logits.masked_fill(
-            ~legal_mask,
-            float("-inf"),
+
+        legal_logits = (
+            legal_logits.masked_fill(
+                ~legal_mask,
+                float("-inf"),
+            )
         )
 
 
         # ====================================================
-        # Entropie intrinsèque de la policy
+        # BC opening prior
+        #
+        # Seulement les positions encore dans la fenêtre
+        # d'ouverture.
+        # ====================================================
+
+        if self.bc_model is not None:
+
+            active_indices = [
+                i
+                for i, board in enumerate(boards)
+                if self._opening_prior_strength(
+                    board.ply()
+                ) > 0.0
+            ]
+
+
+            if active_indices:
+
+                active_boards = [
+                    boards[i]
+                    for i in active_indices
+                ]
+
+
+                active_x = encode_boards(
+                    active_boards
+                ).to(self.device)
+
+
+                bc_policies, _ = (
+                    self.bc_model(
+                        active_x
+                    )
+                )
+
+
+                for j, i in enumerate(
+                    active_indices
+                ):
+
+                    n = len(
+                        legal_indices[i]
+                    )
+
+
+                    if n == 0:
+
+                        continue
+
+
+                    indices = (
+                        legal_index_tensor[
+                            i,
+                            :n,
+                        ]
+                    )
+
+
+                    bc_legal_logits = (
+                        bc_policies[j][
+                            indices
+                        ]
+                    )
+
+
+                    bc_log_probs = (
+                        torch.log_softmax(
+                            bc_legal_logits,
+                            dim=0,
+                        )
+                    )
+
+
+                    alpha = (
+                        self._opening_prior_strength(
+                            boards[i].ply()
+                        )
+                    )
+
+
+                    legal_logits[
+                        i,
+                        :n,
+                    ] = (
+                        legal_logits[
+                            i,
+                            :n,
+                        ]
+                        +
+                        alpha
+                        * bc_log_probs
+                    )
+
+
+        # ====================================================
+        # Entropie intrinsèque de la policy guidée
         #
         # AVANT température.
         #
-        # Pour les cases padding :
-        #
-        #     probability = 0
-        #     log_probability = 0
-        #
-        # On évite donc :
-        #
-        #     0 * (-inf) = NaN
+        # Padding :
+        # probability = 0
+        # log_probability = 0
         # ====================================================
 
-        entropy_log_probs = torch.log_softmax(
-            legal_logits,
-            dim=1,
+        entropy_log_probs = (
+            torch.log_softmax(
+                legal_logits,
+                dim=1,
+            )
         )
+
 
         entropy_probs = torch.exp(
             entropy_log_probs
         )
+
 
         entropy_log_probs_safe = (
             entropy_log_probs.masked_fill(
@@ -353,6 +642,7 @@ class PPOAgent:
                 0.0,
             )
         )
+
 
         entropy = -(
             entropy_probs
@@ -365,7 +655,7 @@ class PPOAgent:
         # ====================================================
         # Distribution utilisée pour le self-play
         #
-        # Cette distribution reçoit la température.
+        # Température appliquée APRÈS le prior.
         # ====================================================
 
         sampling_log_probs = None
@@ -384,10 +674,14 @@ class PPOAgent:
                 self.temperature
             )
 
-            sampling_log_probs = torch.log_softmax(
-                sampling_logits,
-                dim=1,
+
+            sampling_log_probs = (
+                torch.log_softmax(
+                    sampling_logits,
+                    dim=1,
+                )
             )
+
 
             sampling_probs = torch.exp(
                 sampling_log_probs
@@ -408,9 +702,12 @@ class PPOAgent:
                 dim=1,
             )
 
-            chosen_log_probs = torch.log_softmax(
-                legal_logits,
-                dim=1,
+
+            chosen_log_probs = (
+                torch.log_softmax(
+                    legal_logits,
+                    dim=1,
+                )
             )
 
 
@@ -420,6 +717,7 @@ class PPOAgent:
                 sampling_probs,
                 1,
             ).squeeze(1)
+
 
             chosen_log_probs = (
                 sampling_log_probs
@@ -442,17 +740,19 @@ class PPOAgent:
             ].item()
 
 
-            action = legal_index_tensor[
-                i,
-                position,
-            ].item()
+            action = (
+                legal_index_tensor[
+                    i,
+                    position,
+                ].item()
+            )
 
 
-            move = legal_moves[
-                i
-            ][
-                action
-            ]
+            move = (
+                legal_moves[i][
+                    action
+                ]
+            )
 
 
             results.append(
@@ -484,6 +784,11 @@ class PPOAgent:
                         boards[
                             i
                         ].fen(),
+
+                    "ply":
+                        boards[
+                            i
+                        ].ply(),
                 }
             )
 

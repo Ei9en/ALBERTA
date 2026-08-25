@@ -18,17 +18,17 @@ CHECKPOINT_DIR = (
 BC_CHECKPOINT = (
     CHECKPOINT_DIR
     / "bc_epoch"
-    / "bc_v2_5_epoch_5.pt"
+    / "bc_v3_epoch_5.pt"
 )
 
 RL_CHECKPOINT = (
     CHECKPOINT_DIR
     / "rl_epoch"
-    / "rl_epoch_10.pt"
+    / "rl_epoch_30.pt"
 )
 
-TEMPERATURE = 1
-GAMES = 100
+TEMPERATURE = 2
+GAMES = 200
 
 # ============================================================
 # Evaluation

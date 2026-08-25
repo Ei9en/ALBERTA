@@ -26,6 +26,7 @@ class ReplayBuffer:
         old_value,
         old_log_prob,
         advantage,
+        ply,
     ):
 
         self.buffer.append(
@@ -50,6 +51,9 @@ class ReplayBuffer:
 
                 "advantage":
                     advantage,
+
+                "ply":
+                    ply,
             }
         )
 

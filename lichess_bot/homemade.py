@@ -6,6 +6,7 @@ from lib.lichess_types import HOMEMADE_ARGS_TYPE
 import logging
 
 from atomic_engine.rl_bot import RLBot
+from atomic_engine.bc_bot_stochastic import BCBotStochastic
 
 
 logger = logging.getLogger(__name__)
@@ -26,9 +27,8 @@ class AtomicRandom(ExampleEngine):
 
         super().__init__(*args, **kwargs)
 
-        self.bot = RLBot(
-            temperature=0.5,
-            deterministic=False,
+        self.bot = BCBotStochastic(
+            temperature=1.5,
         )
 
 

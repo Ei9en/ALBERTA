@@ -20,18 +20,6 @@ INPUT_FILE = (
     / "uncertainty_stats.json"
 )
 
-OUTPUT_DIR = (
-    PROJECT_ROOT
-    / "data"
-    / "reward_signal_analysis"
-)
-
-OUTPUT_DIR.mkdir(
-    parents=True,
-    exist_ok=True,
-)
-
-
 SIGNALS = [
     "H",
     "U",
@@ -46,12 +34,6 @@ N_QUANTILES = 10
 # ============================================================
 
 def safe_float(value):
-    """
-    Convert a value to float.
-
-    Returns NaN if conversion fails.
-    """
-
     try:
         value = float(value)
 
@@ -60,38 +42,11 @@ def safe_float(value):
 
         return value
 
-    except (
-        TypeError,
-        ValueError,
-    ):
+    except (TypeError, ValueError):
         return np.nan
 
 
-def result_to_reward(
-    result,
-):
-    """
-    Convert the game result into a fixed reward based on
-    the winning color.
-
-    White win:
-        1-0 -> +1
-
-    Draw:
-        1/2-1/2 -> 0
-
-    Black win:
-        0-1 -> -1
-
-    IMPORTANT:
-        This reward is NOT from the perspective of the
-        player to move in the FEN.
-
-        It is a fixed encoding of the game outcome:
-            White win = +1
-            Draw      =  0
-            Black win = -1
-    """
+def result_to_reward(result):
 
     if result == "1-0":
         return 1.0
@@ -110,23 +65,9 @@ def result_to_reward(
     return np.nan
 
 
-def reward_entropy(
-    rewards,
-):
-    """
-    Shannon entropy of the empirical reward distribution.
+def reward_entropy(rewards):
 
-    Rewards are assumed to be:
-        -1
-         0
-        +1
-
-    Returned in bits.
-    """
-
-    rewards = np.asarray(
-        rewards,
-    )
+    rewards = np.asarray(rewards)
 
     if len(rewards) == 0:
         return np.nan
@@ -149,16 +90,9 @@ def reward_entropy(
     return entropy
 
 
-def percentile_table(
-    series,
-):
-    """
-    Return standard descriptive statistics.
-    """
+def percentile_table(series):
 
-    series = pd.Series(
-        series
-    ).dropna()
+    series = pd.Series(series).dropna()
 
     if len(series) == 0:
         return {}
@@ -184,10 +118,7 @@ def percentile_table(
     }
 
     for p in percentiles:
-
-        result[
-            f"p{p}"
-        ] = np.percentile(
+        result[f"p{p}"] = np.percentile(
             series,
             p,
         )
@@ -200,30 +131,27 @@ def percentile_table(
 # ============================================================
 
 def load_data():
+
     print()
     print("=" * 70)
-    print("ALBERTA - REWARD SIGNAL ANALYSIS")
+    print("ALBERTA - FINAL PRE-AL REWARD SIGNAL ANALYSIS")
     print("=" * 70)
 
     print()
     print("Loading uncertainty statistics")
     print("-" * 70)
 
-    print(
-        f"File: {INPUT_FILE}"
-    )
+    print(f"File: {INPUT_FILE}")
 
     with open(
         INPUT_FILE,
         "r",
+        encoding="utf-8",
     ) as f:
 
         data = json.load(f)
 
-    if not isinstance(
-        data,
-        list,
-    ):
+    if not isinstance(data, list):
         raise ValueError(
             "Expected the JSON root to be a list."
         )
@@ -239,65 +167,50 @@ def load_data():
 # Build dataframe
 # ============================================================
 
-def build_dataframe(
-    data,
-):
+def build_dataframe(data):
 
     rows = []
 
     invalid_reward = 0
     invalid_signal = 0
+    invalid_fen = 0
 
     for record in data:
 
-        if not isinstance(
-            record,
-            dict,
-        ):
+        if not isinstance(record, dict):
             continue
 
-        fen = record.get(
-            "fen"
-        )
+        fen = record.get("fen")
+        result = record.get("result")
 
-        result = record.get(
-            "result"
-        )
+        H = safe_float(record.get("H"))
+        U = safe_float(record.get("U"))
+        HU = safe_float(record.get("HU"))
 
-        H = safe_float(
-            record.get("H")
-        )
+        reward = result_to_reward(result)
 
-        U = safe_float(
-            record.get("U")
-        )
-
-        HU = safe_float(
-            record.get("HU")
-        )
-
-        reward = result_to_reward(
-            result,
-        )
-
-        if not math.isfinite(
-            reward
-        ):
+        if not math.isfinite(reward):
             invalid_reward += 1
             continue
 
         if not all(
             math.isfinite(x)
-            for x in (
-                H,
-                U,
-                HU,
-            )
+            for x in (H, U, HU)
         ):
             invalid_signal += 1
             continue
 
-        side_to_move = fen.split()[1]
+        if not isinstance(fen, str):
+            invalid_fen += 1
+            continue
+
+        fen_parts = fen.split()
+
+        if len(fen_parts) < 2:
+            invalid_fen += 1
+            continue
+
+        side_to_move = fen_parts[1]
 
         rows.append(
             {
@@ -312,28 +225,30 @@ def build_dataframe(
             }
         )
 
-    df = pd.DataFrame(
-        rows
-    )
+    df = pd.DataFrame(rows)
 
     print()
     print("DATASET")
     print("-" * 70)
 
     print(
-        f"Valid observations: {len(df):,}"
+        f"Valid observations:       {len(df):,}"
     )
 
     print(
-        f"Invalid rewards skipped: {invalid_reward:,}"
+        f"Invalid rewards skipped:   {invalid_reward:,}"
     )
 
     print(
-        f"Invalid signal records skipped: {invalid_signal:,}"
+        f"Invalid signals skipped:   {invalid_signal:,}"
     )
 
     print(
-        f"Unique FENs: {df['fen'].nunique():,}"
+        f"Invalid FENs skipped:       {invalid_fen:,}"
+    )
+
+    print(
+        f"Unique FENs:               {df['fen'].nunique():,}"
     )
 
     return df
@@ -343,17 +258,11 @@ def build_dataframe(
 # Result distribution
 # ============================================================
 
-def print_result_distribution(
-    df,
-):
+def analyze_results(df):
 
     print()
     print("RESULT DISTRIBUTION")
     print("-" * 70)
-
-    counts = df[
-        "reward"
-    ].value_counts().sort_index()
 
     total = len(df)
 
@@ -364,21 +273,14 @@ def print_result_distribution(
     ]:
 
         count = int(
-            counts.get(
-                reward,
-                0,
-            )
+            (df["reward"] == reward).sum()
         )
 
-        pct = (
-            100.0
-            * count
-            / total
-        )
+        pct = 100.0 * count / total
 
         print(
             f"{label:<6}: "
-            f"{count:>8,} "
+            f"{count:>10,} "
             f"({pct:6.2f}%)"
         )
 
@@ -401,15 +303,11 @@ def print_result_distribution(
 # Signal distributions
 # ============================================================
 
-def analyze_signal_distributions(
-    df,
-):
+def analyze_signal_distributions(df):
 
     print()
     print("SIGNAL DISTRIBUTIONS")
     print("-" * 70)
-
-    rows = []
 
     for signal in SIGNALS:
 
@@ -417,18 +315,8 @@ def analyze_signal_distributions(
             df[signal]
         )
 
-        stats[
-            "signal"
-        ] = signal
-
-        rows.append(
-            stats
-        )
-
         print()
-        print(
-            f"{signal}"
-        )
+        print(signal)
 
         print(
             f"  min    : {stats['min']:.8f}"
@@ -439,7 +327,31 @@ def analyze_signal_distributions(
         )
 
         print(
+            f"  std    : {stats['std']:.8f}"
+        )
+
+        print(
+            f"  p01    : {stats['p1']:.8f}"
+        )
+
+        print(
+            f"  p05    : {stats['p5']:.8f}"
+        )
+
+        print(
+            f"  p10    : {stats['p10']:.8f}"
+        )
+
+        print(
+            f"  p25    : {stats['p25']:.8f}"
+        )
+
+        print(
             f"  median : {stats['p50']:.8f}"
+        )
+
+        print(
+            f"  p75    : {stats['p75']:.8f}"
         )
 
         print(
@@ -458,75 +370,37 @@ def analyze_signal_distributions(
             f"  max    : {stats['max']:.8f}"
         )
 
-    output = pd.DataFrame(
-        rows
-    )
-
-    output.to_csv(
-        OUTPUT_DIR
-        / "signal_distributions.csv",
-        index=False,
-    )
-
-    return output
-
 
 # ============================================================
 # Correlations
 # ============================================================
 
-def analyze_correlations(
-    df,
-):
+def analyze_correlations(df):
 
     print()
     print("CORRELATIONS WITH REWARD")
     print("-" * 70)
 
-    rows = []
-
     for signal in SIGNALS:
 
-        pearson_reward = df[
-            signal
-        ].corr(
+        pearson_reward = df[signal].corr(
             df["reward"],
             method="pearson",
         )
 
-        spearman_reward = df[
-            signal
-        ].corr(
+        spearman_reward = df[signal].corr(
             df["reward"],
             method="spearman",
         )
 
-        pearson_abs = df[
-            signal
-        ].corr(
+        pearson_abs = df[signal].corr(
             df["abs_reward"],
             method="pearson",
         )
 
-        spearman_abs = df[
-            signal
-        ].corr(
+        spearman_abs = df[signal].corr(
             df["abs_reward"],
             method="spearman",
-        )
-
-        rows.append(
-            {
-                "signal": signal,
-                "pearson_reward":
-                    pearson_reward,
-                "spearman_reward":
-                    spearman_reward,
-                "pearson_abs_reward":
-                    pearson_abs,
-                "spearman_abs_reward":
-                    spearman_abs,
-            }
         )
 
         print(
@@ -537,48 +411,24 @@ def analyze_correlations(
             f"Spearman(|R|)={spearman_abs:+.4f}"
         )
 
-    output = pd.DataFrame(
-        rows
-    )
-
-    output.to_csv(
-        OUTPUT_DIR
-        / "signal_correlations.csv",
-        index=False,
-    )
-
-    return output
-
 
 # ============================================================
 # Quantile analysis
 # ============================================================
 
-def analyze_quantiles(
-    df,
-):
+def analyze_quantiles(df):
 
     print()
     print("QUANTILE ANALYSIS")
     print("-" * 70)
 
-    all_rows = []
-
     for signal in SIGNALS:
 
         print()
-        print(
-            f"{signal}"
-        )
+        print(signal)
 
-        # rank(method="first") guarantees that qcut
-        # can produce exactly N_QUANTILES even when
-        # many values are identical.
-        ranked = (
-            df[signal]
-            .rank(
-                method="first"
-            )
+        ranked = df[signal].rank(
+            method="first"
         )
 
         quantile = pd.qcut(
@@ -588,10 +438,7 @@ def analyze_quantiles(
         ) + 1
 
         temp = df.copy()
-
-        temp[
-            "quantile"
-        ] = quantile
+        temp["quantile"] = quantile
 
         for q in range(
             1,
@@ -617,78 +464,51 @@ def analyze_quantiles(
                 subset["reward"] == -1
             ).sum()
 
-            row = {
-                "signal": signal,
-                "quantile": q,
-                "n": len(subset),
-                "signal_mean":
-                    subset[signal].mean(),
-                "signal_median":
-                    subset[signal].median(),
-                "win_pct":
-                    100.0
-                    * wins
-                    / len(subset),
-                "draw_pct":
-                    100.0
-                    * draws
-                    / len(subset),
-                "loss_pct":
-                    100.0
-                    * losses
-                    / len(subset),
-                "mean_reward":
-                    subset["reward"].mean(),
-                "mean_abs_reward":
-                    subset["abs_reward"].mean(),
-                "reward_entropy":
-                    reward_entropy(
-                        subset[
-                            "reward"
-                        ].values
-                    ),
-            }
+            win_pct = (
+                100.0 * wins / len(subset)
+            )
 
-            all_rows.append(
-                row
+            draw_pct = (
+                100.0 * draws / len(subset)
+            )
+
+            loss_pct = (
+                100.0 * losses / len(subset)
+            )
+
+            mean_reward = subset[
+                "reward"
+            ].mean()
+
+            mean_abs_reward = subset[
+                "abs_reward"
+            ].mean()
+
+            entropy = reward_entropy(
+                subset["reward"].values
             )
 
             print(
                 f"Q{q:02d} | "
                 f"N={len(subset):>7,} | "
-                f"Win={row['win_pct']:6.2f}% | "
-                f"Draw={row['draw_pct']:6.2f}% | "
-                f"Loss={row['loss_pct']:6.2f}% | "
-                f"E[R]={row['mean_reward']:+.4f} | "
-                f"E[|R|]={row['mean_abs_reward']:.4f}"
+                f"Win={win_pct:6.2f}% | "
+                f"Draw={draw_pct:6.2f}% | "
+                f"Loss={loss_pct:6.2f}% | "
+                f"E[R]={mean_reward:+.4f} | "
+                f"E[|R|]={mean_abs_reward:.4f} | "
+                f"H(R)={entropy:.4f}"
             )
-
-    output = pd.DataFrame(
-        all_rows
-    )
-
-    output.to_csv(
-        OUTPUT_DIR
-        / "signal_quantiles.csv",
-        index=False,
-    )
-
-    return output
 
 
 # ============================================================
 # Top-percentile selection
 # ============================================================
 
-def analyze_top_selection(
-    df,
-):
+def analyze_top_selection(df):
 
     print()
     print("TOP-QUANTILE SELECTION POWER")
     print("-" * 70)
-
-    rows = []
 
     thresholds = [
         0.50,
@@ -701,15 +521,11 @@ def analyze_top_selection(
     for signal in SIGNALS:
 
         print()
-        print(
-            signal
-        )
+        print(signal)
 
         for fraction in thresholds:
 
-            threshold = df[
-                signal
-            ].quantile(
+            threshold = df[signal].quantile(
                 1.0 - fraction
             )
 
@@ -717,75 +533,48 @@ def analyze_top_selection(
                 df[signal] >= threshold
             ]
 
+            mean_reward = subset[
+                "reward"
+            ].mean()
+
             mean_abs_reward = subset[
                 "abs_reward"
             ].mean()
 
             entropy = reward_entropy(
-                subset[
-                    "reward"
-                ].values
+                subset["reward"].values
             )
 
-            row = {
-                "signal": signal,
-                "fraction": fraction,
-                "threshold": threshold,
-                "n": len(subset),
-                "mean_reward":
-                    subset["reward"].mean(),
-                "mean_abs_reward":
-                    mean_abs_reward,
-                "reward_entropy":
-                    entropy,
-                "win_pct":
-                    100.0
-                    * (
-                        subset["reward"] == 1
-                    ).mean(),
-                "draw_pct":
-                    100.0
-                    * (
-                        subset["reward"] == 0
-                    ).mean(),
-                "loss_pct":
-                    100.0
-                    * (
-                        subset["reward"] == -1
-                    ).mean(),
-            }
+            win_pct = 100.0 * (
+                subset["reward"] == 1
+            ).mean()
 
-            rows.append(
-                row
-            )
+            draw_pct = 100.0 * (
+                subset["reward"] == 0
+            ).mean()
+
+            loss_pct = 100.0 * (
+                subset["reward"] == -1
+            ).mean()
 
             print(
                 f"Top {100*fraction:>5.1f}% | "
                 f"N={len(subset):>7,} | "
+                f"Threshold={threshold:.6f} | "
+                f"E[R]={mean_reward:+.4f} | "
                 f"E[|R|]={mean_abs_reward:.4f} | "
-                f"H(R)={entropy:.4f}"
+                f"H(R)={entropy:.4f} | "
+                f"Win={win_pct:6.2f}% | "
+                f"Draw={draw_pct:6.2f}% | "
+                f"Loss={loss_pct:6.2f}%"
             )
-
-    output = pd.DataFrame(
-        rows
-    )
-
-    output.to_csv(
-        OUTPUT_DIR
-        / "top_quantile_selection.csv",
-        index=False,
-    )
-
-    return output
 
 
 # ============================================================
 # H x U interaction
 # ============================================================
 
-def analyze_h_u_interaction(
-    df,
-):
+def analyze_h_u_interaction(df):
 
     print()
     print("H × U INTERACTION")
@@ -793,9 +582,7 @@ def analyze_h_u_interaction(
 
     temp = df.copy()
 
-    temp[
-        "H_bin"
-    ] = pd.qcut(
+    temp["H_bin"] = pd.qcut(
         temp["H"].rank(
             method="first"
         ),
@@ -807,9 +594,7 @@ def analyze_h_u_interaction(
         ],
     )
 
-    temp[
-        "U_bin"
-    ] = pd.qcut(
+    temp["U_bin"] = pd.qcut(
         temp["U"].rank(
             method="first"
         ),
@@ -820,8 +605,6 @@ def analyze_h_u_interaction(
             "high",
         ],
     )
-
-    rows = []
 
     for h_bin in [
         "low",
@@ -844,86 +627,52 @@ def analyze_h_u_interaction(
             if len(subset) == 0:
                 continue
 
-            row = {
-                "H_bin": h_bin,
-                "U_bin": u_bin,
-                "n": len(subset),
-                "mean_H":
-                    subset["H"].mean(),
-                "mean_U":
-                    subset["U"].mean(),
-                "mean_HU":
-                    subset["HU"].mean(),
-                "mean_reward":
-                    subset["reward"].mean(),
-                "mean_abs_reward":
-                    subset["abs_reward"].mean(),
-                "reward_entropy":
-                    reward_entropy(
-                        subset[
-                            "reward"
-                        ].values
-                    ),
-                "win_pct":
-                    100.0
-                    * (
-                        subset["reward"] == 1
-                    ).mean(),
-                "draw_pct":
-                    100.0
-                    * (
-                        subset["reward"] == 0
-                    ).mean(),
-                "loss_pct":
-                    100.0
-                    * (
-                        subset["reward"] == -1
-                    ).mean(),
-            }
+            mean_reward = subset[
+                "reward"
+            ].mean()
 
-            rows.append(
-                row
+            mean_abs_reward = subset[
+                "abs_reward"
+            ].mean()
+
+            entropy = reward_entropy(
+                subset["reward"].values
             )
 
-    output = pd.DataFrame(
-        rows
-    )
+            win_pct = 100.0 * (
+                subset["reward"] == 1
+            ).mean()
 
-    print()
+            draw_pct = 100.0 * (
+                subset["reward"] == 0
+            ).mean()
 
-    for _, row in output.iterrows():
+            loss_pct = 100.0 * (
+                subset["reward"] == -1
+            ).mean()
 
-        print(
-            f"H={row['H_bin']:<6} "
-            f"U={row['U_bin']:<6} | "
-            f"N={int(row['n']):>7,} | "
-            f"E[R]={row['mean_reward']:+.4f} | "
-            f"E[|R|]={row['mean_abs_reward']:.4f} | "
-            f"H(R)={row['reward_entropy']:.4f}"
-        )
-
-    output.to_csv(
-        OUTPUT_DIR
-        / "h_u_interaction.csv",
-        index=False,
-    )
-
-    return output
+            print(
+                f"H={h_bin:<6} "
+                f"U={u_bin:<6} | "
+                f"N={len(subset):>7,} | "
+                f"E[R]={mean_reward:+.4f} | "
+                f"E[|R|]={mean_abs_reward:.4f} | "
+                f"H(R)={entropy:.4f} | "
+                f"Win={win_pct:6.2f}% | "
+                f"Draw={draw_pct:6.2f}% | "
+                f"Loss={loss_pct:6.2f}%"
+            )
 
 
 # ============================================================
-# HU validation
+# HU redundancy
 # ============================================================
 
-def analyze_hu_redundancy(
-    df,
-):
+def analyze_hu_redundancy(df):
 
     print()
     print("HU REDUNDANCY / INFORMATION")
     print("-" * 70)
-
-    rows = []
 
     pairs = [
         ("H", "U"),
@@ -933,27 +682,14 @@ def analyze_hu_redundancy(
 
     for a, b in pairs:
 
-        pearson = df[
-            a
-        ].corr(
+        pearson = df[a].corr(
             df[b],
             method="pearson",
         )
 
-        spearman = df[
-            a
-        ].corr(
+        spearman = df[a].corr(
             df[b],
             method="spearman",
-        )
-
-        rows.append(
-            {
-                "signal_a": a,
-                "signal_b": b,
-                "pearson": pearson,
-                "spearman": spearman,
-            }
         )
 
         print(
@@ -962,85 +698,38 @@ def analyze_hu_redundancy(
             f"Spearman={spearman:+.4f}"
         )
 
-    output = pd.DataFrame(
-        rows
-    )
-
-    output.to_csv(
-        OUTPUT_DIR
-        / "signal_redundancy.csv",
-        index=False,
-    )
-
-    return output
-
 
 # ============================================================
-# Side-to-move sanity check
+# Winner color
 # ============================================================
 
-def analyze_winner_color(
-    df,
-):
-    """
-    Analyze the empirical distribution of game outcomes
-    by winning color.
-
-    This does NOT assume that the player to move is the agent.
-
-    reward encoding:
-        +1 = White win
-         0 = Draw
-        -1 = Black win
-    """
+def analyze_winner_color(df):
 
     print()
     print("WINNER COLOR ANALYSIS")
     print("-" * 70)
 
-    rows = []
-
     total = len(df)
 
-    white_wins = (
-        df["reward"] == 1
-    ).sum()
+    white_wins = int(
+        (df["reward"] == 1).sum()
+    )
 
-    draws = (
-        df["reward"] == 0
-    ).sum()
+    draws = int(
+        (df["reward"] == 0).sum()
+    )
 
-    black_wins = (
-        df["reward"] == -1
-    ).sum()
+    black_wins = int(
+        (df["reward"] == -1).sum()
+    )
 
-    outcomes = [
-        (1.0, "White win"),
-        (0.0, "Draw"),
-        (-1.0, "Black win"),
-    ]
+    for count, label in [
+        (white_wins, "White win"),
+        (draws, "Draw"),
+        (black_wins, "Black win"),
+    ]:
 
-    for reward, label in outcomes:
-
-        count = int(
-            (
-                df["reward"] == reward
-            ).sum()
-        )
-
-        pct = (
-            100.0
-            * count
-            / total
-        )
-
-        rows.append(
-            {
-                "outcome": label,
-                "count": count,
-                "percentage": pct,
-            }
-        )
+        pct = 100.0 * count / total
 
         print(
             f"{label:<10} | "
@@ -1048,70 +737,39 @@ def analyze_winner_color(
             f"{pct:6.2f}%"
         )
 
-    print()
-
     decisive = white_wins + black_wins
 
     if decisive > 0:
 
-        white_decisive_pct = (
-            100.0
-            * white_wins
-            / decisive
-        )
+        print()
+        print("DECISIVE GAMES")
 
-        black_decisive_pct = (
-            100.0
-            * black_wins
-            / decisive
-        )
-
-        print(
-            "DECISIVE GAMES"
-        )
         print(
             f"White | "
-            f"{white_decisive_pct:6.2f}%"
+            f"{100.0 * white_wins / decisive:6.2f}%"
         )
 
         print(
             f"Black | "
-            f"{black_decisive_pct:6.2f}%"
+            f"{100.0 * black_wins / decisive:6.2f}%"
         )
 
-    output = pd.DataFrame(
-        rows
-    )
-
-    output.to_csv(
-        OUTPUT_DIR
-        / "winner_color.csv",
-        index=False,
-    )
-
-    return output
 
 # ============================================================
-# Repeated FEN analysis
+# Repeated positions
 # ============================================================
 
-def analyze_repeated_positions(
-    df,
-):
+def analyze_repeated_positions(df):
 
     print()
     print("REPEATED POSITION ANALYSIS")
     print("-" * 70)
 
-    counts = (
-        df[
-            "fen"
-        ]
-        .value_counts()
-    )
+    counts = df["fen"].value_counts()
 
     print(
-        f"Unique FENs: {len(counts):,}"
+        f"Unique FENs: "
+        f"{len(counts):,}"
     )
 
     print(
@@ -1129,70 +787,33 @@ def analyze_repeated_positions(
         f"{(counts >= 10).sum():,}"
     )
 
-    rows = []
+    repeated = counts[counts >= 2]
 
-    repeated_fens = counts[
-        counts >= 2
-    ].index
+    if len(repeated) == 0:
+        return
 
-    for fen in repeated_fens:
+    print()
+    print("MOST REPEATED POSITIONS")
+    print("-" * 70)
+
+    for fen, count in repeated.head(10).items():
 
         subset = df[
             df["fen"] == fen
         ]
 
-        rows.append(
-            {
-                "fen": fen,
-                "n": len(subset),
-                "mean_H":
-                    subset["H"].mean(),
-                "mean_U":
-                    subset["U"].mean(),
-                "mean_HU":
-                    subset["HU"].mean(),
-                "mean_reward":
-                    subset["reward"].mean(),
-                "reward_entropy":
-                    reward_entropy(
-                        subset[
-                            "reward"
-                        ].values
-                    ),
-                "win_pct":
-                    100.0
-                    * (
-                        subset["reward"] == 1
-                    ).mean(),
-                "draw_pct":
-                    100.0
-                    * (
-                        subset["reward"] == 0
-                    ).mean(),
-                "loss_pct":
-                    100.0
-                    * (
-                        subset["reward"] == -1
-                    ).mean(),
-            }
+        print(
+            f"N={count:>5} | "
+            f"H={subset['H'].mean():.5f} | "
+            f"U={subset['U'].mean():.8f} | "
+            f"HU={subset['HU'].mean():.8f} | "
+            f"E[R]={subset['reward'].mean():+.4f} | "
+            f"H(R)={reward_entropy(subset['reward'].values):.4f}"
         )
 
-    output = pd.DataFrame(
-        rows
-    )
-
-    output = output.sort_values(
-        "n",
-        ascending=False,
-    )
-
-    output.to_csv(
-        OUTPUT_DIR
-        / "repeated_positions.csv",
-        index=False,
-    )
-
-    return output
+        print(
+            f"    {fen}"
+        )
 
 
 # ============================================================
@@ -1203,76 +824,42 @@ def main():
 
     data = load_data()
 
-    df = build_dataframe(
-        data
-    )
+    df = build_dataframe(data)
 
     if len(df) == 0:
-
         raise RuntimeError(
             "No valid observations."
         )
 
-    print_result_distribution(
-        df
-    )
+    analyze_results(df)
 
-    analyze_signal_distributions(
-        df
-    )
+    analyze_signal_distributions(df)
 
-    analyze_correlations(
-        df
-    )
+    analyze_correlations(df)
 
-    analyze_quantiles(
-        df
-    )
+    analyze_quantiles(df)
 
-    analyze_top_selection(
-        df
-    )
+    analyze_top_selection(df)
 
-    analyze_h_u_interaction(
-        df
-    )
+    analyze_h_u_interaction(df)
 
-    analyze_hu_redundancy(
-        df
-    )
+    analyze_hu_redundancy(df)
 
-    analyze_winner_color(
-        df
-    )
+    analyze_winner_color(df)
 
-    analyze_repeated_positions(
-        df
-    )
-
-    # --------------------------------------------------------
-    # Save cleaned observations
-    # --------------------------------------------------------
-
-    df.to_csv(
-        OUTPUT_DIR
-        / "all_observations.csv",
-        index=False,
-    )
+    analyze_repeated_positions(df)
 
     print()
     print("=" * 70)
-    print("ANALYSIS COMPLETE")
+    print("FINAL PRE-AL ANALYSIS COMPLETE")
     print("=" * 70)
-
     print()
     print(
-        f"Results written to:"
+        f"Analyzed observations: {len(df):,}"
     )
-
     print(
-        OUTPUT_DIR
+        f"Input: {INPUT_FILE}"
     )
-
     print()
 
 

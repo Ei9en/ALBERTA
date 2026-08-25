@@ -6,9 +6,14 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 
+from src.encoding import encode_board
+
 from src.models.resnet import ChessResNet
 from src.models.actor_critic import ActorCritic
+
 from src.actions_space import ACTIONS
+from src.actions_space import ACTION_TO_INDEX
+
 from src.agents.ppo_agent import PPOAgent
 
 
@@ -16,7 +21,7 @@ DEFAULT_CHECKPOINT = (
     Path("/Users/tom/Desktop/Atomic")
     / "checkpoints"
     / "rl_epoch"
-    / "rl_epoch_10.pt"
+    / "rl_epoch_30.pt"
 )
 
 
@@ -25,7 +30,7 @@ class RLBot:
     def __init__(
         self,
         checkpoint=DEFAULT_CHECKPOINT,
-        temperature=0.75,
+        temperature=2,
         deterministic=False,
     ):
 
@@ -37,7 +42,7 @@ class RLBot:
 
         bc_model = ChessResNet(
             num_actions=len(ACTIONS),
-            channels=64,
+            channels=32,
             blocks=4,
         )
 
@@ -95,3 +100,56 @@ class RLBot:
         return self.agent.choose_move(
             board
         )
+
+    @torch.no_grad()
+    def evaluate_policy(self, board):
+        """
+        Return the policy distribution over LEGAL moves.
+
+        The distribution is the intrinsic policy:
+        no temperature is applied.
+        """
+
+        x = encode_board(board)
+        x = x.unsqueeze(0).to(self.device)
+
+        policy, value = self.model(x)
+
+        logits = policy[0]
+
+        legal_moves = list(board.legal_moves)
+
+        legal_uci = [
+            move.uci()
+            for move in legal_moves
+        ]
+
+        legal_indices = [
+            ACTION_TO_INDEX[uci]
+            for uci in legal_uci
+        ]
+
+        legal_logits = logits[
+            legal_indices
+        ]
+
+        log_probs = torch.log_softmax(
+            legal_logits,
+            dim=0,
+        )
+
+        probs = torch.exp(
+            log_probs
+        )
+
+        entropy = -(
+            probs * log_probs
+        ).sum().item()
+
+        return {
+            "moves": legal_uci,
+            "probs": probs.cpu().tolist(),
+            "log_probs": log_probs.cpu().tolist(),
+            "entropy": entropy,
+            "value": value.item(),
+        }

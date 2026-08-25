@@ -3,110 +3,107 @@ ALBERTA - REWARD INFORMATION ANALYSIS
 ======================================================================
 
 Input: data/uncertainty_stats.json
-Records: 414,636
+Records: 1,100,682
 
 GLOBAL RESULT DISTRIBUTION
 ----------------------------------------------------------------------
-Wins:   174,010 (41.97%)
-Draws:  130,254 (31.41%)
-Losses: 110,372 (26.62%)
-Entropy: 1.558769 bits
+Wins:   413,403 (37.56%)
+Draws:  336,231 (30.55%)
+Losses: 351,048 (31.89%)
+Entropy: 1.579069 bits
 
 METRIC COVERAGE
 ----------------------------------------------------------------------
 metric  valid_observations  invalid_observations  coverage
-     H              414636                     0  1.000000
-     U              414636                     0  1.000000
-    HU              414636                     0  1.000000
+     H             1100682                     0  1.000000
+     U             1100682                     0  1.000000
+    HU             1100682                     0  1.000000
 
 Position-level coverage:
 metric  positions_with_data  positions_with_complete_data  mean_fraction_valid
-     H                  391                           391             1.000000
-     U                  391                           391             1.000000
-    HU                  391                           391             1.000000
+     H                  905                           905             1.000000
+     U                  905                           905             1.000000
+    HU                  905                           905             1.000000
 
 POSITION COUNTS
 ----------------------------------------------------------------------
-Unique FENs: 383,536
-FENs >= 5 observations: 856
-FENs >= 10 observations: 391
-FENs >= 50 observations: 67
-FENs >= 100 observations: 35
-Maximum observations/FEN: 4,500
+Unique FENs: 1,021,001
+FENs >= 5 observations: 1,999
+FENs >= 10 observations: 905
+FENs >= 50 observations: 166
+FENs >= 100 observations: 80
+Maximum observations/FEN: 14,400
 
 STARTING POSITION
 ----------------------------------------------------------------------
-Observations: 4,500
-W/D/L: 2725/476/1299
-H(R|s): 1.298478 bits
-E[R|s]: +0.316889
-95% CI: [+0.290857, +0.342920]
+Observations: 14,400
+W/D/L: 9141/1246/4013
+H(R|s): 1.235397 bits
+E[R|s]: +0.356111
+95% CI: [+0.341625, +0.370597]
 
 EXPERIMENT 1 - REWARD NOISE
 ----------------------------------------------------------------------
-Positions analysed: 391
-Mean H(R|s): 1.272866
-Median H(R|s): 1.324710
+Positions analysed: 905
+Mean H(R|s): 1.172692
+Median H(R|s): 1.236441
 Maximum entropy: 1.584963
-Median / maximum: 83.58%
+Median / maximum: 78.01%
 
-H >= 0.75: 97.19%
-H >= 0.90: 93.09%
-H >= 1.00: 85.42%
-H >= 1.25: 67.26%
-H >= 1.50: 9.46%
+H >= 0.75: 93.59%
+H >= 0.90: 87.07%
+H >= 1.00: 74.48%
+H >= 1.25: 46.52%
+H >= 1.50: 4.53%
 
 EXPERIMENT 2 - SAMPLE SIZE
 ----------------------------------------------------------------------
- min_n  positions     mean_n   median_n  mean_entropy  median_entropy  mean_abs_reward  median_abs_reward  mean_ci_width  median_ci_width  fraction_ci_contains_zero
-     5        856  33.135514   9.000000      1.164106        1.264223         0.311721           0.272727       1.032148         1.079239                   0.751168
-    10        391  65.025575  19.000000      1.272866        1.324710         0.263832           0.236842       0.739164         0.763545                   0.675192
-    20        190 119.468421  36.000000      1.329062        1.351666         0.235940           0.219807       0.538916         0.570948                   0.589474
-    50         67 283.268657 105.000000      1.342216        1.355412         0.229410           0.230337       0.333686         0.340214                   0.373134
-   100         35 482.228571 205.000000      1.346053        1.353778         0.229867           0.238095       0.234199         0.239814                   0.257143
-   200         18 801.555556 376.500000      1.346841        1.341192         0.222614           0.221266       0.175531         0.179990                   0.222222
+ min_n  positions      mean_n   median_n  mean_entropy  median_entropy  mean_abs_reward  median_abs_reward  mean_ci_width  median_ci_width  fraction_ci_contains_zero
+     5       1999   36.397199   9.000000      1.066415        1.061278         0.365990           0.333333       1.003011         1.041725                   0.675338
+    10        905   72.735912  18.000000      1.172692        1.236441         0.315731           0.280000       0.736135         0.754390                   0.587845
+    20        428  138.936916  38.000000      1.224745        1.260837         0.296674           0.281026       0.525836         0.542949                   0.462617
+    50        166  311.614458  95.000000      1.244109        1.270094         0.285417           0.273864       0.335283         0.345250                   0.240964
+   100         80  571.887500 190.000000      1.255806        1.284315         0.286749           0.273602       0.237064         0.257099                   0.125000
+   200         38 1045.684211 391.500000      1.256887        1.285597         0.291750           0.288816       0.170018         0.175683                   0.078947
 
 EXPERIMENT 3 - CONFIDENCE INTERVALS
 ----------------------------------------------------------------------
-95% CI contains zero: 67.52%
-95% CI excludes zero: 32.48%
-Mean CI width: 0.739164
-Median CI width: 0.763545
+95% CI contains zero: 58.78%
+95% CI excludes zero: 41.22%
+Mean CI width: 0.736135
+Median CI width: 0.754390
 
 EXPERIMENT 4 - VARIANCE EXPLAINED
 ----------------------------------------------------------------------
  min_n  positions  weighted_mean_reward  between_position_variance  within_position_variance  total_variance  eta_position  fraction_unexplained
-     5        856              0.227471                   0.037702                  0.794422        0.832124      0.045308              0.954692
-    10        391              0.228830                   0.026264                  0.804676        0.830941      0.031608              0.968392
-    20        190              0.229041                   0.020213                  0.810494        0.830707      0.024333              0.975667
-    50         67              0.231150                   0.017772                  0.813091        0.830863      0.021389              0.978611
-   100         35              0.240550                   0.013891                  0.812828        0.826719      0.016803              0.983197
-   200         18              0.239534                   0.012830                  0.815571        0.828401      0.015488              0.984512
+     5       1999              0.106765                   0.107423                  0.790411        0.897835      0.119647              0.880353
+    10        905              0.108407                   0.094995                  0.802347        0.897342      0.105862              0.894138
+    20        428              0.113512                   0.087518                  0.808703        0.896221      0.097653              0.902347
+    50        166              0.114329                   0.082961                  0.813649        0.896610      0.092528              0.907472
+   100         80              0.117724                   0.080669                  0.814873        0.895542      0.090078              0.909922
+   200         38              0.129178                   0.077668                  0.815022        0.892690      0.087004              0.912996
 
 H / U / HU CORRELATIONS
 ----------------------------------------------------------------------
               x       y  n_pairs  coverage   pearson  spearman
- result_entropy  U_mean      391  1.000000 -0.270732 -0.314192
- result_entropy  H_mean      391  1.000000  0.051456  0.013635
- result_entropy HU_mean      391  1.000000 -0.068982 -0.121571
-abs_mean_reward  U_mean      391  1.000000  0.392812  0.390229
-abs_mean_reward  H_mean      391  1.000000 -0.080430 -0.070707
-abs_mean_reward HU_mean      391  1.000000  0.124996  0.118709
+ result_entropy  U_mean      905  1.000000 -0.465512 -0.397928
+ result_entropy  H_mean      905  1.000000  0.030530 -0.031510
+ result_entropy HU_mean      905  1.000000 -0.226554 -0.252469
+abs_mean_reward  U_mean      905  1.000000  0.472264  0.431037
+abs_mean_reward  H_mean      905  1.000000 -0.059596 -0.037451
+abs_mean_reward HU_mean      905  1.000000  0.231587  0.242164
 
 SCIENTIFIC SUMMARY
 ----------------------------------------------------------------------
-At n >= 10, the position explains approximately 3.16% of reward variance.
-The remaining 96.84% is within-position variation / unexplained variance.
+At n >= 10, position explains approximately 10.59% of reward variance.
+The remaining 89.41% is within-position variation.
 
 NaN HANDLING:
 NaN values in H/U/HU are treated as missing uncertainty measurements.
-They do not remove the corresponding reward observation from the analysis.
-H, U and HU are analysed independently, so an observation with valid U but NaN H still contributes to U-based statistics.
+They never remove the corresponding reward observation.
+H, U and HU are analysed independently.
 
 IMPORTANT:
 These results quantify reward informativeness.
-They do not by themselves prove that reward noise is the cause of RL failure.
+They do not by themselves prove that reward noise causes RL failure.
 A causal claim requires a controlled experiment with an alternative reward signal.
-
-Recommended next experiment:
-Compare the same architecture and RL pipeline using the terminal {-1,0,+1} reward against a richer position-level target.

@@ -2,73 +2,65 @@
 
 """
 ALBERTA - Reward Information Analysis
-======================================
+=====================================
 
-Analyse complète de data/uncertainty_stats.json.
+Analyse de data/uncertainty_stats_11-20.json.
 
 Objectif scientifique
 ---------------------
+
 Quantifier dans quelle mesure le reward terminal {-1, 0, +1}
 est informatif sur une position donnée.
 
-Les quatre expériences principales sont :
+Expériences :
 
 1. Reward noise
-   ----------------
-   Mesure de H(R | s), E[R | s] et Var(R | s).
+   - H(R | s)
+   - E[R | s]
+   - Var(R | s)
 
 2. Sample-size effect
-   -------------------
-   Analyse de H(R | s) et E[R | s] en fonction du nombre
-   d'observations d'une même FEN.
+   - évolution de H(R | s)
+   - évolution de E[R | s]
+   - évolution des IC
+   - évolution de la variance
 
 3. Confidence intervals
-   ---------------------
-   IC 95% de E[R | s] pour les positions répétées.
+   - IC 95% de E[R | s]
 
 4. Variance explained
-   ------------------
-   Mesure de la fraction de variance du reward expliquée
-   par la position :
+   - eta = Var(E[R | s]) / Var(R)
 
-       eta = Var(E[R | s]) / Var(R)
+5. H / U / HU
+   - corrélations avec le reward noise
+   - corrélations avec |E[R|s]|
 
-En complément :
-- analyse H / U / HU
-- gestion explicite des NaN dans H / U / HU
-- diagnostic de couverture des métriques
-- corrélations Pearson et Spearman sans scipy
-- starting position
-- export CSV
-- graphiques PNG
-- rapport texte complet
+NaN
+---
+
+Les NaN de H/U/HU ne suppriment jamais l'observation
+de reward correspondante.
+
+Ils sont simplement ignorés pour la métrique concernée.
 
 IMPORTANT
 ---------
-Les NaN de H/U/HU ne suppriment PAS l'observation.
 
-Une observation avec :
+Aucun CSV n'est généré.
 
-    reward = 1
-    H = NaN
-    U = 0.02
+Outputs :
 
-reste une observation parfaitement valide pour toutes les
-analyses basées sur le reward.
-
-Elle est simplement ignorée dans les analyses nécessitant H.
-
-Usage
------
-    python analyze_uncertainty.py
-
-Input
------
-    data/uncertainty_stats.json
-
-Output
-------
     data/uncertainty_analysis/
+        analysis_report.txt
+        entropy_vs_sample_size.png
+        mean_reward_vs_sample_size.png
+        entropy_vs_U.png
+        absolute_reward_vs_U.png
+        variance_explained.png
+
+Usage :
+
+    python analyze_uncertainty.py
 """
 
 from __future__ import annotations
@@ -108,8 +100,6 @@ REPETITION_THRESHOLDS = [
     200,
 ]
 
-BOOTSTRAP_SAMPLES = 2000
-
 CONFIDENCE_LEVEL = 0.95
 
 
@@ -147,7 +137,7 @@ def result_entropy(
     losses,
 ):
     """
-    H(R | s) for R in {-1, 0, +1}.
+    H(R | s)
     """
 
     n = (
@@ -158,74 +148,13 @@ def result_entropy(
 
     if n == 0:
         return np.nan
-
-    probs = np.array([
-        wins / n,
-        draws / n,
-        losses / n,
-    ])
 
     return entropy_from_probs(
-        probs
-    )
-
-
-def result_expected_value(
-    wins,
-    draws,
-    losses,
-):
-    """
-    E[R | s] with:
-
-        win  = +1
-        draw =  0
-        loss = -1
-    """
-
-    n = (
-        wins
-        + draws
-        + losses
-    )
-
-    if n == 0:
-        return np.nan
-
-    return (
-        wins - losses
-    ) / n
-
-
-def result_variance(
-    wins,
-    draws,
-    losses,
-):
-    """
-    Var(R | s), R in {-1, 0, +1}.
-    """
-
-    n = (
-        wins
-        + draws
-        + losses
-    )
-
-    if n == 0:
-        return np.nan
-
-    mean = (
-        wins - losses
-    ) / n
-
-    second_moment = (
-        wins + losses
-    ) / n
-
-    return (
-        second_moment
-        - mean ** 2
+        [
+            wins / n,
+            draws / n,
+            losses / n,
+        ]
     )
 
 
@@ -236,7 +165,7 @@ def normal_ci_mean(
     z=1.959963984540054,
 ):
     """
-    Approximate 95% CI for the empirical mean.
+    Approximate normal 95% confidence interval.
     """
 
     if n <= 1:
@@ -246,8 +175,7 @@ def normal_ci_mean(
         )
 
     se = math.sqrt(
-        max(variance, 0.0)
-        / n
+        max(variance, 0.0) / n
     )
 
     return (
@@ -256,89 +184,9 @@ def normal_ci_mean(
     )
 
 
-def percentile_bootstrap_mean(
-    values,
-    n_samples=2000,
-    seed=42,
-):
-    """
-    Bootstrap confidence interval for the mean.
-
-    Returns:
-        mean, lower, upper
-    """
-
-    values = np.asarray(
-        values,
-        dtype=float,
-    )
-
-    n = len(values)
-
-    if n == 0:
-        return (
-            np.nan,
-            np.nan,
-            np.nan,
-        )
-
-    if n == 1:
-        value = float(
-            values[0]
-        )
-
-        return (
-            value,
-            value,
-            value,
-        )
-
-    rng = np.random.default_rng(
-        seed
-    )
-
-    indices = rng.integers(
-        0,
-        n,
-        size=(
-            n_samples,
-            n,
-        ),
-    )
-
-    bootstrap_means = (
-        values[
-            indices
-        ].mean(axis=1)
-    )
-
-    alpha = (
-        1.0
-        - CONFIDENCE_LEVEL
-    )
-
-    lower = np.quantile(
-        bootstrap_means,
-        alpha / 2,
-    )
-
-    upper = np.quantile(
-        bootstrap_means,
-        1 - alpha / 2,
-    )
-
-    return (
-        float(values.mean()),
-        float(lower),
-        float(upper),
-    )
-
-
 def rankdata(values):
     """
-    Average-rank implementation.
-
-    Used for Spearman correlation without scipy.
+    Average-rank implementation for Spearman.
     """
 
     values = np.asarray(
@@ -347,7 +195,8 @@ def rankdata(values):
     )
 
     order = np.argsort(
-        values
+        values,
+        kind="mergesort",
     )
 
     ranks = np.empty(
@@ -390,10 +239,7 @@ def pearson_corr(
     y,
 ):
     """
-    Pearson correlation.
-
-    NaN / infinite values are automatically removed
-    pairwise.
+    Pearson correlation with pairwise NaN removal.
     """
 
     x = np.asarray(
@@ -437,9 +283,6 @@ def spearman_corr(
 ):
     """
     Spearman correlation without scipy.
-
-    NaN / infinite values are automatically removed
-    pairwise.
     """
 
     x = np.asarray(
@@ -470,10 +313,6 @@ def spearman_corr(
 
 
 def safe_mean(series):
-    """
-    Mean ignoring NaN / infinite values.
-    """
-
     values = pd.to_numeric(
         series,
         errors="coerce",
@@ -492,10 +331,6 @@ def safe_mean(series):
 
 
 def safe_median(series):
-    """
-    Median ignoring NaN / infinite values.
-    """
-
     values = pd.to_numeric(
         series,
         errors="coerce",
@@ -517,10 +352,6 @@ def safe_quantile(
     series,
     q,
 ):
-    """
-    Quantile ignoring NaN / infinite values.
-    """
-
     values = pd.to_numeric(
         series,
         errors="coerce",
@@ -560,8 +391,7 @@ def load_data():
     if not INPUT_PATH.exists():
 
         raise FileNotFoundError(
-            f"Input file not found: "
-            f"{INPUT_PATH}"
+            f"Input file not found: {INPUT_PATH}"
         )
 
     with open(
@@ -588,13 +418,8 @@ def load_data():
             invalid += 1
             continue
 
-        fen = record.get(
-            "fen"
-        )
-
-        result = record.get(
-            "result"
-        )
+        fen = record.get("fen")
+        result = record.get("result")
 
         if (
             fen is None
@@ -644,10 +469,6 @@ def load_data():
         rows
     )
 
-    # --------------------------------------------------------
-    # Explicit numeric conversion
-    # --------------------------------------------------------
-
     for column in [
         "actions",
         "H",
@@ -665,18 +486,11 @@ def load_data():
     )
 
     print(
-        f"Invalid records skipped: "
-        f"{invalid:,}"
+        f"Invalid records skipped: {invalid:,}"
     )
-
-    # --------------------------------------------------------
-    # Metric coverage
-    # --------------------------------------------------------
 
     print()
-    print(
-        "METRIC COVERAGE"
-    )
+    print("METRIC COVERAGE")
     print("-" * 70)
 
     n = len(df)
@@ -691,9 +505,7 @@ def load_data():
             df[column]
         ).sum()
 
-        missing = (
-            n - valid
-        )
+        missing = n - valid
 
         print(
             f"{column:>3}: "
@@ -704,7 +516,6 @@ def load_data():
         )
 
     print()
-
     print(
         "IMPORTANT: NaN values in H/U/HU "
         "do not invalidate reward observations."
@@ -714,42 +525,28 @@ def load_data():
 
 
 # ============================================================
-# Result distribution
+# Global results
 # ============================================================
 
-def analyze_global_results(
-    df,
-):
+def analyze_global_results(df):
 
     print()
     print("=" * 70)
     print("GLOBAL RESULT DISTRIBUTION")
     print("=" * 70)
 
-    counts = (
-        df["result"]
-        .value_counts()
-    )
+    counts = df["result"].value_counts()
 
     wins = int(
-        counts.get(
-            "1-0",
-            0,
-        )
+        counts.get("1-0", 0)
     )
 
     losses = int(
-        counts.get(
-            "0-1",
-            0,
-        )
+        counts.get("0-1", 0)
     )
 
     draws = int(
-        counts.get(
-            "1/2-1/2",
-            0,
-        )
+        counts.get("1/2-1/2", 0)
     )
 
     n = len(df)
@@ -796,240 +593,262 @@ def analyze_global_results(
 
 
 # ============================================================
-# Group positions
+# Position aggregation
 # ============================================================
 
-def build_position_table(
-    df,
-):
+def build_position_table(df):
 
-    grouped = (
-        df.groupby(
-            "fen",
-            sort=False,
+    print()
+    print(
+        "Building position statistics..."
+    )
+
+    print(
+        "Vectorized aggregation:"
+    )
+
+    # --------------------------------------------------------
+    # Result counts
+    # --------------------------------------------------------
+
+    counts = pd.crosstab(
+        df["fen"],
+        df["result"],
+    )
+
+    for column in [
+        "1-0",
+        "1/2-1/2",
+        "0-1",
+    ]:
+
+        if column not in counts.columns:
+
+            counts[column] = 0
+
+    counts = counts[
+        [
+            "1-0",
+            "1/2-1/2",
+            "0-1",
+        ]
+    ]
+
+    counts.columns = [
+        "W",
+        "D",
+        "L",
+    ]
+
+    counts = counts.astype(
+        np.int64
+    )
+
+    counts["n"] = (
+        counts["W"]
+        + counts["D"]
+        + counts["L"]
+    )
+
+    # --------------------------------------------------------
+    # Reward statistics
+    # --------------------------------------------------------
+
+    counts["pW"] = (
+        counts["W"]
+        / counts["n"]
+    )
+
+    counts["pD"] = (
+        counts["D"]
+        / counts["n"]
+    )
+
+    counts["pL"] = (
+        counts["L"]
+        / counts["n"]
+    )
+
+    counts["mean_reward"] = (
+        counts["pW"]
+        - counts["pL"]
+    )
+
+    counts["reward_variance"] = (
+        counts["pW"]
+        + counts["pL"]
+        - counts["mean_reward"] ** 2
+    )
+
+    # --------------------------------------------------------
+    # Entropy
+    # --------------------------------------------------------
+
+    pW = counts["pW"].to_numpy()
+    pD = counts["pD"].to_numpy()
+    pL = counts["pL"].to_numpy()
+
+    entropy = np.zeros(
+        len(counts),
+        dtype=float,
+    )
+
+    for p in [
+        pW,
+        pD,
+        pL,
+    ]:
+
+        mask = p > 0
+
+        entropy[mask] -= (
+            p[mask]
+            * np.log2(
+                p[mask]
+            )
+        )
+
+    counts["result_entropy"] = entropy
+
+    # --------------------------------------------------------
+    # Confidence intervals
+    # --------------------------------------------------------
+
+    variance = counts[
+        "reward_variance"
+    ].to_numpy()
+
+    mean_reward = counts[
+        "mean_reward"
+    ].to_numpy()
+
+    n = counts[
+        "n"
+    ].to_numpy()
+
+    se = np.sqrt(
+        np.maximum(
+            variance,
+            0,
+        )
+        / n
+    )
+
+    z = 1.959963984540054
+
+    counts["ci95_low"] = (
+        mean_reward
+        - z * se
+    )
+
+    counts["ci95_high"] = (
+        mean_reward
+        + z * se
+    )
+
+    counts["ci95_width"] = (
+        2 * z * se
+    )
+
+    counts["ci_contains_zero"] = (
+        (counts["ci95_low"] <= 0)
+        &
+        (counts["ci95_high"] >= 0)
+    )
+
+    # --------------------------------------------------------
+    # H / U / HU means
+    #
+    # IMPORTANT:
+    #
+    # Each metric is aggregated independently.
+    # --------------------------------------------------------
+
+    print(
+        "Aggregating H..."
+    )
+
+    H_stats = (
+        df.groupby("fen")["H"]
+        .agg(
+            H_mean="mean",
+            H_count="count",
         )
     )
 
-    rows = []
-
-    for fen, group in grouped:
-
-        counts = (
-            group["result"]
-            .value_counts()
-        )
-
-        wins = int(
-            counts.get(
-                "1-0",
-                0,
-            )
-        )
-
-        losses = int(
-            counts.get(
-                "0-1",
-                0,
-            )
-        )
-
-        draws = int(
-            counts.get(
-                "1/2-1/2",
-                0,
-            )
-        )
-
-        n = (
-            wins
-            + draws
-            + losses
-        )
-
-        pW = wins / n
-        pD = draws / n
-        pL = losses / n
-
-        mean_reward = (
-            pW - pL
-        )
-
-        variance = (
-            pW
-            + pL
-            - mean_reward ** 2
-        )
-
-        entropy = entropy_from_probs(
-            [
-                pW,
-                pD,
-                pL,
-            ]
-        )
-
-        # ----------------------------------------------------
-        # H / U / HU
-        #
-        # NaN are ignored independently.
-        #
-        # This is important:
-        #
-        # if H is NaN for one observation but U is valid,
-        # that observation still contributes to U_mean.
-        # ----------------------------------------------------
-
-        H_values = pd.to_numeric(
-            group["H"],
-            errors="coerce",
-        )
-
-        U_values = pd.to_numeric(
-            group["U"],
-            errors="coerce",
-        )
-
-        HU_values = pd.to_numeric(
-            group["HU"],
-            errors="coerce",
-        )
-
-        H_valid = H_values[
-            np.isfinite(H_values)
-        ]
-
-        U_valid = U_values[
-            np.isfinite(U_values)
-        ]
-
-        HU_valid = HU_values[
-            np.isfinite(HU_values)
-        ]
-
-        H_mean = (
-            float(H_valid.mean())
-            if len(H_valid)
-            else np.nan
-        )
-
-        U_mean = (
-            float(U_valid.mean())
-            if len(U_valid)
-            else np.nan
-        )
-
-        HU_mean = (
-            float(HU_valid.mean())
-            if len(HU_valid)
-            else np.nan
-        )
-
-        # ----------------------------------------------------
-        # Coverage
-        # ----------------------------------------------------
-
-        H_count = len(H_valid)
-        U_count = len(U_valid)
-        HU_count = len(HU_valid)
-
-        H_fraction = (
-            H_count / n
-        )
-
-        U_fraction = (
-            U_count / n
-        )
-
-        HU_fraction = (
-            HU_count / n
-        )
-
-        # ----------------------------------------------------
-        # Confidence interval
-        # ----------------------------------------------------
-
-        ci_low, ci_high = (
-            normal_ci_mean(
-                mean_reward,
-                variance,
-                n,
-            )
-        )
-
-        rows.append(
-            {
-                "fen": fen,
-
-                "n": n,
-
-                "W": wins,
-                "D": draws,
-                "L": losses,
-
-                "pW": pW,
-                "pD": pD,
-                "pL": pL,
-
-                "mean_reward":
-                    mean_reward,
-
-                "reward_variance":
-                    variance,
-
-                "result_entropy":
-                    entropy,
-
-                "ci95_low":
-                    ci_low,
-
-                "ci95_high":
-                    ci_high,
-
-                "ci95_width":
-                    ci_high - ci_low,
-
-                "ci_contains_zero":
-                    (
-                        ci_low <= 0
-                        <= ci_high
-                    ),
-
-                # --------------------------------------------
-                # Uncertainty metrics
-                # --------------------------------------------
-
-                "H_mean":
-                    H_mean,
-
-                "U_mean":
-                    U_mean,
-
-                "HU_mean":
-                    HU_mean,
-
-                "H_count":
-                    H_count,
-
-                "U_count":
-                    U_count,
-
-                "HU_count":
-                    HU_count,
-
-                "H_fraction":
-                    H_fraction,
-
-                "U_fraction":
-                    U_fraction,
-
-                "HU_fraction":
-                    HU_fraction,
-            }
-        )
-
-    return pd.DataFrame(
-        rows
+    print(
+        "Aggregating U..."
     )
+
+    U_stats = (
+        df.groupby("fen")["U"]
+        .agg(
+            U_mean="mean",
+            U_count="count",
+        )
+    )
+
+    print(
+        "Aggregating HU..."
+    )
+
+    HU_stats = (
+        df.groupby("fen")["HU"]
+        .agg(
+            HU_mean="mean",
+            HU_count="count",
+        )
+    )
+
+    # --------------------------------------------------------
+    # Merge
+    # --------------------------------------------------------
+
+    position_df = counts.join(
+        H_stats,
+        how="left",
+    )
+
+    position_df = position_df.join(
+        U_stats,
+        how="left",
+    )
+
+    position_df = position_df.join(
+        HU_stats,
+        how="left",
+    )
+
+    # --------------------------------------------------------
+    # Coverage
+    # --------------------------------------------------------
+
+    position_df["H_fraction"] = (
+        position_df["H_count"]
+        / position_df["n"]
+    )
+
+    position_df["U_fraction"] = (
+        position_df["U_count"]
+        / position_df["n"]
+    )
+
+    position_df["HU_fraction"] = (
+        position_df["HU_count"]
+        / position_df["n"]
+    )
+
+    position_df = (
+        position_df
+        .reset_index()
+    )
+
+    print(
+        f"Position aggregation complete: "
+        f"{len(position_df):,} unique FENs."
+    )
+
+    return position_df
 
 
 # ============================================================
@@ -1046,10 +865,7 @@ START_FEN = (
 )
 
 
-def analyze_starting_position(
-    df,
-    position_df,
-):
+def analyze_starting_position(df):
 
     print()
     print("=" * 70)
@@ -1057,8 +873,7 @@ def analyze_starting_position(
     print("=" * 70)
 
     subset = df[
-        df["fen"]
-        == START_FEN
+        df["fen"] == START_FEN
     ]
 
     if len(subset) == 0:
@@ -1075,69 +890,60 @@ def analyze_starting_position(
     )
 
     wins = int(
-        counts.get(
-            "1-0",
-            0,
-        )
+        counts.get("1-0", 0)
     )
 
     losses = int(
-        counts.get(
-            "0-1",
-            0,
-        )
+        counts.get("0-1", 0)
     )
 
     draws = int(
-        counts.get(
-            "1/2-1/2",
-            0,
-        )
+        counts.get("1/2-1/2", 0)
     )
 
-    H = result_entropy(
-        wins,
-        draws,
-        losses,
+    n = len(subset)
+
+    pW = wins / n
+    pD = draws / n
+    pL = losses / n
+
+    H = entropy_from_probs(
+        [pW, pD, pL]
     )
 
-    mean = result_expected_value(
-        wins,
-        draws,
-        losses,
-    )
+    mean = pW - pL
 
-    variance = result_variance(
-        wins,
-        draws,
-        losses,
+    variance = (
+        pW
+        + pL
+        - mean ** 2
     )
 
     ci_low, ci_high = (
         normal_ci_mean(
             mean,
             variance,
-            len(subset),
+            n,
         )
     )
 
     print(
-        f"Observations: {len(subset):,}"
+        f"Observations: {n:,}"
     )
 
     print(
         f"Win:  {wins:,} "
-        f"({wins / len(subset):.2%})"
+        f"({pW:.2%})"
     )
 
     print(
         f"Draw: {draws:,} "
-        f"({draws / len(subset):.2%})"
+        f"({pD:.2%})"
     )
 
     print(
         f"Loss: {losses:,} "
-        f"({losses / len(subset):.2%})"
+        f"({pL:.2%})"
     )
 
     print(
@@ -1150,12 +956,11 @@ def analyze_starting_position(
 
     print(
         f"95% CI: "
-        f"[{ci_low:+.4f}, "
-        f"{ci_high:+.4f}]"
+        f"[{ci_low:+.4f}, {ci_high:+.4f}]"
     )
 
     return {
-        "n": len(subset),
+        "n": n,
         "wins": wins,
         "draws": draws,
         "losses": losses,
@@ -1167,12 +972,10 @@ def analyze_starting_position(
 
 
 # ============================================================
-# Experiment 1 - Reward noise
+# Experiment 1
 # ============================================================
 
-def experiment_1(
-    position_df,
-):
+def experiment_1(position_df):
 
     print()
     print("=" * 70)
@@ -1190,6 +993,10 @@ def experiment_1(
         f"{len(repeated):,}"
     )
 
+    median_entropy = safe_median(
+        repeated["result_entropy"]
+    )
+
     print()
     print(
         "Result entropy H(R|s):"
@@ -1202,7 +1009,7 @@ def experiment_1(
 
     print(
         f"Median: "
-        f"{safe_median(repeated['result_entropy']):.4f}"
+        f"{median_entropy:.4f}"
     )
 
     for q in [
@@ -1212,20 +1019,13 @@ def experiment_1(
     ]:
 
         print(
-            f"{int(q*100)}th percentile: "
+            f"{int(q * 100)}th percentile: "
             f"{safe_quantile(repeated['result_entropy'], q):.4f}"
         )
 
+    max_entropy = math.log2(3)
+
     print()
-
-    max_entropy = (
-        math.log2(3)
-    )
-
-    median_entropy = safe_median(
-        repeated["result_entropy"]
-    )
-
     print(
         f"Maximum possible entropy: "
         f"{max_entropy:.4f} bits"
@@ -1237,12 +1037,11 @@ def experiment_1(
     )
 
     print()
-
     print(
         "Fraction above entropy thresholds:"
     )
 
-    thresholds = [
+    for threshold in [
         0.25,
         0.50,
         0.75,
@@ -1250,15 +1049,12 @@ def experiment_1(
         1.00,
         1.25,
         1.50,
-    ]
-
-    for threshold in thresholds:
+    ]:
 
         fraction = (
             repeated[
                 "result_entropy"
-            ]
-            >= threshold
+            ] >= threshold
         ).mean()
 
         print(
@@ -1270,12 +1066,10 @@ def experiment_1(
 
 
 # ============================================================
-# Experiment 2 - Sample size
+# Experiment 2
 # ============================================================
 
-def experiment_2(
-    position_df,
-):
+def experiment_2(position_df):
 
     print()
     print("=" * 70)
@@ -1284,9 +1078,7 @@ def experiment_2(
 
     rows = []
 
-    for threshold in (
-        REPETITION_THRESHOLDS
-    ):
+    for threshold in REPETITION_THRESHOLDS:
 
         subset = position_df[
             position_df["n"]
@@ -1298,11 +1090,8 @@ def experiment_2(
 
         rows.append(
             {
-                "min_n":
-                    threshold,
-
-                "positions":
-                    len(subset),
+                "min_n": threshold,
+                "positions": len(subset),
 
                 "mean_n":
                     safe_mean(
@@ -1316,58 +1105,42 @@ def experiment_2(
 
                 "mean_entropy":
                     safe_mean(
-                        subset[
-                            "result_entropy"
-                        ]
+                        subset["result_entropy"]
                     ),
 
                 "median_entropy":
                     safe_median(
-                        subset[
-                            "result_entropy"
-                        ]
+                        subset["result_entropy"]
                     ),
 
                 "mean_abs_reward":
                     safe_mean(
-                        subset[
-                            "mean_reward"
-                        ].abs()
+                        subset["mean_reward"].abs()
                     ),
 
                 "median_abs_reward":
                     safe_median(
-                        subset[
-                            "mean_reward"
-                        ].abs()
+                        subset["mean_reward"].abs()
                     ),
 
                 "mean_ci_width":
                     safe_mean(
-                        subset[
-                            "ci95_width"
-                        ]
+                        subset["ci95_width"]
                     ),
 
                 "median_ci_width":
                     safe_median(
-                        subset[
-                            "ci95_width"
-                        ]
+                        subset["ci95_width"]
                     ),
 
                 "fraction_ci_contains_zero":
                     safe_mean(
-                        subset[
-                            "ci_contains_zero"
-                        ]
+                        subset["ci_contains_zero"]
                     ),
             }
         )
 
-    result = pd.DataFrame(
-        rows
-    )
+    result = pd.DataFrame(rows)
 
     print()
 
@@ -1383,12 +1156,10 @@ def experiment_2(
 
 
 # ============================================================
-# Experiment 3 - Confidence intervals
+# Experiment 3
 # ============================================================
 
-def experiment_3(
-    position_df,
-):
+def experiment_3(position_df):
 
     print()
     print("=" * 70)
@@ -1399,12 +1170,6 @@ def experiment_3(
         position_df["n"]
         >= MIN_OBSERVATIONS_DEFAULT
     ].copy()
-
-    subset[
-        "distance_from_zero"
-    ] = subset[
-        "mean_reward"
-    ].abs()
 
     subset[
         "significant_95"
@@ -1430,12 +1195,12 @@ def experiment_3(
     print()
 
     print(
-        "Mean CI width: "
+        f"Mean CI width: "
         f"{safe_mean(subset['ci95_width']):.4f}"
     )
 
     print(
-        "Median CI width: "
+        f"Median CI width: "
         f"{safe_median(subset['ci95_width']):.4f}"
     )
 
@@ -1474,7 +1239,7 @@ def experiment_3(
 
 
 # ============================================================
-# Experiment 4 - Variance explained
+# Experiment 4
 # ============================================================
 
 def experiment_4(
@@ -1486,10 +1251,6 @@ def experiment_4(
     print("=" * 70)
     print("EXPERIMENT 4 - VARIANCE EXPLAINED BY POSITION")
     print("=" * 70)
-
-    # --------------------------------------------------------
-    # Global reward variance
-    # --------------------------------------------------------
 
     reward_map = {
         "1-0": 1.0,
@@ -1505,10 +1266,8 @@ def experiment_4(
 
     global_mean = rewards.mean()
 
-    global_variance = (
-        rewards.var(
-            ddof=0
-        )
+    global_variance = rewards.var(
+        ddof=0
     )
 
     print(
@@ -1525,9 +1284,7 @@ def experiment_4(
 
     results = []
 
-    for threshold in (
-        REPETITION_THRESHOLDS
-    ):
+    for threshold in REPETITION_THRESHOLDS:
 
         subset = position_df[
             position_df["n"]
@@ -1537,88 +1294,60 @@ def experiment_4(
         if len(subset) == 0:
             continue
 
-        # ----------------------------------------------------
-        # Important:
-        #
-        # Var(E[R|s]) must be weighted by the number
-        # of observations of each position.
-        # ----------------------------------------------------
-
         weights = (
             subset["n"]
             / subset["n"].sum()
         )
 
-        means = (
-            subset[
-                "mean_reward"
+        means = subset[
+            "mean_reward"
+        ]
+
+        weighted_mean = np.sum(
+            weights * means
+        )
+
+        between_variance = np.sum(
+            weights
+            * (
+                means
+                - weighted_mean
+            ) ** 2
+        )
+
+        within_variance = np.sum(
+            weights
+            * subset[
+                "reward_variance"
             ]
         )
 
-        weighted_mean = (
-            np.sum(
-                weights * means
-            )
-        )
-
-        between_variance = (
-            np.sum(
-                weights
-                * (
-                    means
-                    - weighted_mean
-                ) ** 2
-            )
-        )
-
-        # ----------------------------------------------------
-        # Within-position variance
-        # ----------------------------------------------------
-
-        within_variance = (
-            np.sum(
-                weights
-                * subset[
-                    "reward_variance"
-                ]
-            )
-        )
-
-        total_decomposition = (
+        total_variance = (
             between_variance
             + within_variance
         )
 
         eta = (
             between_variance
-            / total_decomposition
-            if total_decomposition > 0
+            / total_variance
+            if total_variance > 0
             else np.nan
         )
 
         results.append(
             {
-                "min_n":
-                    threshold,
-
-                "positions":
-                    len(subset),
-
+                "min_n": threshold,
+                "positions": len(subset),
                 "weighted_mean_reward":
                     weighted_mean,
-
                 "between_position_variance":
                     between_variance,
-
                 "within_position_variance":
                     within_variance,
-
                 "total_variance":
-                    total_decomposition,
-
+                    total_variance,
                 "eta_position":
                     eta,
-
                 "fraction_unexplained":
                     1 - eta
                     if np.isfinite(eta)
@@ -1639,10 +1368,7 @@ def experiment_4(
     )
 
     print()
-
-    print(
-        "Interpretation:"
-    )
+    print("Interpretation:")
 
     for _, row in result.iterrows():
 
@@ -1657,7 +1383,7 @@ def experiment_4(
 
 
 # ============================================================
-# H / U / HU analysis
+# H / U / HU relationships
 # ============================================================
 
 def analyze_uncertainty_relationships(
@@ -1673,10 +1399,6 @@ def analyze_uncertainty_relationships(
         position_df["n"]
         >= MIN_OBSERVATIONS_DEFAULT
     ].copy()
-
-    # --------------------------------------------------------
-    # Absolute expected reward
-    # --------------------------------------------------------
 
     subset[
         "abs_mean_reward"
@@ -1729,28 +1451,18 @@ def analyze_uncertainty_relationships(
 
         rows.append(
             {
-                "x":
-                    x_name,
-
-                "y":
-                    y_name,
-
-                "n_pairs":
-                    n_pairs,
-
+                "x": x_name,
+                "y": y_name,
+                "n_pairs": n_pairs,
                 "coverage":
-                    (
-                        n_pairs / len(subset)
-                        if len(subset)
-                        else np.nan
-                    ),
-
+                    n_pairs / len(subset)
+                    if len(subset)
+                    else np.nan,
                 "pearson":
                     pearson_corr(
                         x,
                         y,
                     ),
-
                 "spearman":
                     spearman_corr(
                         x,
@@ -1759,9 +1471,7 @@ def analyze_uncertainty_relationships(
             }
         )
 
-    result = pd.DataFrame(
-        rows
-    )
+    result = pd.DataFrame(rows)
 
     print(
         result.to_string(
@@ -1775,7 +1485,7 @@ def analyze_uncertainty_relationships(
 
 
 # ============================================================
-# Metric coverage
+# Coverage
 # ============================================================
 
 def analyze_metric_coverage(
@@ -1790,12 +1500,12 @@ def analyze_metric_coverage(
 
     n = len(df)
 
+    rows = []
+
     print()
     print(
         "Observation-level coverage:"
     )
-
-    rows = []
 
     for metric in [
         "H",
@@ -1818,9 +1528,7 @@ def analyze_metric_coverage(
                 "invalid_observations":
                     n - count,
                 "coverage":
-                    count / n
-                    if n
-                    else np.nan,
+                    count / n,
             }
         )
 
@@ -1830,21 +1538,21 @@ def analyze_metric_coverage(
             f"({count / n:.2%})"
         )
 
-    result = pd.DataFrame(
+    coverage_df = pd.DataFrame(
         rows
-    )
-
-    print()
-
-    print(
-        "Position-level coverage "
-        f"(FENs with n >= {MIN_OBSERVATIONS_DEFAULT}):"
     )
 
     repeated = position_df[
         position_df["n"]
         >= MIN_OBSERVATIONS_DEFAULT
     ]
+
+    print()
+    print(
+        f"Position-level coverage "
+        f"(FENs with n >= "
+        f"{MIN_OBSERVATIONS_DEFAULT}):"
+    )
 
     position_rows = []
 
@@ -1874,23 +1582,21 @@ def analyze_metric_coverage(
             ] == 1.0
         ).sum()
 
+        mean_fraction = safe_mean(
+            repeated[
+                fraction_column
+            ]
+        )
+
         position_rows.append(
             {
-                "metric":
-                    metric,
-
+                "metric": metric,
                 "positions_with_data":
                     int(valid_positions),
-
                 "positions_with_complete_data":
                     int(complete_positions),
-
                 "mean_fraction_valid":
-                    safe_mean(
-                        repeated[
-                            fraction_column
-                        ]
-                    ),
+                    mean_fraction,
             }
         )
 
@@ -1900,21 +1606,17 @@ def analyze_metric_coverage(
             f"with data | "
             f"{complete_positions:,} fully observed | "
             f"mean coverage = "
-            f"{safe_mean(repeated[fraction_column]):.2%}"
+            f"{mean_fraction:.2%}"
         )
 
-    position_result = pd.DataFrame(
-        position_rows
-    )
-
     return (
-        result,
-        position_result,
+        coverage_df,
+        pd.DataFrame(position_rows),
     )
 
 
 # ============================================================
-# Most noisy / deterministic
+# Extremes
 # ============================================================
 
 def print_extremes(
@@ -1925,11 +1627,6 @@ def print_extremes(
         position_df["n"]
         >= MIN_OBSERVATIONS_DEFAULT
     ]
-
-    print()
-    print("=" * 70)
-    print("MOST NOISY POSITIONS")
-    print("=" * 70)
 
     columns = [
         "n",
@@ -1949,6 +1646,11 @@ def print_extremes(
         "HU_fraction",
         "fen",
     ]
+
+    print()
+    print("=" * 70)
+    print("MOST NOISY POSITIONS")
+    print("=" * 70)
 
     print(
         subset.sort_values(
@@ -1988,7 +1690,6 @@ def print_extremes(
 
 def make_plots(
     position_df,
-    sample_size_df,
     variance_df,
 ):
 
@@ -2008,8 +1709,12 @@ def make_plots(
     ].copy()
 
     # --------------------------------------------------------
-    # 1. Entropy vs number of observations
+    # 1. Entropy vs sample size
     # --------------------------------------------------------
+
+    print(
+        "Plot 1/5..."
+    )
 
     plt.figure()
 
@@ -2044,8 +1749,12 @@ def make_plots(
     plt.close()
 
     # --------------------------------------------------------
-    # 2. Mean reward vs sample size
+    # 2. Mean reward
     # --------------------------------------------------------
+
+    print(
+        "Plot 2/5..."
+    )
 
     plt.figure()
 
@@ -2088,11 +1797,16 @@ def make_plots(
     # 3. Entropy vs U
     # --------------------------------------------------------
 
+    print(
+        "Plot 3/5..."
+    )
+
     valid = subset[
         np.isfinite(
             subset["U_mean"]
         )
-        & np.isfinite(
+        &
+        np.isfinite(
             subset["result_entropy"]
         )
     ]
@@ -2130,19 +1844,24 @@ def make_plots(
     plt.close()
 
     # --------------------------------------------------------
-    # 4. |E[R|s]| vs U
+    # 4. Absolute reward vs U
     # --------------------------------------------------------
 
-    plt.figure()
+    print(
+        "Plot 4/5..."
+    )
 
     valid = subset[
         np.isfinite(
             subset["U_mean"]
         )
-        & np.isfinite(
+        &
+        np.isfinite(
             subset["mean_reward"]
         )
     ]
+
+    plt.figure()
 
     if len(valid):
 
@@ -2175,8 +1894,12 @@ def make_plots(
     plt.close()
 
     # --------------------------------------------------------
-    # 5. Eta vs threshold
+    # 5. Eta
     # --------------------------------------------------------
+
+    print(
+        "Plot 5/5..."
+    )
 
     if len(variance_df):
 
@@ -2221,112 +1944,6 @@ def make_plots(
 
 
 # ============================================================
-# Save CSVs
-# ============================================================
-
-def save_csvs(
-    df,
-    position_df,
-    experiment_1_df,
-    experiment_2_df,
-    experiment_3_df,
-    experiment_4_df,
-    correlations_df,
-    coverage_df,
-    position_coverage_df,
-):
-
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    df.to_csv(
-        OUTPUT_DIR
-        / "all_observations.csv",
-        index=False,
-    )
-
-    position_df.to_csv(
-        OUTPUT_DIR
-        / "positions_by_fen.csv",
-        index=False,
-    )
-
-    position_df[
-        position_df["n"] >= 10
-    ].to_csv(
-        OUTPUT_DIR
-        / "repeated_positions.csv",
-        index=False,
-    )
-
-    experiment_1_df.to_csv(
-        OUTPUT_DIR
-        / "experiment_1_reward_noise.csv",
-        index=False,
-    )
-
-    experiment_2_df.to_csv(
-        OUTPUT_DIR
-        / "experiment_2_sample_size.csv",
-        index=False,
-    )
-
-    experiment_3_df.to_csv(
-        OUTPUT_DIR
-        / "experiment_3_confidence_intervals.csv",
-        index=False,
-    )
-
-    experiment_4_df.to_csv(
-        OUTPUT_DIR
-        / "experiment_4_variance_explained.csv",
-        index=False,
-    )
-
-    correlations_df.to_csv(
-        OUTPUT_DIR
-        / "uncertainty_correlations.csv",
-        index=False,
-    )
-
-    coverage_df.to_csv(
-        OUTPUT_DIR
-        / "metric_coverage_observations.csv",
-        index=False,
-    )
-
-    position_coverage_df.to_csv(
-        OUTPUT_DIR
-        / "metric_coverage_positions.csv",
-        index=False,
-    )
-
-    print()
-    print(
-        "CSV files saved to:"
-    )
-
-    for path in [
-        "all_observations.csv",
-        "positions_by_fen.csv",
-        "repeated_positions.csv",
-        "experiment_1_reward_noise.csv",
-        "experiment_2_sample_size.csv",
-        "experiment_3_confidence_intervals.csv",
-        "experiment_4_variance_explained.csv",
-        "uncertainty_correlations.csv",
-        "metric_coverage_observations.csv",
-        "metric_coverage_positions.csv",
-    ]:
-
-        print(
-            f"  {OUTPUT_DIR / path}"
-        )
-
-
-# ============================================================
 # Report
 # ============================================================
 
@@ -2360,15 +1977,10 @@ def build_report(
     )
 
     add(
-        f"Records: "
-        f"{global_stats['n']:,}"
+        f"Records: {global_stats['n']:,}"
     )
 
     add()
-
-    # --------------------------------------------------------
-    # Global
-    # --------------------------------------------------------
 
     add(
         "GLOBAL RESULT DISTRIBUTION"
@@ -2391,15 +2003,10 @@ def build_report(
     )
 
     add(
-        f"Entropy: "
-        f"{global_stats['entropy']:.6f} bits"
+        f"Entropy: {global_stats['entropy']:.6f} bits"
     )
 
     add()
-
-    # --------------------------------------------------------
-    # Metric coverage
-    # --------------------------------------------------------
 
     add(
         "METRIC COVERAGE"
@@ -2430,10 +2037,6 @@ def build_report(
 
     add()
 
-    # --------------------------------------------------------
-    # Position count
-    # --------------------------------------------------------
-
     add(
         "POSITION COUNTS"
     )
@@ -2444,25 +2047,17 @@ def build_report(
         f"{len(position_df):,}"
     )
 
-    add(
-        f"FENs >= 5 observations: "
-        f"{(position_df['n'] >= 5).sum():,}"
-    )
+    for threshold in [
+        5,
+        10,
+        50,
+        100,
+    ]:
 
-    add(
-        f"FENs >= 10 observations: "
-        f"{(position_df['n'] >= 10).sum():,}"
-    )
-
-    add(
-        f"FENs >= 50 observations: "
-        f"{(position_df['n'] >= 50).sum():,}"
-    )
-
-    add(
-        f"FENs >= 100 observations: "
-        f"{(position_df['n'] >= 100).sum():,}"
-    )
+        add(
+            f"FENs >= {threshold} observations: "
+            f"{(position_df['n'] >= threshold).sum():,}"
+        )
 
     add(
         f"Maximum observations/FEN: "
@@ -2471,21 +2066,15 @@ def build_report(
 
     add()
 
-    # --------------------------------------------------------
-    # Starting position
-    # --------------------------------------------------------
-
     if start_stats:
 
         add(
             "STARTING POSITION"
         )
-
         add("-" * 70)
 
         add(
-            f"Observations: "
-            f"{start_stats['n']:,}"
+            f"Observations: {start_stats['n']:,}"
         )
 
         add(
@@ -2513,10 +2102,6 @@ def build_report(
 
         add()
 
-    # --------------------------------------------------------
-    # Experiment 1
-    # --------------------------------------------------------
-
     subset = position_df[
         position_df["n"] >= 10
     ]
@@ -2524,12 +2109,15 @@ def build_report(
     add(
         "EXPERIMENT 1 - REWARD NOISE"
     )
-
     add("-" * 70)
 
     add(
         f"Positions analysed: "
         f"{len(subset):,}"
+    )
+
+    median_entropy = safe_median(
+        subset["result_entropy"]
     )
 
     add(
@@ -2539,7 +2127,7 @@ def build_report(
 
     add(
         f"Median H(R|s): "
-        f"{safe_median(subset['result_entropy']):.6f}"
+        f"{median_entropy:.6f}"
     )
 
     add(
@@ -2549,7 +2137,7 @@ def build_report(
 
     add(
         f"Median / maximum: "
-        f"{safe_median(subset['result_entropy']) / math.log2(3):.2%}"
+        f"{median_entropy / math.log2(3):.2%}"
     )
 
     add()
@@ -2563,9 +2151,8 @@ def build_report(
     ]:
 
         fraction = (
-            subset[
-                "result_entropy"
-            ] >= threshold
+            subset["result_entropy"]
+            >= threshold
         ).mean()
 
         add(
@@ -2575,14 +2162,9 @@ def build_report(
 
     add()
 
-    # --------------------------------------------------------
-    # Experiment 2
-    # --------------------------------------------------------
-
     add(
         "EXPERIMENT 2 - SAMPLE SIZE"
     )
-
     add("-" * 70)
 
     add(
@@ -2595,14 +2177,9 @@ def build_report(
 
     add()
 
-    # --------------------------------------------------------
-    # Experiment 3
-    # --------------------------------------------------------
-
     add(
         "EXPERIMENT 3 - CONFIDENCE INTERVALS"
     )
-
     add("-" * 70)
 
     add(
@@ -2627,14 +2204,9 @@ def build_report(
 
     add()
 
-    # --------------------------------------------------------
-    # Experiment 4
-    # --------------------------------------------------------
-
     add(
         "EXPERIMENT 4 - VARIANCE EXPLAINED"
     )
-
     add("-" * 70)
 
     add(
@@ -2647,14 +2219,9 @@ def build_report(
 
     add()
 
-    # --------------------------------------------------------
-    # Correlations
-    # --------------------------------------------------------
-
     add(
         "H / U / HU CORRELATIONS"
     )
-
     add("-" * 70)
 
     add(
@@ -2667,14 +2234,9 @@ def build_report(
 
     add()
 
-    # --------------------------------------------------------
-    # Scientific summary
-    # --------------------------------------------------------
-
     add(
         "SCIENTIFIC SUMMARY"
     )
-
     add("-" * 70)
 
     eta10 = experiment_4_df[
@@ -2690,15 +2252,14 @@ def build_report(
         )
 
         add(
-            f"At n >= 10, the position "
-            f"explains approximately "
-            f"{eta:.2%} of reward variance."
+            f"At n >= 10, position explains "
+            f"approximately {eta:.2%} "
+            f"of reward variance."
         )
 
         add(
-            f"The remaining "
-            f"{1-eta:.2%} is within-position "
-            f"variation / unexplained variance."
+            f"The remaining {1 - eta:.2%} "
+            f"is within-position variation."
         )
 
     add()
@@ -2708,19 +2269,17 @@ def build_report(
     )
 
     add(
-        "NaN values in H/U/HU are treated as missing "
-        "uncertainty measurements."
+        "NaN values in H/U/HU are treated as "
+        "missing uncertainty measurements."
     )
 
     add(
-        "They do not remove the corresponding reward "
-        "observation from the analysis."
+        "They never remove the corresponding "
+        "reward observation."
     )
 
     add(
-        "H, U and HU are analysed independently, so an "
-        "observation with valid U but NaN H still contributes "
-        "to U-based statistics."
+        "H, U and HU are analysed independently."
     )
 
     add()
@@ -2734,8 +2293,8 @@ def build_report(
     )
 
     add(
-        "They do not by themselves prove that reward noise "
-        "is the cause of RL failure."
+        "They do not by themselves prove that reward "
+        "noise causes RL failure."
     )
 
     add(
@@ -2743,23 +2302,7 @@ def build_report(
         "with an alternative reward signal."
     )
 
-    add()
-
-    add(
-        "Recommended next experiment:"
-    )
-
-    add(
-        "Compare the same architecture and RL pipeline "
-        "using the terminal {-1,0,+1} reward against "
-        "a richer position-level target."
-    )
-
-    add()
-
-    return "\n".join(
-        lines
-    )
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -2788,7 +2331,7 @@ def main():
     df = load_data()
 
     # --------------------------------------------------------
-    # Global reward statistics
+    # Global
     # --------------------------------------------------------
 
     global_stats = (
@@ -2798,7 +2341,7 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Group by FEN
+    # Position aggregation
     # --------------------------------------------------------
 
     position_df = (
@@ -2817,18 +2360,9 @@ def main():
         f"{len(position_df):,}"
     )
 
-    repeated = position_df[
-        position_df["n"] >= 10
-    ]
-
-    print()
-    print(
-        "Repeated positions:"
-    )
-
     print(
         f"FENs with >= 10 observations: "
-        f"{len(repeated):,}"
+        f"{(position_df['n'] >= 10).sum():,}"
     )
 
     print(
@@ -2852,13 +2386,12 @@ def main():
 
     start_stats = (
         analyze_starting_position(
-            df,
-            position_df,
+            df
         )
     )
 
     # --------------------------------------------------------
-    # Main experiments
+    # Experiments
     # --------------------------------------------------------
 
     experiment_1_df = (
@@ -2882,12 +2415,12 @@ def main():
     experiment_4_df = (
         experiment_4(
             df,
-            position_df,
+            position_df
         )
     )
 
     # --------------------------------------------------------
-    # H / U / HU
+    # H/U/HU
     # --------------------------------------------------------
 
     correlations_df = (
@@ -2917,28 +2450,11 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Save CSV
-    # --------------------------------------------------------
-
-    save_csvs(
-        df,
-        position_df,
-        experiment_1_df,
-        experiment_2_df,
-        experiment_3_df,
-        experiment_4_df,
-        correlations_df,
-        coverage_df,
-        position_coverage_df,
-    )
-
-    # --------------------------------------------------------
     # Plots
     # --------------------------------------------------------
 
     make_plots(
         position_df,
-        experiment_2_df,
         experiment_4_df,
     )
 
@@ -2977,7 +2493,7 @@ def main():
     print("=" * 70)
 
     print(
-        "Full report saved to:"
+        f"Full report saved to:"
     )
 
     print(
@@ -2990,7 +2506,6 @@ def main():
     print("=" * 70)
 
     print()
-
     print(
         f"Results written to: "
         f"{OUTPUT_DIR}"
@@ -2998,5 +2513,4 @@ def main():
 
 
 if __name__ == "__main__":
-
     main()

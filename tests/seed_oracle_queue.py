@@ -1,162 +1,177 @@
-from __future__ import annotations
-
-import argparse
 import json
-import sys
-
+import uuid
+import argparse
 from pathlib import Path
+from datetime import datetime, timezone
+
+import numpy as np
 
 
 # ============================================================
-# Project root
+# Paths
 # ============================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-sys.path.insert(
-    0,
-    str(PROJECT_ROOT),
-)
-
-
-# ============================================================
-# Imports from project
-# ============================================================
-
-from oracle_queue import OracleQueue
-
-from active_learning import (
-    ActiveLearningConfig,
-    calibrate_config,
-    compute_score,
-    compute_threshold,
-)
-
-
-# ============================================================
-# Configuration
-# ============================================================
-
-DEFAULT_INPUT = (
+DATA_FILE = (
     PROJECT_ROOT
     / "data"
-    / "uncertainty_stats.json"
+    / "uncertainty_stats_1-10.json"
 )
 
-DEFAULT_QUEUE = (
+QUEUE_FILE = (
     PROJECT_ROOT
     / "data"
-    / "oracle_queue.jsonl"
+    / "oracle_queue_1-10.jsonl"
 )
 
 
 # ============================================================
-# Load data
+# Active learning weights
 # ============================================================
 
-def load_observations(
-    path: Path,
-) -> list[dict]:
+W_H = 0.144
+W_U = 0.527
+W_HU = 0.329
 
-    print()
-    print("=" * 70)
-    print("ALBERTA - SEED ORACLE QUEUE")
-    print("=" * 70)
 
-    print()
-    print("Loading uncertainty statistics")
-    print("-" * 70)
-    print(f"File: {path}")
+# ============================================================
+# Percentile rank normalization
+# ============================================================
 
-    with open(
-        path,
-        "r",
-        encoding="utf-8",
-    ) as f:
+def percentile_rank(values):
 
-        data = json.load(f)
-
-    print(
-        f"Raw records: {len(data):,}"
+    values = np.asarray(
+        values,
+        dtype=np.float64
     )
 
-    return data
+    n = len(values)
+
+    if n < 2:
+        raise ValueError(
+            "Not enough values for percentile rank."
+        )
 
 
-# ============================================================
-# Compute scores
-# ============================================================
+    order = np.argsort(
+        values,
+        kind="stable"
+    )
 
-def compute_scored_observations(
-    observations: list[dict],
-    config: ActiveLearningConfig,
-) -> list[dict]:
-    """
-    Compute I for every valid observation.
-    """
+    sorted_values = values[
+        order
+    ]
 
-    scored = []
+    ranks = np.empty(
+        n,
+        dtype=np.float64
+    )
 
-    skipped = 0
 
-    for observation in observations:
+    start = 0
 
-        try:
+    while start < n:
 
-            fen = observation["fen"]
+        end = start + 1
 
-            H = float(
-                observation["H"]
-            )
-
-            U = float(
-                observation["U"]
-            )
-
-            HU = float(
-                observation["HU"]
-            )
-
-        except (
-            KeyError,
-            TypeError,
-            ValueError,
+        while (
+            end < n
+            and
+            sorted_values[end]
+            ==
+            sorted_values[start]
         ):
+            end += 1
 
-            skipped += 1
-            continue
 
-        score = compute_score(
-            H,
-            U,
-            HU,
-            config,
+        rank = (
+            (start + end - 1)
+            /
+            2.0
         )
 
-        scored.append(
-            {
-                "fen": fen,
-                "H": H,
-                "U": U,
-                "HU": HU,
-                "score": score,
-            }
+
+        ranks[
+            order[start:end]
+        ] = (
+            rank
+            /
+            (n - 1)
         )
 
-    print()
-    print(
-        f"Valid observations: "
-        f"{len(scored):,}"
+
+        start = end
+
+
+    return ranks
+
+
+
+# ============================================================
+# Extract side to move
+# ============================================================
+
+def extract_side(fens):
+
+    sides = []
+
+    for fen in fens:
+
+        side = fen.split()[1]
+
+        if side not in ("w", "b"):
+
+            raise ValueError(
+                f"Invalid FEN side: {fen}"
+            )
+
+        sides.append(side)
+
+
+    return np.array(
+        sides,
+        dtype="<U1"
     )
 
-    if skipped:
 
-        print(
-            f"Skipped observations: "
-            f"{skipped:,}"
+
+# ============================================================
+# Side aware normalization
+# ============================================================
+
+def normalize_side_aware(
+    values,
+    sides
+):
+
+    normalized = np.zeros_like(
+        values,
+        dtype=np.float64
+    )
+
+
+    for side in [
+        "w",
+        "b"
+    ]:
+
+        mask = (
+            sides == side
         )
 
-    return scored
+
+        normalized[
+            mask
+        ] = percentile_rank(
+            values[
+                mask
+            ]
+        )
+
+
+    return normalized
+
 
 
 # ============================================================
@@ -166,401 +181,325 @@ def compute_scored_observations(
 def main():
 
     parser = argparse.ArgumentParser(
-        description=(
-            "Seed the oracle queue from "
-            "uncertainty_stats.json."
-        )
+        description=
+        "Seed ALBERTA oracle queue using active learning threshold."
     )
 
-    parser.add_argument(
-        "--input",
-        type=Path,
-        default=DEFAULT_INPUT,
-    )
 
     parser.add_argument(
-        "--queue",
-        type=Path,
-        default=DEFAULT_QUEUE,
-    )
-
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=20,
-        help=(
-            "Maximum number of positions "
-            "inserted into the queue."
-        ),
-    )
-
-    parser.add_argument(
-        "--budget",
+        "--percentile",
         type=float,
-        default=None,
-        help=(
-            "Override query budget. "
-            "Example: 0.005 for 0.5%%."
-        ),
+        default=99.95,
+        help=
+        "Selection percentile (default: 99.95 = 0.05%% budget)"
     )
 
-    parser.add_argument(
-        "--yes",
-        action="store_true",
-        help="Skip confirmation.",
-    )
 
     args = parser.parse_args()
 
-    if args.limit <= 0:
 
-        raise ValueError(
-            "--limit must be greater than 0."
-        )
 
-    # ========================================================
-    # Load observations
-    # ========================================================
-
-    observations = load_observations(
-        args.input
-    )
-
-    if not observations:
-
-        raise RuntimeError(
-            "No observations found."
-        )
-
-    # ========================================================
-    # Calibration
-    # ========================================================
-
-    print()
-    print("CALIBRATING ACTIVE LEARNING")
-    print("-" * 70)
-
-    #
-    # Compute the normalization ranges from
-    # the current historical dataset.
-    #
-    config = calibrate_config(
-        observations
-    )
-
-    #
-    # Optional budget override.
-    #
-    if args.budget is not None:
-
-        if not 0.0 < args.budget <= 1.0:
-
-            raise ValueError(
-                "--budget must be in (0, 1]."
-            )
-
-        config.query_budget = (
-            args.budget
-        )
-
+    print("=" * 70)
     print(
-        f"H   : "
-        f"[{config.h_low:.6f}, "
-        f"{config.h_high:.6f}]"
+        "ALBERTA - SEED ORACLE QUEUE"
     )
+    print("=" * 70)
 
-    print(
-        f"U   : "
-        f"[{config.u_low:.6f}, "
-        f"{config.u_high:.6f}]"
-    )
 
-    print(
-        f"HU  : "
-        f"[{config.hu_low:.6f}, "
-        f"{config.hu_high:.6f}]"
-    )
+
+    # --------------------------------------------------------
+    # Load uncertainty data
+    # --------------------------------------------------------
 
     print()
     print(
-        f"Query budget : "
-        f"{config.query_budget * 100:.3f}%"
+        "Loading uncertainty statistics..."
     )
 
-    # ========================================================
-    # Compute scores
-    # ========================================================
 
-    scored = compute_scored_observations(
-        observations,
-        config,
+    with open(
+        DATA_FILE,
+        "r",
+        encoding="utf-8"
+    ) as f:
+
+        data = json.load(f)
+
+
+    print(
+        f"Positions loaded : {len(data):,}"
     )
 
-    if not scored:
 
-        raise RuntimeError(
-            "No valid observations found."
-        )
 
-    # ========================================================
-    # Compute threshold
-    # ========================================================
+    # --------------------------------------------------------
+    # Extract signals
+    # --------------------------------------------------------
 
-    scores = [
-        observation["score"]
-        for observation in scored
+    fens = np.array(
+        [
+            x["fen"]
+            for x in data
+        ],
+        dtype=object
+    )
+
+
+    H = np.array(
+        [
+            x["H"]
+            for x in data
+        ],
+        dtype=np.float64
+    )
+
+
+    U = np.array(
+        [
+            x["U"]
+            for x in data
+        ],
+        dtype=np.float64
+    )
+
+
+    HU = np.array(
+        [
+            x["HU"]
+            for x in data
+        ],
+        dtype=np.float64
+    )
+
+
+    sides = extract_side(
+        fens
+    )
+
+
+
+    # --------------------------------------------------------
+    # Compute active learning score
+    # --------------------------------------------------------
+
+    H_norm = normalize_side_aware(
+        H,
+        sides
+    )
+
+
+    U_norm = normalize_side_aware(
+        U,
+        sides
+    )
+
+
+    HU_norm = normalize_side_aware(
+        HU,
+        sides
+    )
+
+
+    I = (
+        W_H * H_norm
+        +
+        W_U * U_norm
+        +
+        W_HU * HU_norm
+    )
+
+
+
+    # --------------------------------------------------------
+    # Threshold selection
+    # --------------------------------------------------------
+
+    threshold = np.percentile(
+        I,
+        args.percentile
+    )
+
+
+    selected_indices = np.where(
+        I >= threshold
+    )[0]
+
+    selected_indices = selected_indices[
+        np.argsort(
+            I[selected_indices]
+        )[::-1]
     ]
 
-    threshold = compute_threshold(
-        scores,
-        config,
-    )
-
-    # ========================================================
-    # Sort
-    # ========================================================
-
-    scored.sort(
-        key=lambda observation: (
-            observation["score"]
-        ),
-        reverse=True,
-    )
-
-    # ========================================================
-    # Budget statistics
-    # ========================================================
-
-    budget_selected = sum(
-        observation["score"] >= threshold
-        for observation in scored
-    )
-
-    actual_budget = (
-        budget_selected
-        / len(scored)
-    )
-
-    # ========================================================
-    # Display calibration
-    # ========================================================
 
     print()
-    print("ACTIVE LEARNING CALIBRATION")
+    print(
+        "ACTIVE LEARNING SELECTION"
+    )
     print("-" * 70)
 
     print(
-        f"Budget    : "
-        f"{config.query_budget * 100:.3f}%"
+        f"Percentile : P{args.percentile}"
     )
 
     print(
-        f"Threshold : "
-        f"{threshold:.6f}"
+        f"Threshold  : {threshold:.9f}"
     )
 
     print(
-        f"Budget-selected positions: "
-        f"{budget_selected:,}"
+        f"Selected   : {len(selected_indices):,}"
     )
 
     print(
-        f"Actual fraction           : "
-        f"{actual_budget * 100:.3f}%"
+        f"Budget     : "
+        f"{100 * len(selected_indices) / len(I):.5f}%"
     )
 
-    # ========================================================
-    # Preview
-    # ========================================================
 
-    print()
-    print("TOP POSITIONS")
-    print("-" * 70)
 
-    preview_count = min(
-        10,
-        len(scored),
-    )
+    # --------------------------------------------------------
+    # Load existing queue
+    # --------------------------------------------------------
 
-    for i in range(preview_count):
+    if QUEUE_FILE.exists():
 
-        observation = scored[i]
+        with open(
+            QUEUE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
 
-        print(
-            f"{i + 1:3d} | "
-            f"I={observation['score']:.6f} | "
-            f"H={observation['H']:.6f} | "
-            f"U={observation['U']:.6f} | "
-            f"HU={observation['HU']:.6f}"
-        )
+            existing = [
+                json.loads(line)
+                for line in f
+            ]
 
-    # ========================================================
-    # Select positions above threshold
-    # ========================================================
+    else:
 
-    selected = [
-        observation
-        for observation in scored
-        if observation["score"] >= threshold
-    ]
+        existing = []
 
-    if not selected:
 
-        raise RuntimeError(
-            "No observations reached the threshold."
-        )
 
-    #
-    # For testing, --limit restricts the number
-    # inserted into the queue.
-    #
-    selected = selected[
-        :args.limit
-    ]
+    existing_ids = {
+        x["query_id"]
+        for x in existing
+    }
 
-    print()
-    print(
-        f"Positions to insert: "
-        f"{len(selected):,}"
-    )
 
-    # ========================================================
-    # Queue
-    # ========================================================
 
-    queue = OracleQueue(
-        args.queue
-    )
-
-    current_stats = queue.stats()
-
-    print()
-    print("CURRENT QUEUE")
-    print("-" * 70)
-
-    print(
-        f"Total     : "
-        f"{current_stats['total']}"
-    )
-
-    print(
-        f"Pending   : "
-        f"{current_stats['pending']}"
-    )
-
-    print(
-        f"Answered  : "
-        f"{current_stats['answered']}"
-    )
-
-    print(
-        f"Discarded : "
-        f"{current_stats['discarded']}"
-    )
-
-    # ========================================================
-    # Confirmation
-    # ========================================================
-
-    if not args.yes:
-
-        print()
-        print(
-            f"About to add "
-            f"{len(selected)} "
-            "historical positions."
-        )
-
-        confirmation = input(
-            "Continue? [y/n] > "
-        ).strip().lower()
-
-        if confirmation != "y":
-
-            print()
-            print(
-                "Nothing added."
-            )
-
-            return
-
-    # ========================================================
-    # Insert
-    # ========================================================
+    # --------------------------------------------------------
+    # Append new positions
+    # --------------------------------------------------------
 
     added = 0
 
-    for observation in selected:
 
-        queue.add(
-            fen=observation["fen"],
+    with open(
+        QUEUE_FILE,
+        "a",
+        encoding="utf-8"
+    ) as f:
 
-            H=observation["H"],
-            U=observation["U"],
-            HU=observation["HU"],
 
-            score=observation["score"],
-            threshold=threshold,
+        for idx in selected_indices:
 
-            model="historical_json",
 
-            #
-            # Historical data are not associated
-            # with a specific RL epoch/game/ply.
-            #
-            epoch=-1,
-            game_id=-1,
-            ply=-1,
-        )
+            record = data[idx]
 
-        added += 1
 
-    # ========================================================
-    # Final statistics
-    # ========================================================
+            query_id = uuid.uuid5(
+                uuid.NAMESPACE_DNS,
+                record["fen"]
+            ).hex
 
-    final_stats = queue.stats()
+
+
+            if query_id in existing_ids:
+
+                continue
+
+
+
+            item = {
+
+                "query_id":
+                    query_id,
+
+
+                "fen":
+                    record["fen"],
+
+
+                "H":
+                    float(H[idx]),
+
+
+                "U":
+                    float(U[idx]),
+
+
+                "HU":
+                    float(HU[idx]),
+
+
+                "I":
+                    float(I[idx]),
+
+
+                "status":
+                    "pending",
+
+
+                "oracle_move":
+                    None,
+
+
+                "oracle_confidence":
+                    None,
+
+
+                "oracle_situation":
+                    None,
+
+
+                "created_at":
+                    datetime.now(
+                        timezone.utc
+                    ).isoformat(),
+
+
+                "answered_at":
+                    None
+            }
+
+
+            f.write(
+                json.dumps(item)
+                +
+                "\n"
+            )
+
+
+            added += 1
+
+
 
     print()
     print("=" * 70)
-    print("QUEUE SEEDED")
+    print(
+        "QUEUE UPDATED"
+    )
     print("=" * 70)
 
     print(
-        f"Added     : "
-        f"{added:,}"
+        f"Added : {added:,}"
     )
 
     print(
-        f"Total     : "
-        f"{final_stats['total']:,}"
-    )
-
-    print(
-        f"Pending   : "
-        f"{final_stats['pending']:,}"
-    )
-
-    print(
-        f"Answered  : "
-        f"{final_stats['answered']:,}"
-    )
-
-    print(
-        f"Discarded : "
-        f"{final_stats['discarded']:,}"
-    )
-
-    print()
-    print(
-        f"Queue file: "
-        f"{args.queue}"
+        f"File  : {QUEUE_FILE}"
     )
 
 
-# ============================================================
-# Entry point
-# ============================================================
 
 if __name__ == "__main__":
+
     main()

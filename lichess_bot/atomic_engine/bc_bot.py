@@ -12,7 +12,7 @@ from src.encoding import encode_fen
 from src.actions_space import ACTIONS, INDEX_TO_ACTION
 
 
-DEFAULT_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "bc_epoch" / "bc_v2_5_epoch_7.pt"
+DEFAULT_CHECKPOINT = PROJECT_ROOT / "checkpoints" / "bc_epoch" / "bc_v3_epoch_0.pt"
 
 
 class BCBot:
@@ -23,7 +23,7 @@ class BCBot:
 
         self.model = ChessResNet(
             num_actions=len(ACTIONS),
-            channels=64,
+            channels=32,
             blocks=4,
         ).to(self.device)
 
