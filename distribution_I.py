@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_FILE = (
     PROJECT_ROOT
     / "data"
-    / "uncertainty_stats.json"
+    / "uncertainty_stats_1-10.json"
 )
 
 
@@ -22,9 +22,9 @@ DATA_FILE = (
 # Weights
 # ============================================================
 
-W_H = 0.144
-W_U = 0.527
-W_HU = 0.329
+W_H = 0.2285
+W_U = 0.5363
+W_HU = 0.2352
 
 
 # ============================================================
@@ -731,16 +731,16 @@ def main():
         )
 
     # ========================================================
-    # Explicit 0.05% colour diagnostic
+    # Explicit 0.02% colour diagnostic
     # ========================================================
 
-    threshold_9995 = np.percentile(
+    threshold_9998 = np.percentile(
         I,
-        99.95,
+        99.98,
     )
 
     selected_mask = (
-        I >= threshold_9995
+        I >= threshold_9998
     )
 
     selected_total = np.sum(
@@ -769,13 +769,13 @@ def main():
     print()
     print("=" * 70)
     print(
-        "0.05% SELECTION — COLOUR BALANCE"
+        "0.02% SELECTION — COLOUR BALANCE"
     )
     print("=" * 70)
 
     print(
         f"Threshold : "
-        f"{threshold_9995:.9f}"
+        f"{threshold_9998:.9f}"
     )
 
     print(
@@ -930,12 +930,12 @@ def main():
     )
 
     plt.axvline(
-        threshold_9995,
+        threshold_9998,
         linestyle="--",
         linewidth=2,
         label=(
-            f"P99.95 = "
-            f"{threshold_9995:.3f}"
+            f"P99.98 = "
+            f"{threshold_9998:.3f}"
         ),
     )
 

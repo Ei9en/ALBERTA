@@ -1,3 +1,7 @@
+# ============================================================
+# ReplayBuffer
+# ============================================================
+
 import random
 
 
@@ -5,28 +9,38 @@ class ReplayBuffer:
 
     def __init__(
         self,
-        capacity=50000,
+        capacity=300000,
     ):
 
         self.capacity = capacity
+
         self.buffer = []
 
+
+    # ========================================================
+    # Clear
+    # ========================================================
 
     def clear(self):
 
         self.buffer.clear()
 
 
+    # ========================================================
+    # Add
+    # ========================================================
+
     def add(
         self,
         fen,
         action,
         legal_moves,
-        target_return,
-        old_value,
+        return_,
+        value,
         old_log_prob,
         advantage,
         ply,
+        game_result=None,
     ):
 
         self.buffer.append(
@@ -41,10 +55,10 @@ class ReplayBuffer:
                     legal_moves,
 
                 "return":
-                    target_return,
+                    return_,
 
-                "old_value":
-                    old_value,
+                "value":
+                    value,
 
                 "old_log_prob":
                     old_log_prob,
@@ -54,14 +68,25 @@ class ReplayBuffer:
 
                 "ply":
                     ply,
+
+                "game_result":
+                    game_result,
             }
         )
 
+
+        # ----------------------------------------------------
+        # FIFO
+        # ----------------------------------------------------
 
         if len(self.buffer) > self.capacity:
 
             self.buffer.pop(0)
 
+
+    # ========================================================
+    # Sample
+    # ========================================================
 
     def sample(
         self,
@@ -73,6 +98,10 @@ class ReplayBuffer:
             batch_size,
         )
 
+
+    # ========================================================
+    # Length
+    # ========================================================
 
     def __len__(self):
 

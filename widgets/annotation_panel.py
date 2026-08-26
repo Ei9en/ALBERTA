@@ -27,11 +27,14 @@ class AnnotationPanel(QWidget):
 
 
     SITUATION_VALUES = {
-        "Unique move": "unique_move",
-        "Multiple good moves": "multiple_good",
-        "Everything wins": "everything_wins",
-    }
 
+        "Critical": "critical",  # Only one move is acceptable
+
+        "Non-critical": "non_critical",  # Several moves are playable
+
+        "Outcome-independent": "outcome_independent",  # Everything wins or loses
+
+    }
 
 
     def __init__(
@@ -137,7 +140,7 @@ class AnnotationPanel(QWidget):
 
 
         situation_group = QGroupBox(
-            "Position evaluation"
+            "Decision criticality"
         )
 
 
@@ -170,12 +173,12 @@ class AnnotationPanel(QWidget):
 
 
         self.confidence_buttons[
-            "medium"
+            "high"
         ].setChecked(True)
 
 
         self.situation_buttons[
-            "multiple_good"
+            "critical"
         ].setChecked(True)
 
 
@@ -237,12 +240,12 @@ class AnnotationPanel(QWidget):
     ):
 
         self.confidence_buttons[
-            "medium"
+            "high"
         ].setChecked(True)
 
 
         self.situation_buttons[
-            "multiple_good"
+            "critical"
         ].setChecked(True)
 
 

@@ -17,22 +17,22 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 DEVICE = "cpu"
 
-RL_CHECKPOINT = (
+RL1_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
     / "rl_epoch"
-    / "rl_epoch_20.pt"
+    / "rl_epoch_10.pt"
 )
 
-RLAL_CHECKPOINT = (
+RL2_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
     / "al_epoch"
-    / "al_epoch_20.pt"
+    / "al_epoch_10.pt"
 )
 
-GAMES = 1000
-TEMPERATURE = 1.5
+GAMES = 100
+TEMPERATURE = 2
 
 
 # ============================================================
@@ -112,15 +112,15 @@ def play_game(
 def main():
 
     print("=" * 70)
-    print("ALBERTA - RL10 vs RLAL10")
+    print("ALBERTA - RL10 vs RL20")
     print("=" * 70)
 
     print(
-        f"RL10  : {RL_CHECKPOINT}"
+        f"RL10  : {RL1_CHECKPOINT}"
     )
 
     print(
-        f"RLAL10: {RLAL_CHECKPOINT}"
+        f"RL20: {RL2_CHECKPOINT}"
     )
 
     print(
@@ -144,13 +144,13 @@ def main():
     print("Loading RL10...")
 
     rl10 = load_model(
-        RL_CHECKPOINT
+        RL1_CHECKPOINT
     )
 
-    print("Loading RLAL10...")
+    print("Loading RL20...")
 
     rlal10 = load_model(
-        RLAL_CHECKPOINT
+        RL2_CHECKPOINT
     )
 
     print()
@@ -188,7 +188,7 @@ def main():
 
         print(
             f"Game {i + 1:2d}/{GAMES}: "
-            f"RL10 White vs RLAL10 Black -> "
+            f"RL10 White vs RL20 Black -> "
             f"{result}"
         )
 
@@ -219,7 +219,7 @@ def main():
 
         print(
             f"Game {GAMES // 2 + i + 1:2d}/{GAMES}: "
-            f"RLAL10 White vs RL10 Black -> "
+            f"RL20 White vs RL10 Black -> "
             f"{result}"
         )
 
@@ -247,7 +247,7 @@ def main():
     )
 
     print(
-        f"RLAL10 wins : {rlal10_wins}"
+        f"RL20 wins : {rlal10_wins}"
     )
 
     print(
@@ -262,7 +262,7 @@ def main():
     )
 
     print(
-        f"RLAL10 score : "
+        f"RL20 score : "
         f"{rlal10_score / GAMES * 100:.1f}%"
     )
 
@@ -274,7 +274,7 @@ def main():
 
     elif rlal10_score > rl10_score:
 
-        print("Winner: RLAL10")
+        print("Winner: RL20")
 
     else:
 

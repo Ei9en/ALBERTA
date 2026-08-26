@@ -5,13 +5,14 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 import numpy as np
+from distribution_I import W_H, W_U, W_HU
 
 
 # ============================================================
 # Paths
 # ============================================================
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 DATA_FILE = (
     PROJECT_ROOT
@@ -24,15 +25,6 @@ QUEUE_FILE = (
     / "data"
     / "oracle_queue_1-10.jsonl"
 )
-
-
-# ============================================================
-# Active learning weights
-# ============================================================
-
-W_H = 0.144
-W_U = 0.527
-W_HU = 0.329
 
 
 # ============================================================
@@ -189,9 +181,9 @@ def main():
     parser.add_argument(
         "--percentile",
         type=float,
-        default=99.95,
+        default=99.98,
         help=
-        "Selection percentile (default: 99.95 = 0.05%% budget)"
+        "Selection percentile (default: 99.98 = 0.02%% budget)"
     )
 
 

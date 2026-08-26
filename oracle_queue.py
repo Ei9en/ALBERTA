@@ -60,9 +60,9 @@ class OracleQueue:
     }
 
     VALID_SITUATION = {
-        "unique_move",
-        "multiple_good",
-        "everything_wins",
+        "critical",
+        "non_critical",
+        "outcome_independent",
     }
 
 

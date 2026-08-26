@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 INPUT_FILE = (
     PROJECT_ROOT
     / "data"
-    / "uncertainty_stats.json"
+    / "uncertainty_stats_1-10.json"
 )
 
 SIGNALS = [

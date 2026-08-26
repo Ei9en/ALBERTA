@@ -27,8 +27,8 @@ class AtomicRandom(ExampleEngine):
 
         super().__init__(*args, **kwargs)
 
-        self.bot = BCBotStochastic(
-            temperature=1.5,
+        self.bot = RLBot(
+            temperature=2,
         )
 
 

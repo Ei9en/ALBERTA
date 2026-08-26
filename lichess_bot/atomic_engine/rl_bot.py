@@ -21,7 +21,7 @@ DEFAULT_CHECKPOINT = (
     Path("/Users/tom/Desktop/Atomic")
     / "checkpoints"
     / "rl_epoch"
-    / "rl_epoch_30.pt"
+    / "rl_epoch_40.pt"
 )
 
 
@@ -30,7 +30,7 @@ class RLBot:
     def __init__(
         self,
         checkpoint=DEFAULT_CHECKPOINT,
-        temperature=2,
+        temperature=1.5,
         deterministic=False,
     ):
 

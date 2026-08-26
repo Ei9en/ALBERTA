@@ -246,9 +246,7 @@ class OracleHMI(QMainWindow):
         )
 
 
-        remaining = len(
-            self.queue.pending()
-        )
+        remaining = self.queue.stats()["pending"]
 
 
         text = f"""

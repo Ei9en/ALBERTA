@@ -16,3 +16,4 @@ lichess_bot_auto_logs/
 data/uncertainty_stats.json
 data/uncertainty_stats_1-10.json
 data/uncertainty_stats_1-10.json
+data/uncertainty_stats_*.json

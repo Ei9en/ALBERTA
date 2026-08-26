@@ -68,11 +68,11 @@ TEMPERATURE_SELFPLAY = 2
 # Reprise RL
 # ============================================================
 
-START_EPOCH = 1
+START_EPOCH = 11
 
-RESUME_RL = False
+RESUME_RL = True
 
-RESUME_EPOCH = 36
+RESUME_EPOCH = START_EPOCH - 1
 
 CHECKPOINT_EPOCH = START_EPOCH - 1
 
@@ -95,13 +95,13 @@ DEVICE = (
 # Hyperparameters
 # ============================================================
 
-LR = 5e-4
+LR = 3e-4
 
-GAMES_PER_EPOCH = 900
+GAMES_PER_EPOCH = 2500
 
 RL_EPOCHS = 10
 
-CHECKPOINT_EVERY = 1
+CHECKPOINT_EVERY = 5
 
 VALUE_COEF = 0.1
 
@@ -127,11 +127,13 @@ ENTROPY_COEF = 0.01
 # League
 # ============================================================
 
-LEAGUE_MAX_AGENTS = 22
+LEAGUE_MAX_AGENTS = 12
 
-LEAGUE_START_EPOCH = 0
+LEAGUE_END_EPOCH = START_EPOCH - 1
 
-LEAGUE_END_EPOCH = 0
+LEAGUE_START_EPOCH = LEAGUE_END_EPOCH - 9
+
+
 
 
 # ============================================================
@@ -619,6 +621,10 @@ def _selfplay_worker(
     global _WORKER_LEAGUE_REGISTRY
 
 
+    # ========================================================
+    # Active league
+    # ========================================================
+
     active_names = list(
         _WORKER_LEAGUE_REGISTRY
     )
@@ -650,6 +656,10 @@ def _selfplay_worker(
             )
 
 
+    # ========================================================
+    # Random seed
+    # ========================================================
+
     seed = (
         1000003
         + worker_id * 7919
@@ -663,6 +673,10 @@ def _selfplay_worker(
 
     torch.manual_seed(seed)
 
+
+    # ========================================================
+    # Agents
+    # ========================================================
 
     current_agent = (
         _WORKER_CURRENT_AGENT
@@ -688,6 +702,10 @@ def _selfplay_worker(
             "dans la league."
         )
 
+
+    # ========================================================
+    # Initialize games
+    # ========================================================
 
     active_games = []
 
@@ -745,12 +763,20 @@ def _selfplay_worker(
         )
 
 
+    # ========================================================
+    # Batched self-play
+    # ========================================================
+
     with torch.no_grad():
 
         while active_games:
 
             games_by_agent = {}
 
+
+            # ------------------------------------------------
+            # Group games by agent
+            # ------------------------------------------------
 
             for game in active_games:
 
@@ -769,6 +795,10 @@ def _selfplay_worker(
                     [],
                 ).append(game)
 
+
+            # ------------------------------------------------
+            # Batched inference
+            # ------------------------------------------------
 
             for (
                 agent,
@@ -801,6 +831,10 @@ def _selfplay_worker(
                     )
 
 
+                    # ----------------------------------------
+                    # Apply moves
+                    # ----------------------------------------
+
                     for (
                         game,
                         info,
@@ -811,6 +845,10 @@ def _selfplay_worker(
 
                         board = game["board"]
 
+
+                        # ------------------------------------
+                        # Store current-agent trajectory
+                        # ------------------------------------
 
                         if agent is current_agent:
 
@@ -844,14 +882,25 @@ def _selfplay_worker(
                                             for move
                                             in board.legal_moves
                                         ],
+                                    
+                                    "ply":
+                                        board.ply(),
                                 }
                             )
 
+
+                        # ------------------------------------
+                        # Push move
+                        # ------------------------------------
 
                         board.push(
                             info["move"]
                         )
 
+
+            # ------------------------------------------------
+            # Remove finished games
+            # ------------------------------------------------
 
             still_active = []
 
@@ -891,12 +940,9 @@ def _selfplay_worker(
             active_games = still_active
 
 
-    print(
-        f"[WORKER {worker_id}] DONE "
-        f"({len(completed_games)} games)",
-        flush=True,
-    )
-
+    # ========================================================
+    # Return silently
+    # ========================================================
 
     return completed_games
 
@@ -1074,19 +1120,63 @@ def collect_games_parallel(
         ]
 
 
-        x = encode_boards(
-            boards
-        ).to(DEVICE)
+        # ====================================================
+        # Calcul U par batches
+        #
+        # IMPORTANT :
+        # Ne pas envoyer toutes les positions de l'epoch
+        # simultanément sur le GPU.
+        #
+        # Avec 2500 parties, cela peut représenter plusieurs
+        # centaines de milliers de positions.
+        # ====================================================
+
+        U_BATCH_SIZE = 256
 
 
-        # U pour TOUTES les positions.
-        uncertainties = (
-            league.uncertainty_batch(
-                x,
-                current_model=model,
-            )
-        )
+        uncertainties = []
 
+
+        with torch.no_grad():
+
+            for start in range(
+                0,
+                len(boards),
+                U_BATCH_SIZE,
+            ):
+
+                batch_boards = boards[
+                    start:start + U_BATCH_SIZE
+                ]
+
+
+                x = encode_boards(
+                    batch_boards
+                ).to(DEVICE)
+
+
+                batch_uncertainties = (
+                    league.uncertainty_batch(
+                        x,
+                        current_model=model,
+                    )
+                )
+
+
+                uncertainties.extend(
+                    batch_uncertainties
+                    .detach()
+                    .cpu()
+                    .tolist()
+                )
+
+
+                del x
+
+
+        # ====================================================
+        # Ajouter U + H + HU aux positions
+        # ====================================================
 
         for (
             step,
@@ -1096,12 +1186,6 @@ def collect_games_parallel(
             uncertainties,
         ):
 
-            U = U.item()
-
-
-            # H vient de PPOAgent.
-            # Il s'agit de l'entropie de la distribution
-            # réellement utilisée pour le sampling.
             H = step.get(
                 "entropy",
                 0.0,
@@ -1149,7 +1233,7 @@ def collect_games_parallel(
 
     return completed_games
 
-
+'''
 # ============================================================
 # Evaluation
 # ============================================================
@@ -1303,7 +1387,8 @@ def evaluate_against_agent(
         "positions": total_positions,
         "time": elapsed,
     }
-
+    
+'''
 
 # ============================================================
 # GAE
@@ -1738,12 +1823,34 @@ def train_epoch(
             # avec alpha décroissant selon le ply.
             # =================================================
 
+            # =========================================================
+            # BC prior
+            #
+            # IMPORTANT :
+            # Les coups illégaux sont -inf dans bc_log_probs.
+            # Or lorsque bc_weight = 0 :
+            #
+            #     0 * (-inf) = NaN
+            #
+            # On neutralise donc les coups illégaux AVANT
+            # la multiplication. rl_log_probs conserve déjà
+            # le masque légal.
+            # =========================================================
+
+            safe_bc_log_probs = (
+                bc_log_probs.masked_fill(
+                    ~legal_mask,
+                    0.0,
+                )
+            )
+
+
             combined_log_probs = (
                 rl_log_probs
                 +
                 bc_weight.unsqueeze(1)
                 *
-                bc_log_probs
+                safe_bc_log_probs
             )
 
 
@@ -2423,7 +2530,7 @@ def main():
     # ========================================================
 
     buffer = ReplayBuffer(
-        capacity=100000
+        capacity=300000
     )
 
 
