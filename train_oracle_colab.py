@@ -150,7 +150,7 @@ ORACLE_QUEUE_PATH = (
     PROJECT_ROOT
     / "checkpoints"
     / "queue"
-    / "oracle_queue.jsonl"
+    / "oracle_queue_1-10.jsonl"
 )
 
 
@@ -675,13 +675,23 @@ def prepare_oracle_data(
 
 
         confidence = entry.get(
-            "oracle_confidence"
+            "confidence"
         )
+
+        if confidence is None:
+            confidence = entry.get(
+                "oracle_confidence"
+            )
 
 
         criticality = entry.get(
-            "oracle_situation"
+            "criticality"
         )
+
+        if criticality is None:
+            criticality = entry.get(
+                "oracle_situation"
+            )
 
 
         if fen is None:
@@ -846,7 +856,6 @@ def train_criticality_epoch(
 
     model.train()
 
-
     if len(oracle_buffer) == 0:
 
         print(
@@ -868,6 +877,30 @@ def train_criticality_epoch(
     total_positions = 0
 
     total_steps = 0
+
+
+    # ========================================================
+    # Helper
+    #
+    # Accepte les deux formats :
+    #
+    #   "criticality"       -> nouveau format
+    #   "oracle_situation"  -> ancien format
+    # ========================================================
+
+    def get_criticality(entry):
+
+        criticality = entry.get(
+            "criticality"
+        )
+
+        if criticality is None:
+
+            criticality = entry.get(
+                "oracle_situation"
+            )
+
+        return criticality
 
 
     # ========================================================
@@ -926,13 +959,47 @@ def train_criticality_epoch(
             )
 
 
+            # ------------------------------------------------
+            # Remove malformed entries defensively
+            # ------------------------------------------------
+
+            valid_batch = []
+
+            for entry in batch:
+
+                criticality = get_criticality(
+                    entry
+                )
+
+                if criticality not in CRITICALITY_TO_INDEX:
+
+                    print(
+                        "WARNING: skipping oracle entry "
+                        "with invalid criticality:",
+                        criticality,
+                    )
+
+                    continue
+
+                valid_batch.append(
+                    entry
+                )
+
+
+            if not valid_batch:
+
+                progress.update(1)
+
+                continue
+
+
             boards = [
 
                 chess.variant.AtomicBoard(
                     entry["fen"]
                 )
 
-                for entry in batch
+                for entry in valid_batch
             ]
 
 
@@ -944,10 +1011,10 @@ def train_criticality_epoch(
             targets = torch.tensor(
                 [
                     CRITICALITY_TO_INDEX[
-                        entry["criticality"]
+                        get_criticality(entry)
                     ]
 
-                    for entry in batch
+                    for entry in valid_batch
                 ],
                 dtype=torch.long,
                 device=DEVICE,
@@ -965,11 +1032,16 @@ def train_criticality_epoch(
 
             # =================================================
             # Classification loss
+            #
+            # label_smoothing doit être défini dans
+            # F.cross_entropy si tu veux utiliser le
+            # nouveau CriticalityNet "soft".
             # =================================================
 
             loss = F.cross_entropy(
                 logits,
                 targets,
+                label_smoothing=0.15,
             )
 
 
@@ -1022,7 +1094,7 @@ def train_criticality_epoch(
 
 
             total_positions += (
-                len(batch)
+                len(valid_batch)
             )
 
 
@@ -1038,6 +1110,16 @@ def train_criticality_epoch(
     # ========================================================
     # Averages
     # ========================================================
+
+    if total_steps == 0:
+
+        return (
+            0.0,
+            0.0,
+            0.0,
+            {},
+        )
+
 
     avg_loss = (
         total_loss
@@ -1095,6 +1177,32 @@ def train_criticality_epoch(
                 continue
 
 
+            # ------------------------------------------------
+            # Remove malformed entries
+            # ------------------------------------------------
+
+            valid_entries = []
+
+            for entry in batch_entries:
+
+                criticality = get_criticality(
+                    entry
+                )
+
+                if criticality not in CRITICALITY_TO_INDEX:
+
+                    continue
+
+                valid_entries.append(
+                    entry
+                )
+
+
+            if not valid_entries:
+
+                continue
+
+
             boards = [
 
                 chess.variant.AtomicBoard(
@@ -1102,7 +1210,7 @@ def train_criticality_epoch(
                 )
 
                 for entry
-                in batch_entries
+                in valid_entries
             ]
 
 
@@ -1135,10 +1243,10 @@ def train_criticality_epoch(
             targets_batch = torch.tensor(
                 [
                     CRITICALITY_TO_INDEX[
-                        entry["criticality"]
+                        get_criticality(entry)
                     ]
 
-                    for entry in batch_entries
+                    for entry in valid_entries
                 ],
                 dtype=torch.long,
                 device=DEVICE,
@@ -1158,6 +1266,16 @@ def train_criticality_epoch(
             all_probabilities.append(
                 probabilities.cpu()
             )
+
+
+    if not all_targets:
+
+        return (
+            avg_loss,
+            accuracy,
+            0.0,
+            {},
+        )
 
 
     predictions = torch.cat(
@@ -1215,6 +1333,10 @@ def train_criticality_epoch(
         probabilities[:, 2].mean().item()
     )
 
+
+    # ========================================================
+    # Diagnostics
+    # ========================================================
 
     print()
 

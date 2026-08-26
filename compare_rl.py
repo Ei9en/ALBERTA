@@ -30,8 +30,8 @@ DEFAULT_RL_CHECKPOINT = (
 DEFAULT_AL_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
-    / "al_epoch"
-    / "al_epoch_10.pt"
+    / "oracle_epoch"
+    / "oracle_epoch_20.pt"
 )
 
 DEFAULT_QUEUE = (
