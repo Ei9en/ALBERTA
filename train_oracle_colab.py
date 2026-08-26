@@ -23,7 +23,6 @@ from src.encoding import encode_boards
 
 from src.models.resnet import ChessResNet
 from src.models.actor_critic import ActorCritic
-from src.models.criticality import CriticalityNet
 
 from src.rl.replay_buffer import ReplayBuffer
 from src.rl.oracle_replay_buffer import OracleReplayBuffer
@@ -108,21 +107,6 @@ GAE_LAMBDA = 0.95
 
 
 # ============================================================
-# Criticality model
-# ============================================================
-
-CRITICALITY_LR = 3e-4
-
-CRITICALITY_BATCH_SIZE = 256
-
-CRITICALITY_EPOCHS_PER_RL_EPOCH = 5
-
-CRITICALITY_CHECKPOINT_EVERY = 5
-
-CRITICALITY_CAPACITY = 300000
-
-
-# ============================================================
 # PPO diagnostics
 # ============================================================
 
@@ -156,6 +140,13 @@ ORACLE_QUEUE_PATH = (
 
 # ============================================================
 # Oracle policy confidence
+#
+# Confidence = trust in the annotation.
+#
+# It controls HOW MUCH the annotation contributes
+# to the Oracle policy loss.
+#
+# It does NOT control target distribution shape.
 # ============================================================
 
 ORACLE_CONFIDENCE_WEIGHTS = {
@@ -175,32 +166,44 @@ ORACLE_POLICY_COEF = 1.0
 
 
 # ============================================================
-# Criticality classes
+# Oracle criticality
+#
+# Criticality is interpreted as a TEMPERATURE.
+#
+# It controls how concentrated the target policy should be.
+#
+# critical
+#     -> very concentrated on oracle_move
+#
+# non_critical
+#     -> moderate preference for oracle_move
+#
+# outcome_independent
+#     -> diffuse distribution over legal moves
+#
+# IMPORTANT:
+#
+# Criticality does NOT multiply the loss.
+#
+# Confidence and criticality therefore represent two
+# genuinely different pieces of information:
+#
+#   confidence  = "How much should I trust this annotation?"
+#
+#   criticality = "How sharply should the policy react
+#                  to this annotation?"
 # ============================================================
 
-CRITICALITY_TO_INDEX = {
-
-    "outcome_independent":
-        0,
-
-    "non_critical":
-        1,
+ORACLE_CRITICALITY_TEMPERATURES = {
 
     "critical":
-        2,
-}
+        0.25, # exp(4) times weight of other moves
 
+    "non_critical":
+        0.50, # exp(2) times weight of other moves
 
-INDEX_TO_CRITICALITY = {
-
-    0:
-        "outcome_independent",
-
-    1:
-        "non_critical",
-
-    2:
-        "critical",
+    "outcome_independent":
+        1.00, # exp(1) times weight of other moves
 }
 
 
@@ -456,110 +459,6 @@ def load_model():
 
 
 # ============================================================
-# Load / create criticality model
-# ============================================================
-
-def load_criticality_model():
-
-    model = CriticalityNet(
-        in_channels=19,
-        channels=32,
-        blocks=4,
-        num_classes=3,
-    ).to(DEVICE)
-
-
-    optimizer = Adam(
-        model.parameters(),
-        lr=CRITICALITY_LR,
-    )
-
-
-    checkpoint_path = (
-        PROJECT_ROOT
-        / "checkpoints"
-        / "criticality_best.pt"
-    )
-
-
-    if checkpoint_path.exists():
-
-        print()
-        print(
-            "======================================"
-        )
-
-        print(
-            "Loading criticality model"
-        )
-
-        print(
-            "======================================"
-        )
-
-        print(
-            f"Checkpoint: {checkpoint_path}"
-        )
-
-
-        checkpoint = torch.load(
-            checkpoint_path,
-            map_location=DEVICE,
-        )
-
-
-        model.load_state_dict(
-            checkpoint[
-                "model_state_dict"
-            ]
-        )
-
-
-        if "optimizer_state_dict" in checkpoint:
-
-            optimizer.load_state_dict(
-                checkpoint[
-                    "optimizer_state_dict"
-                ]
-            )
-
-
-        print(
-            "Criticality model loaded."
-        )
-
-
-    else:
-
-        print()
-        print(
-            "======================================"
-        )
-
-        print(
-            "Initializing criticality model"
-        )
-
-        print(
-            "======================================"
-        )
-
-        print(
-            "No previous criticality checkpoint."
-        )
-
-        print(
-            "Starting from random initialization."
-        )
-
-
-    return (
-        model,
-        optimizer,
-    )
-
-
-# ============================================================
 # Oracle queue
 # ============================================================
 
@@ -679,6 +578,7 @@ def prepare_oracle_data(
         )
 
         if confidence is None:
+
             confidence = entry.get(
                 "oracle_confidence"
             )
@@ -689,6 +589,7 @@ def prepare_oracle_data(
         )
 
         if criticality is None:
+
             criticality = entry.get(
                 "oracle_situation"
             )
@@ -723,7 +624,7 @@ def prepare_oracle_data(
 
 
         if criticality not in (
-            CRITICALITY_TO_INDEX
+            ORACLE_CRITICALITY_TEMPERATURES
         ):
 
             print(
@@ -780,8 +681,8 @@ def prepare_oracle_data(
                 "criticality":
                     criticality,
 
-                "criticality_index":
-                    CRITICALITY_TO_INDEX[
+                "criticality_temperature":
+                    ORACLE_CRITICALITY_TEMPERATURES[
                         criticality
                     ],
             }
@@ -801,7 +702,7 @@ def prepare_oracle_data(
 
 
     # ========================================================
-    # Class distribution
+    # Criticality distribution
     # ========================================================
 
     counts = {
@@ -841,657 +742,119 @@ def prepare_oracle_data(
         )
 
 
-    return oracle_data
-
-
-# ============================================================
-# Criticality training
-# ============================================================
-
-def train_criticality_epoch(
-    model,
-    optimizer,
-    oracle_buffer,
-):
-
-    model.train()
-
-    if len(oracle_buffer) == 0:
-
-        print(
-            "Criticality buffer empty."
-        )
-
-        return (
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        )
-
-
-    total_loss = 0.0
-
-    total_correct = 0
-
-    total_positions = 0
-
-    total_steps = 0
-
-
-    # ========================================================
-    # Helper
-    #
-    # Accepte les deux formats :
-    #
-    #   "criticality"       -> nouveau format
-    #   "oracle_situation"  -> ancien format
-    # ========================================================
-
-    def get_criticality(entry):
-
-        criticality = entry.get(
-            "criticality"
-        )
-
-        if criticality is None:
-
-            criticality = entry.get(
-                "oracle_situation"
-            )
-
-        return criticality
-
-
-    # ========================================================
-    # Number of batches
-    # ========================================================
-
-    steps_per_epoch = max(
-        1,
-        (
-            len(oracle_buffer)
-            +
-            CRITICALITY_BATCH_SIZE
-            -
-            1
-        )
-        //
-        CRITICALITY_BATCH_SIZE,
-    )
-
-
-    total_updates = (
-        steps_per_epoch
-        *
-        CRITICALITY_EPOCHS_PER_RL_EPOCH
-    )
-
-
-    progress = tqdm(
-        total=total_updates,
-        desc="Criticality Training",
-    )
-
-
-    # ========================================================
-    # Training
-    # ========================================================
-
-    for _ in range(
-        CRITICALITY_EPOCHS_PER_RL_EPOCH
-    ):
-
-        for _ in range(
-            steps_per_epoch
-        ):
-
-            batch_size = min(
-                CRITICALITY_BATCH_SIZE,
-                len(oracle_buffer),
-            )
-
-
-            batch = (
-                oracle_buffer.sample(
-                    batch_size
-                )
-            )
-
-
-            # ------------------------------------------------
-            # Remove malformed entries defensively
-            # ------------------------------------------------
-
-            valid_batch = []
-
-            for entry in batch:
-
-                criticality = get_criticality(
-                    entry
-                )
-
-                if criticality not in CRITICALITY_TO_INDEX:
-
-                    print(
-                        "WARNING: skipping oracle entry "
-                        "with invalid criticality:",
-                        criticality,
-                    )
-
-                    continue
-
-                valid_batch.append(
-                    entry
-                )
-
-
-            if not valid_batch:
-
-                progress.update(1)
-
-                continue
-
-
-            boards = [
-
-                chess.variant.AtomicBoard(
-                    entry["fen"]
-                )
-
-                for entry in valid_batch
-            ]
-
-
-            x = encode_boards(
-                boards
-            ).to(DEVICE)
-
-
-            targets = torch.tensor(
-                [
-                    CRITICALITY_TO_INDEX[
-                        get_criticality(entry)
-                    ]
-
-                    for entry in valid_batch
-                ],
-                dtype=torch.long,
-                device=DEVICE,
-            )
-
-
-            # =================================================
-            # Forward
-            # =================================================
-
-            logits = model(
-                x
-            )
-
-
-            # =================================================
-            # Classification loss
-            #
-            # label_smoothing doit être défini dans
-            # F.cross_entropy si tu veux utiliser le
-            # nouveau CriticalityNet "soft".
-            # =================================================
-
-            loss = F.cross_entropy(
-                logits,
-                targets,
-                label_smoothing=0.15,
-            )
-
-
-            # =================================================
-            # Backward
-            # =================================================
-
-            optimizer.zero_grad(
-                set_to_none=True
-            )
-
-
-            loss.backward()
-
-
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(),
-                1.0,
-            )
-
-
-            optimizer.step()
-
-
-            # =================================================
-            # Diagnostics
-            # =================================================
-
-            predictions = torch.argmax(
-                logits,
-                dim=1,
-            )
-
-
-            correct = (
-                predictions
-                ==
-                targets
-            ).sum().item()
-
-
-            total_loss += (
-                loss.item()
-            )
-
-
-            total_correct += (
-                correct
-            )
-
-
-            total_positions += (
-                len(valid_batch)
-            )
-
-
-            total_steps += 1
-
-
-            progress.update(1)
-
-
-    progress.close()
-
-
-    # ========================================================
-    # Averages
-    # ========================================================
-
-    if total_steps == 0:
-
-        return (
-            0.0,
-            0.0,
-            0.0,
-            {},
-        )
-
-
-    avg_loss = (
-        total_loss
-        /
-        total_steps
-    )
-
-
-    accuracy = (
-        total_correct
-        /
-        total_positions
-    )
-
-
-    # ========================================================
-    # Per-class confidence
-    # ========================================================
-
-    model.eval()
-
-
-    all_predictions = []
-
-    all_targets = []
-
-    all_probabilities = []
-
-
-    with torch.no_grad():
-
-        inference_batch_size = (
-            CRITICALITY_BATCH_SIZE
-        )
-
-
-        for start in range(
-            0,
-            len(oracle_buffer),
-            inference_batch_size,
-        ):
-
-            batch_entries = (
-                oracle_buffer.buffer[
-                    start:
-                    start
-                    +
-                    inference_batch_size
-                ]
-            )
-
-
-            if not batch_entries:
-
-                continue
-
-
-            # ------------------------------------------------
-            # Remove malformed entries
-            # ------------------------------------------------
-
-            valid_entries = []
-
-            for entry in batch_entries:
-
-                criticality = get_criticality(
-                    entry
-                )
-
-                if criticality not in CRITICALITY_TO_INDEX:
-
-                    continue
-
-                valid_entries.append(
-                    entry
-                )
-
-
-            if not valid_entries:
-
-                continue
-
-
-            boards = [
-
-                chess.variant.AtomicBoard(
-                    entry["fen"]
-                )
-
-                for entry
-                in valid_entries
-            ]
-
-
-            x = encode_boards(
-                boards
-            ).to(DEVICE)
-
-
-            logits = model(
-                x
-            )
-
-
-            probabilities = (
-                torch.softmax(
-                    logits,
-                    dim=1,
-                )
-            )
-
-
-            predictions = (
-                torch.argmax(
-                    probabilities,
-                    dim=1,
-                )
-            )
-
-
-            targets_batch = torch.tensor(
-                [
-                    CRITICALITY_TO_INDEX[
-                        get_criticality(entry)
-                    ]
-
-                    for entry in valid_entries
-                ],
-                dtype=torch.long,
-                device=DEVICE,
-            )
-
-
-            all_predictions.append(
-                predictions.cpu()
-            )
-
-
-            all_targets.append(
-                targets_batch.cpu()
-            )
-
-
-            all_probabilities.append(
-                probabilities.cpu()
-            )
-
-
-    if not all_targets:
-
-        return (
-            avg_loss,
-            accuracy,
-            0.0,
-            {},
-        )
-
-
-    predictions = torch.cat(
-        all_predictions
-    )
-
-
-    targets = torch.cat(
-        all_targets
-    )
-
-
-    probabilities = torch.cat(
-        all_probabilities
-    )
-
-
-    # ========================================================
-    # Mean predicted probability for each true class
-    # ========================================================
-
-    class_confidences = {}
-
-
-    for class_index in range(3):
-
-        mask = (
-            targets
-            ==
-            class_index
-        )
-
-
-        if mask.any():
-
-            class_confidences[
-                INDEX_TO_CRITICALITY[
-                    class_index
-                ]
-            ] = probabilities[
-                mask,
-                class_index,
-            ].mean().item()
-
-        else:
-
-            class_confidences[
-                INDEX_TO_CRITICALITY[
-                    class_index
-                ]
-            ] = 0.0
-
-
-    critical_probability = (
-        probabilities[:, 2].mean().item()
-    )
-
-
-    # ========================================================
-    # Diagnostics
-    # ========================================================
-
     print()
 
     print(
-        "======================================"
-    )
-
-    print(
-        "CRITICALITY DIAGNOSTICS"
-    )
-
-    print(
-        "======================================"
-    )
-
-
-    print(
-        f"Criticality loss: "
-        f"{avg_loss:.6f}"
-    )
-
-
-    print(
-        f"Criticality accuracy: "
-        f"{accuracy:.2%}"
-    )
-
-
-    print(
-        f"P(critical) mean: "
-        f"{critical_probability:.4f}"
-    )
-
-
-    print(
-        "Mean confidence on true classes:"
+        "Oracle criticality temperatures:"
     )
 
 
     for (
-        class_name,
-        confidence,
-    ) in class_confidences.items():
+        name,
+        temperature,
+    ) in ORACLE_CRITICALITY_TEMPERATURES.items():
 
         print(
-            f"  {class_name}: "
-            f"{confidence:.4f}"
+            f"  {name}: T={temperature:.2f}"
         )
 
 
-    print(
-        "======================================"
-    )
-
-
-    return (
-        avg_loss,
-        accuracy,
-        critical_probability,
-        class_confidences,
-    )
+    return oracle_data
 
 
 # ============================================================
-# Save criticality checkpoint
+# Oracle target distribution
 # ============================================================
 
-def save_criticality_checkpoint(
-    model,
-    optimizer,
-    epoch,
-    loss,
+def build_oracle_target(
+    legal_ids,
+    oracle_action,
+    temperature,
+    device,
 ):
+    """
+    Build a soft oracle target distribution.
 
-    path = (
-        PROJECT_ROOT
-        / "checkpoints"
-        / "criticality_epoch"
-        / f"criticality_epoch_{epoch}.pt"
+    The oracle action receives a preference logit of 1.
+    All other legal actions receive a preference logit of 0.
+
+    Temperature controls how strongly this preference
+    is expressed.
+
+    Therefore:
+
+        T = 0.25
+            -> very concentrated target
+
+        T = 1.00
+            -> moderate target
+
+        T = 2.00
+            -> diffuse target
+
+    Illegal actions receive probability 0.
+
+    This means criticality is represented structurally
+    in the target distribution rather than as a loss weight.
+    """
+
+    num_actions = len(ACTIONS)
+
+
+    target_logits = torch.zeros(
+        num_actions,
+        device=device,
+        dtype=torch.float32,
     )
 
 
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
+    legal_mask = torch.zeros(
+        num_actions,
+        device=device,
+        dtype=torch.bool,
     )
 
 
-    torch.save(
-        {
+    legal_mask[
+        list(legal_ids)
+    ] = True
 
-            "epoch":
-                epoch,
 
-            "model_state_dict":
-                model.state_dict(),
+    # --------------------------------------------------------
+    # Only legal moves participate in the target.
+    # --------------------------------------------------------
 
-            "optimizer_state_dict":
-                optimizer.state_dict(),
-
-            "loss":
-                loss,
-        },
-        path,
+    target_logits = target_logits.masked_fill(
+        ~legal_mask,
+        float("-inf"),
     )
 
 
-    print(
-        "Criticality checkpoint saved:",
-        path,
-        flush=True,
+    # --------------------------------------------------------
+    # Oracle move gets the preference signal.
+    # --------------------------------------------------------
+
+    target_logits[
+        oracle_action
+    ] = 1.0
+
+
+    # --------------------------------------------------------
+    # Temperature controls concentration.
+    # --------------------------------------------------------
+
+    target_log_probs = F.log_softmax(
+        target_logits / temperature,
+        dim=0,
     )
 
 
-# ============================================================
-# Save best criticality checkpoint
-# ============================================================
-
-def save_best_criticality(
-    model,
-    optimizer,
-    epoch,
-    loss,
-):
-
-    path = (
-        PROJECT_ROOT
-        / "checkpoints"
-        / "criticality_best.pt"
+    target_probs = torch.exp(
+        target_log_probs
     )
 
 
-    torch.save(
-        {
-
-            "epoch":
-                epoch,
-
-            "model_state_dict":
-                model.state_dict(),
-
-            "optimizer_state_dict":
-                optimizer.state_dict(),
-
-            "loss":
-                loss,
-        },
-        path,
-    )
-
-
-    print(
-        "New best criticality checkpoint saved.",
-        flush=True,
-    )
+    return target_probs
 
 
 # ============================================================
@@ -1562,6 +925,15 @@ def train_oracle_epoch(
     total_kl = 0.0
 
     total_entropy = 0.0
+
+
+    # Oracle diagnostics
+
+    total_oracle_confidence_weight = 0.0
+
+    total_oracle_temperature = 0.0
+
+    total_oracle_annotations = 0
 
 
     total_updates = (
@@ -1725,19 +1097,15 @@ def train_oracle_epoch(
             # RL policy
             # =================================================
 
-            legal_policy = (
-                policy.masked_fill(
-                    ~legal_mask,
-                    float("-inf"),
-                )
+            legal_policy = policy.masked_fill(
+                ~legal_mask,
+                float("-inf"),
             )
 
 
-            legal_bc_policy = (
-                bc_policy.masked_fill(
-                    ~legal_mask,
-                    float("-inf"),
-                )
+            legal_bc_policy = bc_policy.masked_fill(
+                ~legal_mask,
+                float("-inf"),
             )
 
 
@@ -1920,10 +1288,7 @@ def train_oracle_epoch(
             # =================================================
             # Standard RL critic
             #
-            # IMPORTANT :
-            #
-            # Cette critic reste purement RL.
-            # Aucune criticality annotation ne la touche.
+            # Completely independent from Oracle annotations.
             # =================================================
 
             critic_loss = F.mse_loss(
@@ -1935,7 +1300,14 @@ def train_oracle_epoch(
             # =================================================
             # Oracle policy
             #
-            # confidence -> policy uniquement
+            # CONFIDENCE:
+            #   controls annotation weight.
+            #
+            # CRITICALITY:
+            #   controls target temperature.
+            #
+            # They are deliberately NOT collapsed into one
+            # scalar weight.
             # =================================================
 
             oracle_policy_loss = torch.tensor(
@@ -1990,6 +1362,15 @@ def train_oracle_epoch(
                 policy_weights = []
 
 
+                # ------------------------------------------------
+                # Diagnostics
+                # ------------------------------------------------
+
+                batch_confidence_weight = 0.0
+
+                batch_temperature = 0.0
+
+
                 for i, entry in enumerate(
                     oracle_batch
                 ):
@@ -2001,6 +1382,11 @@ def train_oracle_epoch(
 
                     confidence = (
                         entry["confidence"]
+                    )
+
+
+                    criticality = (
+                        entry["criticality"]
                     )
 
 
@@ -2038,26 +1424,40 @@ def train_oracle_epoch(
                         continue
 
 
-                    legal_oracle_policy = (
-                        oracle_policy_logits[i]
+                    confidence_weight = (
+                        ORACLE_CONFIDENCE_WEIGHTS[
+                            confidence
+                        ]
                     )
 
 
-                    illegal_mask = torch.ones(
+                    temperature = (
+                        ORACLE_CRITICALITY_TEMPERATURES[
+                            criticality
+                        ]
+                    )
+
+
+                    # =================================================
+                    # Current policy over legal moves
+                    # =================================================
+
+                    legal_mask_oracle = torch.zeros(
                         oracle_policy_logits.shape[1],
                         dtype=torch.bool,
                         device=DEVICE,
                     )
 
 
-                    illegal_mask[
+                    legal_mask_oracle[
                         list(legal_ids)
-                    ] = False
+                    ] = True
 
 
                     legal_oracle_policy = (
-                        legal_oracle_policy.masked_fill(
-                            illegal_mask,
+                        oracle_policy_logits[i]
+                        .masked_fill(
+                            ~legal_mask_oracle,
                             float("-inf"),
                         )
                     )
@@ -2071,17 +1471,53 @@ def train_oracle_epoch(
                     )
 
 
+                    # =================================================
+                    # Soft oracle target
+                    # =================================================
+
+                    target_probs = (
+                        build_oracle_target(
+                            legal_ids=legal_ids,
+                            oracle_action=oracle_action,
+                            temperature=temperature,
+                            device=DEVICE,
+                        )
+                    )
+
+
+                    # =================================================
+                    # Cross entropy with soft target
+                    #
+                    #   -sum q(a) log pi(a)
+                    #
+                    # Criticality has already been encoded
+                    # in q(a) through temperature.
+                    # =================================================
+
+                    cross_entropy = -(
+                        target_probs
+                        *
+                        oracle_log_probs
+                    ).sum()
+
+
                     policy_losses.append(
-                        -oracle_log_probs[
-                            oracle_action
-                        ]
+                        cross_entropy
                     )
 
 
                     policy_weights.append(
-                        ORACLE_CONFIDENCE_WEIGHTS[
-                            confidence
-                        ]
+                        confidence_weight
+                    )
+
+
+                    batch_confidence_weight += (
+                        confidence_weight
+                    )
+
+
+                    batch_temperature += (
+                        temperature
                     )
 
 
@@ -2103,6 +1539,16 @@ def train_oracle_epoch(
                     )
 
 
+                    # =================================================
+                    # Confidence-weighted Oracle loss
+                    #
+                    # Confidence says how much we trust
+                    # the annotation.
+                    #
+                    # Criticality says how concentrated
+                    # the target should be.
+                    # =================================================
+
                     oracle_policy_loss = (
                         (
                             policy_losses_tensor
@@ -2120,6 +1566,21 @@ def train_oracle_epoch(
 
                     oracle_policy_count = (
                         len(policy_losses)
+                    )
+
+
+                    total_oracle_confidence_weight += (
+                        batch_confidence_weight
+                    )
+
+
+                    total_oracle_temperature += (
+                        batch_temperature
+                    )
+
+
+                    total_oracle_annotations += (
+                        oracle_policy_count
                     )
 
 
@@ -2264,6 +1725,31 @@ def train_oracle_epoch(
 
 
     # ========================================================
+    # Oracle diagnostics
+    # ========================================================
+
+    if total_oracle_annotations > 0:
+
+        avg_oracle_temperature = (
+            total_oracle_temperature
+            /
+            total_oracle_annotations
+        )
+
+        avg_oracle_confidence = (
+            total_oracle_confidence_weight
+            /
+            total_oracle_annotations
+        )
+
+    else:
+
+        avg_oracle_temperature = 0.0
+
+        avg_oracle_confidence = 0.0
+
+
+    # ========================================================
     # Diagnostics
     # ========================================================
 
@@ -2297,6 +1783,39 @@ def train_oracle_epoch(
     print(
         "Oracle confidence weights: "
         "low=0.50 / medium=0.75 / high=0.99"
+    )
+
+
+    print(
+        "Oracle criticality temperatures:"
+    )
+
+
+    for (
+        name,
+        temperature,
+    ) in ORACLE_CRITICALITY_TEMPERATURES.items():
+
+        print(
+            f"  {name}: T={temperature:.2f}"
+        )
+
+
+    print(
+        f"Mean Oracle confidence weight: "
+        f"{avg_oracle_confidence:.4f}"
+    )
+
+
+    print(
+        f"Mean Oracle target temperature: "
+        f"{avg_oracle_temperature:.4f}"
+    )
+
+
+    print(
+        f"Oracle annotations used: "
+        f"{total_oracle_annotations}"
     )
 
 
@@ -2400,18 +1919,6 @@ def main():
 
 
     # ========================================================
-    # Criticality model
-    #
-    # TOTALLEMENT INDEPENDANT DU RL
-    # ========================================================
-
-    (
-        criticality_model,
-        criticality_optimizer,
-    ) = load_criticality_model()
-
-
-    # ========================================================
     # BC model
     # ========================================================
 
@@ -2431,7 +1938,7 @@ def main():
     # ========================================================
 
     oracle_buffer = OracleReplayBuffer(
-        capacity=CRITICALITY_CAPACITY
+        capacity=300000
     )
 
 
@@ -2453,6 +1960,24 @@ def main():
 
 
     # ========================================================
+    # DEBUG BUFFER
+    # ========================================================
+
+    if len(oracle_buffer) > 0:
+
+        print(
+            "DEBUG BUFFER:",
+            oracle_buffer.buffer[
+                :min(
+                    2,
+                    len(oracle_buffer.buffer),
+                )
+            ],
+            flush=True,
+        )
+
+
+    # ========================================================
     # RL replay buffer
     # ========================================================
 
@@ -2469,8 +1994,6 @@ def main():
 
 
     best_rl_loss = None
-
-    best_criticality_loss = None
 
 
     # ========================================================
@@ -2731,11 +2254,8 @@ def main():
                     if result == "1-0":
 
                         terminal_reward = (
-
                             1.0
-
                             if current_white
-
                             else -1.0
                         )
 
@@ -2743,11 +2263,8 @@ def main():
                     elif result == "0-1":
 
                         terminal_reward = (
-
                             -1.0
-
                             if current_white
-
                             else 1.0
                         )
 
@@ -2808,11 +2325,9 @@ def main():
             # =================================================
 
             score_rate = (
-
                 wins
                 +
                 0.5 * draws
-
             ) / GAMES_PER_EPOCH
 
 
@@ -2866,24 +2381,6 @@ def main():
                 f"| OraclePolicy={oracle_policy_loss:.4f} "
                 f"| KL={approx_kl:.6f}",
                 flush=True,
-            )
-
-
-            # =================================================
-            # Criticality training
-            #
-            # TOTALLEMENT SEPARE
-            # =================================================
-
-            (
-                criticality_loss,
-                criticality_accuracy,
-                mean_p_critical,
-                class_confidences,
-            ) = train_criticality_epoch(
-                model=criticality_model,
-                optimizer=criticality_optimizer,
-                oracle_buffer=oracle_buffer,
             )
 
 
@@ -2988,26 +2485,6 @@ def main():
 
 
             # =================================================
-            # Criticality checkpoint
-            # =================================================
-
-            if (
-                epoch
-                %
-                CRITICALITY_CHECKPOINT_EVERY
-                ==
-                0
-            ):
-
-                save_criticality_checkpoint(
-                    criticality_model,
-                    criticality_optimizer,
-                    epoch,
-                    criticality_loss,
-                )
-
-
-            # =================================================
             # Best RL
             # =================================================
 
@@ -3047,31 +2524,6 @@ def main():
                 print(
                     "New best Oracle RL checkpoint saved.",
                     flush=True,
-                )
-
-
-            # =================================================
-            # Best criticality
-            # =================================================
-
-            if (
-                best_criticality_loss is None
-                or
-                criticality_loss
-                <
-                best_criticality_loss
-            ):
-
-                best_criticality_loss = (
-                    criticality_loss
-                )
-
-
-                save_best_criticality(
-                    criticality_model,
-                    criticality_optimizer,
-                    epoch,
-                    criticality_loss,
                 )
 
 
@@ -3222,27 +2674,6 @@ def main():
             print(
                 f"RL critic loss: "
                 f"{critic_loss:.6f}",
-                flush=True,
-            )
-
-
-            print(
-                f"Criticality loss: "
-                f"{criticality_loss:.6f}",
-                flush=True,
-            )
-
-
-            print(
-                f"Criticality accuracy: "
-                f"{criticality_accuracy:.2%}",
-                flush=True,
-            )
-
-
-            print(
-                f"Mean P(critical): "
-                f"{mean_p_critical:.4f}",
                 flush=True,
             )
 

@@ -24,7 +24,7 @@ DEFAULT_RL_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
     / "rl_epoch"
-    / "rl_epoch_10.pt"
+    / "rl_epoch_20.pt"
 )
 
 DEFAULT_AL_CHECKPOINT = (
