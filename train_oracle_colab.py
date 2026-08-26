@@ -4,13 +4,14 @@
 
 import json
 import pickle
-import chess
-import chess.variant
 import copy
 import multiprocessing as mp
 
 from pathlib import Path
 from tqdm import tqdm
+
+import chess
+import chess.variant
 
 import torch
 import torch.nn.functional as F
@@ -22,8 +23,7 @@ from src.encoding import encode_boards
 
 from src.models.resnet import ChessResNet
 from src.models.actor_critic import ActorCritic
-
-from src.agents.ppo_agent import PPOAgent
+from src.models.criticality import CriticalityNet
 
 from src.rl.replay_buffer import ReplayBuffer
 from src.rl.oracle_replay_buffer import OracleReplayBuffer
@@ -32,12 +32,10 @@ from src.rl.uncertainty_stats import UncertaintyStats
 from src.actions_space import ACTIONS
 from src.actions_space import ACTION_TO_INDEX
 
-
 from train_rl_league_colab import (
     load_bc_agent,
     _prepare_shared_model,
     _init_selfplay_worker,
-    _selfplay_worker,
     collect_games_parallel,
     compute_gae,
 )
@@ -57,6 +55,7 @@ PROJECT_ROOT = Path(
 # ============================================================
 
 TEMPERATURE_SELFPLAY = 2
+
 
 # ============================================================
 # Reprise RL
@@ -109,6 +108,21 @@ GAE_LAMBDA = 0.95
 
 
 # ============================================================
+# Criticality model
+# ============================================================
+
+CRITICALITY_LR = 3e-4
+
+CRITICALITY_BATCH_SIZE = 256
+
+CRITICALITY_EPOCHS_PER_RL_EPOCH = 5
+
+CRITICALITY_CHECKPOINT_EVERY = 5
+
+CRITICALITY_CAPACITY = 300000
+
+
+# ============================================================
 # PPO diagnostics
 # ============================================================
 
@@ -135,71 +149,69 @@ LEAGUE_START_EPOCH = LEAGUE_END_EPOCH - 9
 ORACLE_QUEUE_PATH = (
     PROJECT_ROOT
     / "checkpoints"
+    / "queue"
     / "oracle_queue.jsonl"
 )
 
 
-# ------------------------------------------------------------
-# Oracle policy supervision
-#
-# Confidence = confiance dans le coup annoté.
-# Elle agit UNIQUEMENT sur la policy loss.
-# ------------------------------------------------------------
+# ============================================================
+# Oracle policy confidence
+# ============================================================
 
 ORACLE_CONFIDENCE_WEIGHTS = {
-    "low": 0.50,
-    "medium": 0.75,
-    "high": 0.99,
+
+    "low":
+        0.50,
+
+    "medium":
+        0.75,
+
+    "high":
+        0.99,
 }
 
-
-# ------------------------------------------------------------
-# Oracle value supervision
-#
-# Criticality = importance décisionnelle de la position.
-# Elle agit UNIQUEMENT sur le critic loss.
-# ------------------------------------------------------------
-
-ORACLE_CRITICALITY_WEIGHTS = {
-    "critical": 1.00,
-    "non_critical": 0.66,
-    "outcome_independent": 0.33,
-}
-
-
-# ------------------------------------------------------------
-# Coefficients globaux
-#
-# Ces deux coefficients sont indépendants.
-# ------------------------------------------------------------
 
 ORACLE_POLICY_COEF = 1.0
 
-ORACLE_VALUE_COEF = 1.0
-
-
 
 # ============================================================
-# RL checkpoint
+# Criticality classes
 # ============================================================
 
-CHECKPOINT = (
-    PROJECT_ROOT
-    / "checkpoints"
-    / "rl_epoch"
-    / f"rl_epoch_{CHECKPOINT_EPOCH}.pt"
-)
+CRITICALITY_TO_INDEX = {
+
+    "outcome_independent":
+        0,
+
+    "non_critical":
+        1,
+
+    "critical":
+        2,
+}
+
+
+INDEX_TO_CRITICALITY = {
+
+    0:
+        "outcome_independent",
+
+    1:
+        "non_critical",
+
+    2:
+        "critical",
+}
 
 
 # ============================================================
 # Model Loading
 # ============================================================
 
-
-
 def load_model():
 
     print()
+
     print(
         "======================================"
     )
@@ -207,7 +219,9 @@ def load_model():
 
     if RESUME_RL:
 
-        print("Resuming RL")
+        print(
+            "Resuming RL"
+        )
 
         print(
             "======================================"
@@ -246,7 +260,9 @@ def load_model():
 
 
         model.load_state_dict(
-            checkpoint["model_state_dict"]
+            checkpoint[
+                "model_state_dict"
+            ]
         )
 
 
@@ -272,7 +288,8 @@ def load_model():
 
         print(
             f"RL checkpoint loaded "
-            f"(epoch {checkpoint.get('epoch', '?')})."
+            f"(epoch "
+            f"{checkpoint.get('epoch', '?')})."
         )
 
 
@@ -309,7 +326,9 @@ def load_model():
 
 
         bc_model.load_state_dict(
-            checkpoint["model_state_dict"]
+            checkpoint[
+                "model_state_dict"
+            ]
         )
 
 
@@ -330,7 +349,7 @@ def load_model():
 
 
     # ========================================================
-    # League initiale
+    # League
     # ========================================================
 
     league = League(
@@ -357,7 +376,7 @@ def load_model():
 
 
     # ========================================================
-    # Reprise : charger snapshots
+    # Reprise league
     # ========================================================
 
     if RESUME_RL:
@@ -374,6 +393,7 @@ def load_model():
 
 
             if not path.exists():
+
                 continue
 
 
@@ -396,11 +416,16 @@ def load_model():
 
 
             snapshot.load_state_dict(
-                checkpoint["model_state_dict"]
+                checkpoint[
+                    "model_state_dict"
+                ]
             )
 
 
-            snapshot = snapshot.to(DEVICE)
+            snapshot = snapshot.to(
+                DEVICE
+            )
+
 
             snapshot.eval()
 
@@ -423,7 +448,115 @@ def load_model():
     )
 
 
-    return model, optimizer, league
+    return (
+        model,
+        optimizer,
+        league,
+    )
+
+
+# ============================================================
+# Load / create criticality model
+# ============================================================
+
+def load_criticality_model():
+
+    model = CriticalityNet(
+        in_channels=19,
+        channels=32,
+        blocks=4,
+        num_classes=3,
+    ).to(DEVICE)
+
+
+    optimizer = Adam(
+        model.parameters(),
+        lr=CRITICALITY_LR,
+    )
+
+
+    checkpoint_path = (
+        PROJECT_ROOT
+        / "checkpoints"
+        / "criticality_best.pt"
+    )
+
+
+    if checkpoint_path.exists():
+
+        print()
+        print(
+            "======================================"
+        )
+
+        print(
+            "Loading criticality model"
+        )
+
+        print(
+            "======================================"
+        )
+
+        print(
+            f"Checkpoint: {checkpoint_path}"
+        )
+
+
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location=DEVICE,
+        )
+
+
+        model.load_state_dict(
+            checkpoint[
+                "model_state_dict"
+            ]
+        )
+
+
+        if "optimizer_state_dict" in checkpoint:
+
+            optimizer.load_state_dict(
+                checkpoint[
+                    "optimizer_state_dict"
+                ]
+            )
+
+
+        print(
+            "Criticality model loaded."
+        )
+
+
+    else:
+
+        print()
+        print(
+            "======================================"
+        )
+
+        print(
+            "Initializing criticality model"
+        )
+
+        print(
+            "======================================"
+        )
+
+        print(
+            "No previous criticality checkpoint."
+        )
+
+        print(
+            "Starting from random initialization."
+        )
+
+
+    return (
+        model,
+        optimizer,
+    )
 
 
 # ============================================================
@@ -449,7 +582,10 @@ def load_oracle_queue():
         encoding="utf-8",
     ) as f:
 
-        for line_number, line in enumerate(
+        for (
+            line_number,
+            line,
+        ) in enumerate(
             f,
             start=1,
         ):
@@ -458,6 +594,7 @@ def load_oracle_queue():
 
 
             if not line:
+
                 continue
 
 
@@ -478,7 +615,10 @@ def load_oracle_queue():
                 continue
 
 
-            if entry.get("status") != "answered":
+            if entry.get(
+                "status"
+            ) != "answered":
+
                 continue
 
 
@@ -491,13 +631,14 @@ def load_oracle_queue():
     print(
         "======================================"
     )
+
     print(
         "ORACLE QUEUE"
     )
+
     print(
         "======================================"
     )
-
 
     print(
         f"Answered annotations: "
@@ -517,7 +658,6 @@ def prepare_oracle_data(
 ):
 
     oracle_data = []
-
 
     skipped = 0
 
@@ -573,12 +713,12 @@ def prepare_oracle_data(
 
 
         if criticality not in (
-            ORACLE_CRITICALITY_WEIGHTS
+            CRITICALITY_TO_INDEX
         ):
 
             print(
                 "WARNING: unknown "
-                f"oracle_criticality={criticality}"
+                f"oracle_situation={criticality}"
             )
 
             skipped += 1
@@ -607,22 +747,9 @@ def prepare_oracle_data(
             continue
 
 
-        confidence_weight = (
-            ORACLE_CONFIDENCE_WEIGHTS[
-                confidence
-            ]
-        )
-
-
-        criticality_weight = (
-            ORACLE_CRITICALITY_WEIGHTS[
-                criticality
-            ]
-        )
-
-
         oracle_data.append(
             {
+
                 "fen":
                     fen,
 
@@ -636,13 +763,17 @@ def prepare_oracle_data(
                     confidence,
 
                 "confidence_weight":
-                    confidence_weight,
+                    ORACLE_CONFIDENCE_WEIGHTS[
+                        confidence
+                    ],
 
                 "criticality":
                     criticality,
 
-                "criticality_weight":
-                    criticality_weight,
+                "criticality_index":
+                    CRITICALITY_TO_INDEX[
+                        criticality
+                    ],
             }
         )
 
@@ -659,26 +790,590 @@ def prepare_oracle_data(
     )
 
 
+    # ========================================================
+    # Class distribution
+    # ========================================================
+
+    counts = {
+
+        "outcome_independent":
+            0,
+
+        "non_critical":
+            0,
+
+        "critical":
+            0,
+    }
+
+
+    for entry in oracle_data:
+
+        counts[
+            entry["criticality"]
+        ] += 1
+
+
+    print()
+
+    print(
+        "Criticality distribution:"
+    )
+
+
+    for (
+        name,
+        count,
+    ) in counts.items():
+
+        print(
+            f"  {name}: {count}"
+        )
+
+
     return oracle_data
 
 
 # ============================================================
-# Self-play globals
+# Criticality training
 # ============================================================
 
-_WORKER_CURRENT_MODEL = None
+def train_criticality_epoch(
+    model,
+    optimizer,
+    oracle_buffer,
+):
 
-_WORKER_LEAGUE_MODELS = None
+    model.train()
 
-_WORKER_CURRENT_AGENT = None
 
-_WORKER_LEAGUE_AGENTS = None
+    if len(oracle_buffer) == 0:
 
-_WORKER_LEAGUE_REGISTRY = None
+        print(
+            "Criticality buffer empty."
+        )
+
+        return (
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        )
+
+
+    total_loss = 0.0
+
+    total_correct = 0
+
+    total_positions = 0
+
+    total_steps = 0
+
+
+    # ========================================================
+    # Number of batches
+    # ========================================================
+
+    steps_per_epoch = max(
+        1,
+        (
+            len(oracle_buffer)
+            +
+            CRITICALITY_BATCH_SIZE
+            -
+            1
+        )
+        //
+        CRITICALITY_BATCH_SIZE,
+    )
+
+
+    total_updates = (
+        steps_per_epoch
+        *
+        CRITICALITY_EPOCHS_PER_RL_EPOCH
+    )
+
+
+    progress = tqdm(
+        total=total_updates,
+        desc="Criticality Training",
+    )
+
+
+    # ========================================================
+    # Training
+    # ========================================================
+
+    for _ in range(
+        CRITICALITY_EPOCHS_PER_RL_EPOCH
+    ):
+
+        for _ in range(
+            steps_per_epoch
+        ):
+
+            batch_size = min(
+                CRITICALITY_BATCH_SIZE,
+                len(oracle_buffer),
+            )
+
+
+            batch = (
+                oracle_buffer.sample(
+                    batch_size
+                )
+            )
+
+
+            boards = [
+
+                chess.variant.AtomicBoard(
+                    entry["fen"]
+                )
+
+                for entry in batch
+            ]
+
+
+            x = encode_boards(
+                boards
+            ).to(DEVICE)
+
+
+            targets = torch.tensor(
+                [
+                    CRITICALITY_TO_INDEX[
+                        entry["criticality"]
+                    ]
+
+                    for entry in batch
+                ],
+                dtype=torch.long,
+                device=DEVICE,
+            )
+
+
+            # =================================================
+            # Forward
+            # =================================================
+
+            logits = model(
+                x
+            )
+
+
+            # =================================================
+            # Classification loss
+            # =================================================
+
+            loss = F.cross_entropy(
+                logits,
+                targets,
+            )
+
+
+            # =================================================
+            # Backward
+            # =================================================
+
+            optimizer.zero_grad(
+                set_to_none=True
+            )
+
+
+            loss.backward()
+
+
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                1.0,
+            )
+
+
+            optimizer.step()
+
+
+            # =================================================
+            # Diagnostics
+            # =================================================
+
+            predictions = torch.argmax(
+                logits,
+                dim=1,
+            )
+
+
+            correct = (
+                predictions
+                ==
+                targets
+            ).sum().item()
+
+
+            total_loss += (
+                loss.item()
+            )
+
+
+            total_correct += (
+                correct
+            )
+
+
+            total_positions += (
+                len(batch)
+            )
+
+
+            total_steps += 1
+
+
+            progress.update(1)
+
+
+    progress.close()
+
+
+    # ========================================================
+    # Averages
+    # ========================================================
+
+    avg_loss = (
+        total_loss
+        /
+        total_steps
+    )
+
+
+    accuracy = (
+        total_correct
+        /
+        total_positions
+    )
+
+
+    # ========================================================
+    # Per-class confidence
+    # ========================================================
+
+    model.eval()
+
+
+    all_predictions = []
+
+    all_targets = []
+
+    all_probabilities = []
+
+
+    with torch.no_grad():
+
+        inference_batch_size = (
+            CRITICALITY_BATCH_SIZE
+        )
+
+
+        for start in range(
+            0,
+            len(oracle_buffer),
+            inference_batch_size,
+        ):
+
+            batch_entries = (
+                oracle_buffer.buffer[
+                    start:
+                    start
+                    +
+                    inference_batch_size
+                ]
+            )
+
+
+            if not batch_entries:
+
+                continue
+
+
+            boards = [
+
+                chess.variant.AtomicBoard(
+                    entry["fen"]
+                )
+
+                for entry
+                in batch_entries
+            ]
+
+
+            x = encode_boards(
+                boards
+            ).to(DEVICE)
+
+
+            logits = model(
+                x
+            )
+
+
+            probabilities = (
+                torch.softmax(
+                    logits,
+                    dim=1,
+                )
+            )
+
+
+            predictions = (
+                torch.argmax(
+                    probabilities,
+                    dim=1,
+                )
+            )
+
+
+            targets_batch = torch.tensor(
+                [
+                    CRITICALITY_TO_INDEX[
+                        entry["criticality"]
+                    ]
+
+                    for entry in batch_entries
+                ],
+                dtype=torch.long,
+                device=DEVICE,
+            )
+
+
+            all_predictions.append(
+                predictions.cpu()
+            )
+
+
+            all_targets.append(
+                targets_batch.cpu()
+            )
+
+
+            all_probabilities.append(
+                probabilities.cpu()
+            )
+
+
+    predictions = torch.cat(
+        all_predictions
+    )
+
+
+    targets = torch.cat(
+        all_targets
+    )
+
+
+    probabilities = torch.cat(
+        all_probabilities
+    )
+
+
+    # ========================================================
+    # Mean predicted probability for each true class
+    # ========================================================
+
+    class_confidences = {}
+
+
+    for class_index in range(3):
+
+        mask = (
+            targets
+            ==
+            class_index
+        )
+
+
+        if mask.any():
+
+            class_confidences[
+                INDEX_TO_CRITICALITY[
+                    class_index
+                ]
+            ] = probabilities[
+                mask,
+                class_index,
+            ].mean().item()
+
+        else:
+
+            class_confidences[
+                INDEX_TO_CRITICALITY[
+                    class_index
+                ]
+            ] = 0.0
+
+
+    critical_probability = (
+        probabilities[:, 2].mean().item()
+    )
+
+
+    print()
+
+    print(
+        "======================================"
+    )
+
+    print(
+        "CRITICALITY DIAGNOSTICS"
+    )
+
+    print(
+        "======================================"
+    )
+
+
+    print(
+        f"Criticality loss: "
+        f"{avg_loss:.6f}"
+    )
+
+
+    print(
+        f"Criticality accuracy: "
+        f"{accuracy:.2%}"
+    )
+
+
+    print(
+        f"P(critical) mean: "
+        f"{critical_probability:.4f}"
+    )
+
+
+    print(
+        "Mean confidence on true classes:"
+    )
+
+
+    for (
+        class_name,
+        confidence,
+    ) in class_confidences.items():
+
+        print(
+            f"  {class_name}: "
+            f"{confidence:.4f}"
+        )
+
+
+    print(
+        "======================================"
+    )
+
+
+    return (
+        avg_loss,
+        accuracy,
+        critical_probability,
+        class_confidences,
+    )
 
 
 # ============================================================
-# Oracle PPO training
+# Save criticality checkpoint
+# ============================================================
+
+def save_criticality_checkpoint(
+    model,
+    optimizer,
+    epoch,
+    loss,
+):
+
+    path = (
+        PROJECT_ROOT
+        / "checkpoints"
+        / "criticality_epoch"
+        / f"criticality_epoch_{epoch}.pt"
+    )
+
+
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+
+    torch.save(
+        {
+
+            "epoch":
+                epoch,
+
+            "model_state_dict":
+                model.state_dict(),
+
+            "optimizer_state_dict":
+                optimizer.state_dict(),
+
+            "loss":
+                loss,
+        },
+        path,
+    )
+
+
+    print(
+        "Criticality checkpoint saved:",
+        path,
+        flush=True,
+    )
+
+
+# ============================================================
+# Save best criticality checkpoint
+# ============================================================
+
+def save_best_criticality(
+    model,
+    optimizer,
+    epoch,
+    loss,
+):
+
+    path = (
+        PROJECT_ROOT
+        / "checkpoints"
+        / "criticality_best.pt"
+    )
+
+
+    torch.save(
+        {
+
+            "epoch":
+                epoch,
+
+            "model_state_dict":
+                model.state_dict(),
+
+            "optimizer_state_dict":
+                optimizer.state_dict(),
+
+            "loss":
+                loss,
+        },
+        path,
+    )
+
+
+    print(
+        "New best criticality checkpoint saved.",
+        flush=True,
+    )
+
+
+# ============================================================
+# Oracle policy training
 # ============================================================
 
 def train_oracle_epoch(
@@ -724,87 +1419,15 @@ def train_oracle_epoch(
             0.0,
             0.0,
             0.0,
-            0.0,
-        )
-
-
-    if len(oracle_buffer) == 0:
-
-        print(
-            "Oracle replay buffer empty."
         )
 
 
     TRAIN_STEPS = (
         len(buffer)
-        // BATCH_SIZE
+        //
+        BATCH_SIZE
     )
 
-
-    # ========================================================
-    # Oracle weights
-    # ========================================================
-
-    confidence_weights = {
-        "low":
-            0.50,
-
-        "medium":
-            0.75,
-
-        "high":
-            0.99,
-    }
-
-
-    criticality_weights = {
-        "critical":
-            1.00,
-
-        "non_critical":
-            0.66,
-
-        "outcome_independent":
-            0.33,
-    }
-
-
-    # ========================================================
-    # RL buffer index
-    #
-    # Permet de retrouver le game_result pour une position
-    # Oracle rencontrée pendant le self-play.
-    # ========================================================
-
-    rl_by_fen = {}
-
-
-    for entry in buffer.buffer:
-
-        fen = entry["fen"]
-
-
-        # Une position peut apparaître plusieurs fois.
-        # On conserve la première occurrence disposant
-        # d'un résultat valide.
-
-        if fen not in rl_by_fen:
-
-            rl_by_fen[fen] = entry
-
-
-        elif (
-            rl_by_fen[fen].get("game_result") is None
-            and
-            entry.get("game_result") is not None
-        ):
-
-            rl_by_fen[fen] = entry
-
-
-    # ========================================================
-    # Accumulators
-    # ========================================================
 
     total_loss = 0.0
 
@@ -814,20 +1437,15 @@ def train_oracle_epoch(
 
     total_oracle_policy = 0.0
 
-    total_oracle_value = 0.0
-
     total_kl = 0.0
 
     total_entropy = 0.0
 
-    total_oracle_policy_positions = 0
-
-    total_oracle_value_positions = 0
-
 
     total_updates = (
         TRAIN_STEPS
-        * SGD_EPOCHS
+        *
+        SGD_EPOCHS
     )
 
 
@@ -849,19 +1467,17 @@ def train_oracle_epoch(
             TRAIN_STEPS
         ):
 
-            # =================================================
-            # RL batch
-            # =================================================
-
             batch = buffer.sample(
                 BATCH_SIZE
             )
 
 
             boards = [
+
                 chess.variant.AtomicBoard(
                     s["fen"]
                 )
+
                 for s in batch
             ]
 
@@ -871,7 +1487,9 @@ def train_oracle_epoch(
             ).to(DEVICE)
 
 
-            policy, values = model(x)
+            policy, values = model(
+                x
+            )
 
 
             # =================================================
@@ -880,7 +1498,9 @@ def train_oracle_epoch(
 
             with torch.no_grad():
 
-                bc_policy, _ = bc_model(x)
+                bc_policy, _ = bc_model(
+                    x
+                )
 
 
             # =================================================
@@ -919,10 +1539,12 @@ def train_oracle_epoch(
 
             advantages = (
                 raw_advantages
-                - raw_advantages.mean()
+                -
+                raw_advantages.mean()
             ) / (
                 raw_advantages.std()
-                + 1e-8
+                +
+                1e-8
             )
 
 
@@ -963,10 +1585,11 @@ def train_oracle_epoch(
             for i, s in enumerate(batch):
 
                 ids = [
+
                     ACTION_TO_INDEX[m]
-                    for m in s[
-                        "legal_moves"
-                    ]
+
+                    for m
+                    in s["legal_moves"]
                 ]
 
 
@@ -1030,8 +1653,10 @@ def train_oracle_epoch(
                 *
                 torch.clamp(
                     1.0
-                    - plys
-                    / BC_PRIOR_PLIES,
+                    -
+                    plys
+                    /
+                    BC_PRIOR_PLIES,
                     min=0.0,
                 )
             )
@@ -1085,7 +1710,8 @@ def train_oracle_epoch(
 
             log_ratio = (
                 selected_log_probs
-                - old_log_probs
+                -
+                old_log_probs
             )
 
 
@@ -1097,8 +1723,10 @@ def train_oracle_epoch(
             approx_kl = (
                 (
                     ratio
-                    - 1.0
-                    - log_ratio
+                    -
+                    1.0
+                    -
+                    log_ratio
                 ).mean()
             )
 
@@ -1110,7 +1738,7 @@ def train_oracle_epoch(
             )
 
 
-            clip_fraction = (
+            clipped_fraction = (
                 clipped_mask
                 .float()
                 .mean()
@@ -1119,7 +1747,8 @@ def train_oracle_epoch(
 
             unclipped = (
                 ratio
-                * advantages
+                *
+                advantages
             )
 
 
@@ -1129,7 +1758,8 @@ def train_oracle_epoch(
                     1.0 - PPO_CLIP,
                     1.0 + PPO_CLIP,
                 )
-                * advantages
+                *
+                advantages
             )
 
 
@@ -1166,7 +1796,12 @@ def train_oracle_epoch(
 
 
             # =================================================
-            # Standard critic loss
+            # Standard RL critic
+            #
+            # IMPORTANT :
+            #
+            # Cette critic reste purement RL.
+            # Aucune criticality annotation ne la touche.
             # =================================================
 
             critic_loss = F.mse_loss(
@@ -1176,15 +1811,9 @@ def train_oracle_epoch(
 
 
             # =================================================
-            # Oracle batch
-            # =================================================
+            # Oracle policy
             #
-            # IMPORTANT :
-            #
-            # confidence -> policy
-            # criticality -> value
-            #
-            # Les deux sont indépendants.
+            # confidence -> policy uniquement
             # =================================================
 
             oracle_policy_loss = torch.tensor(
@@ -1193,15 +1822,7 @@ def train_oracle_epoch(
             )
 
 
-            oracle_value_loss = torch.tensor(
-                0.0,
-                device=DEVICE,
-            )
-
-
             oracle_policy_count = 0
-
-            oracle_value_count = 0
 
 
             if len(oracle_buffer) > 0:
@@ -1219,15 +1840,14 @@ def train_oracle_epoch(
                 )
 
 
-                # =================================================
-                # Oracle boards
-                # =================================================
-
                 oracle_boards = [
+
                     chess.variant.AtomicBoard(
                         entry["fen"]
                     )
-                    for entry in oracle_batch
+
+                    for entry
+                    in oracle_batch
                 ]
 
 
@@ -1236,16 +1856,12 @@ def train_oracle_epoch(
                 ).to(DEVICE)
 
 
-                oracle_policy_logits, oracle_values = (
+                oracle_policy_logits, _ = (
                     model(
                         oracle_x
                     )
                 )
 
-
-                # =================================================
-                # Oracle policy supervision
-                # =================================================
 
                 policy_losses = []
 
@@ -1266,13 +1882,6 @@ def train_oracle_epoch(
                     )
 
 
-                    if confidence not in (
-                        confidence_weights
-                    ):
-
-                        continue
-
-
                     try:
 
                         oracle_action = (
@@ -1283,12 +1892,6 @@ def train_oracle_epoch(
 
                     except KeyError:
 
-                        print(
-                            "WARNING: Oracle move "
-                            f"{oracle_move} not found "
-                            "in ACTION_TO_INDEX."
-                        )
-
                         continue
 
 
@@ -1298,9 +1901,11 @@ def train_oracle_epoch(
 
 
                     legal_ids = {
+
                         ACTION_TO_INDEX[
                             move.uci()
                         ]
+
                         for move
                         in board.legal_moves
                     }
@@ -1308,24 +1913,11 @@ def train_oracle_epoch(
 
                     if oracle_action not in legal_ids:
 
-                        print(
-                            "WARNING: Oracle move "
-                            f"{oracle_move} is illegal "
-                            f"for FEN {entry['fen']}"
-                        )
-
                         continue
 
 
-                    # ------------------------------------------------
-                    # Legal policy
-                    # ------------------------------------------------
-
                     legal_oracle_policy = (
-                        oracle_policy_logits[
-                            i
-                        ]
-                        .clone()
+                        oracle_policy_logits[i]
                     )
 
 
@@ -1365,15 +1957,11 @@ def train_oracle_epoch(
 
 
                     policy_weights.append(
-                        confidence_weights[
+                        ORACLE_CONFIDENCE_WEIGHTS[
                             confidence
                         ]
                     )
 
-
-                # =================================================
-                # Weighted Oracle policy loss
-                # =================================================
 
                 if policy_losses:
 
@@ -1402,7 +1990,8 @@ def train_oracle_epoch(
                         /
                         (
                             policy_weights_tensor.sum()
-                            + 1e-8
+                            +
+                            1e-8
                         )
                     )
 
@@ -1412,199 +2001,36 @@ def train_oracle_epoch(
                     )
 
 
-                # =================================================
-                # Oracle value supervision
-                # =================================================
-                #
-                # On ne peut utiliser la criticality que si la
-                # position annotée a également été rencontrée
-                # dans le self-play courant.
-                #
-                # Le résultat de la partie fournit alors la cible.
-                # =================================================
-
-                value_losses = []
-
-                value_weights = []
-
-
-                for i, entry in enumerate(
-                    oracle_batch
-                ):
-
-                    situation = (
-                        entry["situation"]
-                    )
-
-
-                    if situation not in (
-                        criticality_weights
-                    ):
-
-                        continue
-
-
-                    rl_entry = (
-                        rl_by_fen.get(
-                            entry["fen"]
-                        )
-                    )
-
-
-                    if rl_entry is None:
-
-                        continue
-
-
-                    game_result = (
-                        rl_entry.get(
-                            "game_result"
-                        )
-                    )
-
-
-                    if game_result is None:
-
-                        continue
-
-
-                    # ------------------------------------------------
-                    # Final outcome from White's perspective
-                    # ------------------------------------------------
-
-                    if game_result == "1-0":
-
-                        white_value = 1.0
-
-                    elif game_result == "0-1":
-
-                        white_value = -1.0
-
-                    else:
-
-                        white_value = 0.0
-
-
-                    # ------------------------------------------------
-                    # Convert to side-to-move perspective
-                    # ------------------------------------------------
-
-                    board = (
-                        oracle_boards[i]
-                    )
-
-
-                    target_value = (
-                        white_value
-                        if board.turn
-                        else -white_value
-                    )
-
-
-                    prediction = (
-                        oracle_values[
-                            i,
-                            0,
-                        ]
-                    )
-
-
-                    value_losses.append(
-                        (
-                            prediction
-                            - target_value
-                        ) ** 2
-                    )
-
-
-                    value_weights.append(
-                        criticality_weights[
-                            situation
-                        ]
-                    )
-
-
-                # =================================================
-                # Weighted Oracle value loss
-                # =================================================
-
-                if value_losses:
-
-                    value_losses_tensor = (
-                        torch.stack(
-                            value_losses
-                        )
-                    )
-
-
-                    value_weights_tensor = (
-                        torch.tensor(
-                            value_weights,
-                            device=DEVICE,
-                            dtype=torch.float32,
-                        )
-                    )
-
-
-                    oracle_value_loss = (
-                        (
-                            value_losses_tensor
-                            *
-                            value_weights_tensor
-                        ).sum()
-                        /
-                        (
-                            value_weights_tensor.sum()
-                            + 1e-8
-                        )
-                    )
-
-
-                    oracle_value_count = (
-                        len(value_losses)
-                    )
-
-
                 del oracle_x
 
                 del oracle_policy_logits
-
-                del oracle_values
 
 
             # =================================================
             # Total loss
             # =================================================
-            #
-            # IMPORTANT :
-            #
-            # Oracle policy et Oracle value sont deux termes
-            # séparés.
-            #
-            # Il n'existe AUCUN :
-            #
-            # confidence * criticality
-            #
-            # =================================================
 
             loss = (
+
                 actor_loss
+
                 +
+
                 VALUE_COEF
                 *
                 critic_loss
+
                 -
+
                 ENTROPY_COEF
                 *
                 entropy
+
                 +
+
                 ORACLE_POLICY_COEF
                 *
                 oracle_policy_loss
-                +
-                ORACLE_VALUE_COEF
-                *
-                oracle_value_loss
             )
 
 
@@ -1612,7 +2038,9 @@ def train_oracle_epoch(
             # Backward
             # =================================================
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(
+                set_to_none=True
+            )
 
 
             loss.backward()
@@ -1651,11 +2079,6 @@ def train_oracle_epoch(
             )
 
 
-            total_oracle_value += (
-                oracle_value_loss.item()
-            )
-
-
             total_kl += (
                 approx_kl.item()
             )
@@ -1663,16 +2086,6 @@ def train_oracle_epoch(
 
             total_entropy += (
                 entropy.item()
-            )
-
-
-            total_oracle_policy_positions += (
-                oracle_policy_count
-            )
-
-
-            total_oracle_value_positions += (
-                oracle_value_count
             )
 
 
@@ -1688,55 +2101,43 @@ def train_oracle_epoch(
 
     avg_loss = (
         total_loss
-        / total_updates
+        /
+        total_updates
     )
 
 
     avg_actor = (
         total_actor
-        / total_updates
+        /
+        total_updates
     )
 
 
     avg_critic = (
         total_critic
-        / total_updates
+        /
+        total_updates
     )
 
 
     avg_oracle_policy = (
         total_oracle_policy
-        / total_updates
-    )
-
-
-    avg_oracle_value = (
-        total_oracle_value
-        / total_updates
+        /
+        total_updates
     )
 
 
     avg_kl = (
         total_kl
-        / total_updates
+        /
+        total_updates
     )
 
 
     avg_entropy = (
         total_entropy
-        / total_updates
-    )
-
-
-    oracle_policy_positions_per_update = (
-        total_oracle_policy_positions
-        / total_updates
-    )
-
-
-    oracle_value_positions_per_update = (
-        total_oracle_value_positions
-        / total_updates
+        /
+        total_updates
     )
 
 
@@ -1772,57 +2173,25 @@ def train_oracle_epoch(
 
 
     print(
-        f"Oracle value coefficient:  "
-        f"{ORACLE_VALUE_COEF:.4f}"
-    )
-
-
-    print(
         "Oracle confidence weights: "
         "low=0.50 / medium=0.75 / high=0.99"
     )
 
 
     print(
-        "Oracle criticality weights: "
-        "critical=1.00 / "
-        "non_critical=0.66 / "
-        "outcome_independent=0.33"
-    )
-
-
-    print(
-        f"Oracle policy loss:        "
+        f"Oracle policy loss: "
         f"{avg_oracle_policy:.6f}"
     )
 
 
     print(
-        f"Oracle value loss:         "
-        f"{avg_oracle_value:.6f}"
-    )
-
-
-    print(
-        f"Oracle policy positions/update: "
-        f"{oracle_policy_positions_per_update:.2f}"
-    )
-
-
-    print(
-        f"Oracle value positions/update:  "
-        f"{oracle_value_positions_per_update:.2f}"
-    )
-
-
-    print(
-        f"Policy KL:                 "
+        f"Policy KL: "
         f"{avg_kl:.6e}"
     )
 
 
     print(
-        f"Entropy:                   "
+        f"Entropy: "
         f"{avg_entropy:.6f}"
     )
 
@@ -1837,63 +2206,12 @@ def train_oracle_epoch(
         avg_actor,
         avg_critic,
         avg_oracle_policy,
-        avg_oracle_value,
         avg_kl,
     )
 
 
 # ============================================================
-# Checkpoints
-# ============================================================
-
-def save_checkpoint(
-    model,
-    optimizer,
-    epoch,
-    loss,
-):
-
-    path = (
-        PROJECT_ROOT
-        / "checkpoints"
-        / "oracle_epoch"
-        / f"oracle_epoch_{epoch}.pt"
-    )
-
-
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-
-    torch.save(
-        {
-            "epoch":
-                epoch,
-
-            "model_state_dict":
-                model.state_dict(),
-
-            "optimizer_state_dict":
-                optimizer.state_dict(),
-
-            "loss":
-                loss,
-        },
-        path,
-    )
-
-
-    print(
-        "Oracle checkpoint saved:",
-        path,
-        flush=True,
-    )
-
-
-# ============================================================
-# Replay Buffer
+# Replay buffer
 # ============================================================
 
 def save_replay_buffer(
@@ -1930,10 +2248,6 @@ def save_replay_buffer(
 # Main
 # ============================================================
 
-# ============================================================
-# Main
-# ============================================================
-
 def main():
 
     # ========================================================
@@ -1953,12 +2267,26 @@ def main():
 
 
     # ========================================================
-    # Load model + optimizer + league
+    # RL model
     # ========================================================
 
-    model, optimizer, league = (
-        load_model()
-    )
+    (
+        model,
+        optimizer,
+        league,
+    ) = load_model()
+
+
+    # ========================================================
+    # Criticality model
+    #
+    # TOTALLEMENT INDEPENDANT DU RL
+    # ========================================================
+
+    (
+        criticality_model,
+        criticality_optimizer,
+    ) = load_criticality_model()
 
 
     # ========================================================
@@ -1978,18 +2306,10 @@ def main():
 
     # ========================================================
     # Oracle replay buffer
-    #
-    # Contient uniquement les annotations humaines.
-    #
-    # confidence :
-    #     policy supervision
-    #
-    # situation :
-    #     critic supervision
     # ========================================================
 
     oracle_buffer = OracleReplayBuffer(
-        capacity=300000
+        capacity=CRITICALITY_CAPACITY
     )
 
 
@@ -2012,10 +2332,6 @@ def main():
 
     # ========================================================
     # RL replay buffer
-    #
-    # Celui-ci contient les trajectoires self-play.
-    # Il reste nécessaire pour le PPO et pour récupérer
-    # le résultat final des positions annotées.
     # ========================================================
 
     buffer = ReplayBuffer(
@@ -2024,13 +2340,15 @@ def main():
 
 
     # ========================================================
-    # Uncertainty statistics
+    # Uncertainty
     # ========================================================
 
     stats = UncertaintyStats()
 
 
-    best_loss = None
+    best_rl_loss = None
+
+    best_criticality_loss = None
 
 
     # ========================================================
@@ -2079,13 +2397,15 @@ def main():
 
 
     # ========================================================
-    # Préparer futurs slots
+    # Future league slots
     # ========================================================
 
     future_end = (
         START_EPOCH
-        + RL_EPOCHS
-        - 1
+        +
+        RL_EPOCHS
+        -
+        1
     )
 
 
@@ -2104,11 +2424,9 @@ def main():
             continue
 
 
-        placeholder = (
-            copy.deepcopy(
-                model
-            ).to("cpu")
-        )
+        placeholder = copy.deepcopy(
+            model
+        ).to("cpu")
 
 
         placeholder.eval()
@@ -2175,7 +2493,7 @@ def main():
     ) as pool:
 
         # ====================================================
-        # Oracle RL loop
+        # Epoch loop
         # ====================================================
 
         for epoch in range(
@@ -2247,7 +2565,7 @@ def main():
 
 
                 # ------------------------------------------------
-                # Game result
+                # Result
                 # ------------------------------------------------
 
                 if result == "1-0":
@@ -2291,8 +2609,11 @@ def main():
                     if result == "1-0":
 
                         terminal_reward = (
+
                             1.0
+
                             if current_white
+
                             else -1.0
                         )
 
@@ -2300,8 +2621,11 @@ def main():
                     elif result == "0-1":
 
                         terminal_reward = (
+
                             -1.0
+
                             if current_white
+
                             else 1.0
                         )
 
@@ -2331,7 +2655,7 @@ def main():
 
 
                 # ------------------------------------------------
-                # Replay buffer
+                # Replay
                 # ------------------------------------------------
 
                 for (
@@ -2358,12 +2682,15 @@ def main():
 
 
             # =================================================
-            # Diagnostics
+            # Diagnostics self-play
             # =================================================
 
             score_rate = (
+
                 wins
-                + 0.5 * draws
+                +
+                0.5 * draws
+
             ) / GAMES_PER_EPOCH
 
 
@@ -2392,15 +2719,14 @@ def main():
 
 
             # =================================================
-            # Oracle PPO
+            # RL / Oracle policy
             # =================================================
 
             (
-                loss,
+                rl_loss,
                 actor_loss,
                 critic_loss,
                 oracle_policy_loss,
-                oracle_value_loss,
                 approx_kl,
             ) = train_oracle_epoch(
                 model=model,
@@ -2412,18 +2738,35 @@ def main():
 
 
             print(
-                f"Loss={loss:.4f} "
+                f"RL Loss={rl_loss:.4f} "
                 f"| Actor={actor_loss:.4f} "
                 f"| Critic={critic_loss:.4f} "
                 f"| OraclePolicy={oracle_policy_loss:.4f} "
-                f"| OracleValue={oracle_value_loss:.4f} "
                 f"| KL={approx_kl:.6f}",
                 flush=True,
             )
 
 
             # =================================================
-            # Replay buffer sauvegarde
+            # Criticality training
+            #
+            # TOTALLEMENT SEPARE
+            # =================================================
+
+            (
+                criticality_loss,
+                criticality_accuracy,
+                mean_p_critical,
+                class_confidences,
+            ) = train_criticality_epoch(
+                model=criticality_model,
+                optimizer=criticality_optimizer,
+                oracle_buffer=oracle_buffer,
+            )
+
+
+            # =================================================
+            # Replay buffer save
             # =================================================
 
             if epoch % 5 == 0:
@@ -2435,7 +2778,7 @@ def main():
 
 
             # =================================================
-            # On-policy
+            # On-policy clear
             # =================================================
 
             buffer.clear()
@@ -2448,7 +2791,7 @@ def main():
 
 
             # =================================================
-            # Uncertainty stats
+            # Uncertainty
             # =================================================
 
             stats_path = (
@@ -2471,20 +2814,142 @@ def main():
 
 
             # =================================================
-            # Oracle checkpoint
+            # RL checkpoint
             # =================================================
 
             if (
                 epoch
-                % CHECKPOINT_EVERY
-                == 0
+                %
+                CHECKPOINT_EVERY
+                ==
+                0
             ):
 
-                save_checkpoint(
-                    model,
-                    optimizer,
+                save_path = (
+                    PROJECT_ROOT
+                    / "checkpoints"
+                    / "oracle_epoch"
+                    / f"oracle_epoch_{epoch}.pt"
+                )
+
+
+                save_path.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+
+
+                torch.save(
+                    {
+
+                        "epoch":
+                            epoch,
+
+                        "model_state_dict":
+                            model.state_dict(),
+
+                        "optimizer_state_dict":
+                            optimizer.state_dict(),
+
+                        "loss":
+                            rl_loss,
+                    },
+                    save_path,
+                )
+
+
+                print(
+                    "Oracle RL checkpoint saved:",
+                    save_path,
+                    flush=True,
+                )
+
+
+            # =================================================
+            # Criticality checkpoint
+            # =================================================
+
+            if (
+                epoch
+                %
+                CRITICALITY_CHECKPOINT_EVERY
+                ==
+                0
+            ):
+
+                save_criticality_checkpoint(
+                    criticality_model,
+                    criticality_optimizer,
                     epoch,
-                    loss,
+                    criticality_loss,
+                )
+
+
+            # =================================================
+            # Best RL
+            # =================================================
+
+            if (
+                best_rl_loss is None
+                or rl_loss < best_rl_loss
+            ):
+
+                best_rl_loss = (
+                    rl_loss
+                )
+
+
+                torch.save(
+                    {
+
+                        "epoch":
+                            epoch,
+
+                        "model_state_dict":
+                            model.state_dict(),
+
+                        "optimizer_state_dict":
+                            optimizer.state_dict(),
+
+                        "loss":
+                            rl_loss,
+                    },
+                    PROJECT_ROOT
+                    /
+                    "checkpoints"
+                    /
+                    "oracle_best.pt",
+                )
+
+
+                print(
+                    "New best Oracle RL checkpoint saved.",
+                    flush=True,
+                )
+
+
+            # =================================================
+            # Best criticality
+            # =================================================
+
+            if (
+                best_criticality_loss is None
+                or
+                criticality_loss
+                <
+                best_criticality_loss
+            ):
+
+                best_criticality_loss = (
+                    criticality_loss
+                )
+
+
+                save_best_criticality(
+                    criticality_model,
+                    criticality_optimizer,
+                    epoch,
+                    criticality_loss,
                 )
 
 
@@ -2492,11 +2957,9 @@ def main():
             # Snapshot league
             # =================================================
 
-            snapshot = (
-                copy.deepcopy(
-                    model
-                ).to(DEVICE)
-            )
+            snapshot = copy.deepcopy(
+                model
+            ).to(DEVICE)
 
 
             snapshot.eval()
@@ -2521,6 +2984,7 @@ def main():
 
             torch.save(
                 {
+
                     "epoch":
                         epoch,
 
@@ -2607,44 +3071,6 @@ def main():
 
 
             # =================================================
-            # Best checkpoint
-            # =================================================
-
-            if (
-                best_loss is None
-                or loss < best_loss
-            ):
-
-                best_loss = loss
-
-
-                torch.save(
-                    {
-                        "epoch":
-                            epoch,
-
-                        "model_state_dict":
-                            model.state_dict(),
-
-                        "optimizer_state_dict":
-                            optimizer.state_dict(),
-
-                        "loss":
-                            loss,
-                    },
-                    PROJECT_ROOT
-                    / "checkpoints"
-                    / "oracle_best.pt",
-                )
-
-
-                print(
-                    "New best Oracle checkpoint saved.",
-                    flush=True,
-                )
-
-
-            # =================================================
             # Summary
             # =================================================
 
@@ -2660,6 +3086,41 @@ def main():
                 f"{losses}L / "
                 f"{draws}D "
                 f"({score_rate:.1%})",
+                flush=True,
+            )
+
+
+            print(
+                f"RL Oracle policy loss: "
+                f"{oracle_policy_loss:.6f}",
+                flush=True,
+            )
+
+
+            print(
+                f"RL critic loss: "
+                f"{critic_loss:.6f}",
+                flush=True,
+            )
+
+
+            print(
+                f"Criticality loss: "
+                f"{criticality_loss:.6f}",
+                flush=True,
+            )
+
+
+            print(
+                f"Criticality accuracy: "
+                f"{criticality_accuracy:.2%}",
+                flush=True,
+            )
+
+
+            print(
+                f"Mean P(critical): "
+                f"{mean_p_critical:.4f}",
                 flush=True,
             )
 
