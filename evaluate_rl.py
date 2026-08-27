@@ -31,7 +31,7 @@ RL2_CHECKPOINT = (
     / "oracle_epoch_20.pt"
 )
 
-GAMES = 1000
+GAMES = 250
 TEMPERATURE = 2
 
 

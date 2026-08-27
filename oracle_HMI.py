@@ -14,19 +14,16 @@ from PyQt6.QtWidgets import (
 
 from PyQt6.QtCore import Qt
 
-
 from oracle_queue import OracleQueue
 
 from widgets.chessboard import ChessBoardWidget
 from widgets.annotation_panel import AnnotationPanel
 
 
-
 class OracleHMI(QMainWindow):
     """
     ALBERTA Human Oracle Interface.
     """
-
 
     def __init__(
         self,
@@ -35,17 +32,14 @@ class OracleHMI(QMainWindow):
 
         super().__init__()
 
-
         self.setWindowTitle(
             "ALBERTA - Atomic Oracle"
         )
-
 
         self.resize(
             1200,
             750,
         )
-
 
         # ====================================================
         # Backend
@@ -55,13 +49,9 @@ class OracleHMI(QMainWindow):
             queue_path
         )
 
-
         self.current_query = None
 
-        # Internal representation
         self.current_move = None
-
-
 
         # ====================================================
         # Main layout
@@ -73,11 +63,9 @@ class OracleHMI(QMainWindow):
             container
         )
 
-
         layout = QHBoxLayout(
             container
         )
-
 
         layout.setContentsMargins(
             20,
@@ -86,12 +74,9 @@ class OracleHMI(QMainWindow):
             20,
         )
 
-
         layout.setSpacing(
             25
         )
-
-
 
         # ====================================================
         # Board
@@ -99,17 +84,13 @@ class OracleHMI(QMainWindow):
 
         self.board = ChessBoardWidget()
 
-
         self.board.move_selected.connect(
             self.on_move_selected
         )
 
-
         layout.addWidget(
             self.board
         )
-
-
 
         # ====================================================
         # Right panel
@@ -121,20 +102,15 @@ class OracleHMI(QMainWindow):
             330
         )
 
-
         right = QVBoxLayout(
             right_widget
         )
-
 
         right.setSpacing(
             20
         )
 
-
         right.addStretch()
-
-
 
         # ----------------------------------------------------
         # Information
@@ -142,11 +118,9 @@ class OracleHMI(QMainWindow):
 
         self.info_label = QLabel()
 
-
         self.info_label.setAlignment(
             Qt.AlignmentFlag.AlignCenter
         )
-
 
         self.info_label.setStyleSheet(
             """
@@ -157,12 +131,9 @@ class OracleHMI(QMainWindow):
             """
         )
 
-
         right.addWidget(
             self.info_label
         )
-
-
 
         # ----------------------------------------------------
         # Take back
@@ -172,22 +143,17 @@ class OracleHMI(QMainWindow):
             "↩ Take back"
         )
 
-
         self.takeback_button.clicked.connect(
             self.take_back
         )
-
 
         self.takeback_button.setEnabled(
             False
         )
 
-
         right.addWidget(
             self.takeback_button
         )
-
-
 
         # ----------------------------------------------------
         # Annotation
@@ -195,30 +161,25 @@ class OracleHMI(QMainWindow):
 
         self.annotation = AnnotationPanel()
 
-
         self.annotation.validated.connect(
             self.submit_answer
         )
-
 
         right.addWidget(
             self.annotation
         )
 
-
         right.addStretch()
-
-
 
         layout.addWidget(
             right_widget
         )
 
-
+        # ====================================================
+        # Initial position
+        # ====================================================
 
         self.load_next()
-
-
 
     # ========================================================
     # Information display
@@ -233,21 +194,17 @@ class OracleHMI(QMainWindow):
 
             return
 
-
         side = (
             "White"
             if self.current_query.fen.split()[1] == "w"
             else "Black"
         )
 
-
         uncertainty = (
             self.current_query.score * 100
         )
 
-
-        remaining = self.queue.stats()["pending"]
-
+        stats = self.queue.stats()
 
         text = f"""
 <b>Side to move:</b><br>
@@ -261,9 +218,8 @@ class OracleHMI(QMainWindow):
 <br>
 
 <b>Queue remaining:</b><br>
-{remaining}
+{self.remaining_count()}
 """
-
 
         if extra:
 
@@ -272,12 +228,24 @@ class OracleHMI(QMainWindow):
 {extra}
 """
 
-
         self.info_label.setText(
             text
         )
 
+    # ========================================================
+    # Remaining count
+    # ========================================================
 
+    def remaining_count(
+        self,
+    ):
+
+        pending = self.queue.pending(
+            reward_mode=self.annotation.reward_enabled(),
+            oracle_mode=self.annotation.oracle_enabled(),
+        )
+
+        return len(pending)
 
     # ========================================================
     # Load next position
@@ -287,8 +255,10 @@ class OracleHMI(QMainWindow):
         self,
     ):
 
-        query = self.queue.next()
-
+        query = self.queue.next(
+            reward_mode=self.annotation.reward_enabled(),
+            oracle_mode=self.annotation.oracle_enabled(),
+        )
 
         if query is None:
 
@@ -298,10 +268,10 @@ class OracleHMI(QMainWindow):
                 """
                 <b>Queue completed.</b>
                 <br><br>
-                All positions have been annotated.
+                All positions have been annotated
+                for the active annotation modes.
                 """
             )
-
 
             self.board.setEnabled(
                 False
@@ -317,42 +287,31 @@ class OracleHMI(QMainWindow):
 
             return
 
-
-
         self.current_query = query
 
         self.current_move = None
-
-
 
         self.board.setEnabled(
             True
         )
 
-
         self.annotation.setEnabled(
             True
         )
-
 
         self.board.set_fen(
             query.fen
         )
 
-
         self.annotation.reset()
-
 
         self.takeback_button.setEnabled(
             False
         )
 
-
         self.update_info(
             "<b>No move selected</b>"
         )
-
-
 
     # ========================================================
     # Move selected
@@ -365,22 +324,17 @@ class OracleHMI(QMainWindow):
 
         self.current_move = uci
 
-
         san = self.board.san_from_uci(
             uci
         )
-
 
         self.takeback_button.setEnabled(
             True
         )
 
-
         self.update_info(
             f"<b>Selected move:</b><br>{san}"
         )
-
-
 
     # ========================================================
     # Take back
@@ -392,20 +346,15 @@ class OracleHMI(QMainWindow):
 
         self.board.take_back()
 
-
         self.current_move = None
-
 
         self.takeback_button.setEnabled(
             False
         )
 
-
         self.update_info(
             "<b>No move selected</b>"
         )
-
-
 
     # ========================================================
     # Submit annotation
@@ -420,27 +369,53 @@ class OracleHMI(QMainWindow):
 
             return
 
+        # ----------------------------------------------------
+        # Oracle mode requires a selected move.
+        # Reward-only mode does not.
+        # ----------------------------------------------------
 
+        if self.annotation.oracle_enabled():
 
-        if self.current_move is None:
+            if self.current_move is None:
+
+                self.update_info(
+                    "<b>Please select a move first.</b>"
+                )
+
+                return
+
+            annotation = {
+                **annotation,
+                "oracle_move": self.current_move,
+            }
+
+        # ----------------------------------------------------
+        # Save
+        # ----------------------------------------------------
+
+        try:
+
+            self.queue.answer(
+                query_id=self.current_query.query_id,
+                **annotation,
+            )
+
+        except (
+            ValueError,
+            KeyError,
+        ) as e:
 
             self.update_info(
-                "<b>Please select a move first.</b>"
+                f"<b>Error:</b><br>{e}"
             )
 
             return
 
-
-
-        self.queue.answer(
-            query_id=self.current_query.query_id,
-            oracle_move=self.current_move,
-            **annotation,
-        )
-
+        # ----------------------------------------------------
+        # Next
+        # ----------------------------------------------------
 
         self.load_next()
-
 
 
 def main():
@@ -449,16 +424,13 @@ def main():
         sys.argv
     )
 
-
     window = OracleHMI()
 
     window.show()
 
-
     sys.exit(
         app.exec()
     )
-
 
 
 if __name__ == "__main__":

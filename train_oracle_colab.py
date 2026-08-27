@@ -162,31 +162,13 @@ ORACLE_CONFIDENCE_WEIGHTS = {
 }
 
 
-ORACLE_POLICY_COEF = 1.0
+ORACLE_POLICY_COEF = 0.1
 
 
 # ============================================================
 # Oracle criticality
 #
 # Criticality controls the target temperature.
-#
-# Lower temperature:
-#   -> stronger concentration on oracle_move
-#
-# Higher temperature:
-#   -> more freedom among legal moves
-#
-# Interpretation:
-#
-# critical:
-#   "the precise choice matters"
-#
-# non_critical:
-#   "several choices can preserve the outcome"
-#
-# outcome_independent:
-#   "the immediate choice does not change the outcome,
-#    but the oracle move remains a useful preferred move"
 # ============================================================
 
 ORACLE_CRITICALITY_TEMPERATURES = {
@@ -200,6 +182,32 @@ ORACLE_CRITICALITY_TEMPERATURES = {
     "outcome_independent":
         1.00,
 }
+
+
+# ============================================================
+# Oracle reward
+#
+# IMPORTANT:
+#
+# Oracle reward is defined in the reference frame of the
+# PLAYER TO MOVE.
+#
+# Therefore:
+#
+#     reward = +1
+#         -> good decision for the player to move
+#
+#     reward = -1
+#         -> bad decision for the player to move
+#
+# The Oracle reward MUST NOT be transformed using
+# current_white.
+#
+# It is injected directly into the reward of the trajectory
+# step corresponding to the annotated FEN.
+# ============================================================
+
+ORACLE_REWARD_ENABLED = True
 
 
 # ============================================================
@@ -696,6 +704,16 @@ def prepare_oracle_data(
             )
 
 
+        # ----------------------------------------------------
+        # NEW:
+        # Oracle reward comes directly from the annotation.
+        # ----------------------------------------------------
+
+        reward = entry.get(
+            "reward"
+        )
+
+
         if fen is None:
 
             skipped += 1
@@ -737,6 +755,67 @@ def prepare_oracle_data(
 
             continue
 
+
+        # ----------------------------------------------------
+        # Reward validation
+        # ----------------------------------------------------
+
+        if reward is None:
+
+            print(
+                f"WARNING: Oracle annotation "
+                f"has no reward: {fen}"
+            )
+
+            skipped += 1
+
+            continue
+
+
+        try:
+
+            reward = float(
+                reward
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            print(
+                f"WARNING: invalid Oracle reward "
+                f"{reward!r} for FEN {fen}"
+            )
+
+            skipped += 1
+
+            continue
+
+
+        if not torch.isfinite(
+            torch.tensor(
+                reward
+            )
+        ):
+
+            print(
+                f"WARNING: non-finite Oracle reward "
+                f"{reward} for FEN {fen}"
+            )
+
+            skipped += 1
+
+            continue
+
+
+        # ----------------------------------------------------
+        # The current ALBERTA Oracle reward convention is
+        # player-to-move relative.
+        #
+        # We deliberately DO NOT transform it using
+        # current_white.
+        # ----------------------------------------------------
 
         try:
 
@@ -828,6 +907,10 @@ def prepare_oracle_data(
 
                 "criticality_temperature":
                     temperature,
+
+                # NEW
+                "reward":
+                    reward,
             }
         )
 
@@ -842,6 +925,46 @@ def prepare_oracle_data(
         f"Skipped Oracle annotations: "
         f"{skipped}"
     )
+
+
+    # ========================================================
+    # Reward distribution
+    # ========================================================
+
+    reward_counts = {}
+
+
+    for entry in oracle_data:
+
+        reward = entry["reward"]
+
+        reward_counts[reward] = (
+            reward_counts.get(
+                reward,
+                0,
+            )
+            + 1
+        )
+
+
+    print()
+
+    print(
+        "Oracle reward distribution:"
+    )
+
+
+    for (
+        reward,
+        count,
+    ) in sorted(
+        reward_counts.items()
+    ):
+
+        print(
+            f"  reward={reward:+.1f}: "
+            f"{count}"
+        )
 
 
     # ========================================================
@@ -906,6 +1029,91 @@ def prepare_oracle_data(
 
 
 # ============================================================
+# Oracle reward map
+# ============================================================
+
+def build_oracle_reward_map(
+    oracle_data,
+):
+    """
+    Build:
+
+        FEN -> Oracle reward
+
+    The reward is kept exactly in the annotation's
+    player-to-move reference frame.
+
+    No current_white transformation is performed.
+    """
+
+    reward_map = {}
+
+
+    conflicts = 0
+
+
+    for entry in oracle_data:
+
+        fen = entry["fen"]
+
+        reward = entry["reward"]
+
+
+        if fen in reward_map:
+
+            previous_reward = (
+                reward_map[fen]
+            )
+
+
+            if previous_reward != reward:
+
+                conflicts += 1
+
+                raise RuntimeError(
+                    "Conflicting Oracle rewards "
+                    f"for the same FEN:\n"
+                    f"FEN={fen}\n"
+                    f"previous={previous_reward}\n"
+                    f"new={reward}"
+                )
+
+
+            continue
+
+
+        reward_map[fen] = reward
+
+
+    print()
+
+    print(
+        "======================================"
+    )
+
+    print(
+        "ORACLE REWARD MAP"
+    )
+
+    print(
+        "======================================"
+    )
+
+    print(
+        f"Annotated FENs with reward: "
+        f"{len(reward_map)}"
+    )
+
+    print(
+        f"Reward conflicts: "
+        f"{conflicts}"
+    )
+
+
+    return reward_map
+
+
+# ============================================================
 # Oracle target distribution
 # ============================================================
 
@@ -915,29 +1123,6 @@ def build_oracle_target(
     temperature,
     device,
 ):
-    """
-    Build a soft oracle target distribution.
-
-    Legal moves receive finite logits.
-
-    The oracle action receives a logit of 1.
-    Other legal actions receive a logit of 0.
-
-    The logits are divided by temperature.
-
-    Lower T:
-        stronger concentration on oracle_action.
-
-    Higher T:
-        broader distribution.
-
-    Illegal actions:
-        probability 0.
-
-    IMPORTANT:
-        outcome_independent does NOT mean uniform.
-        T=1 still preserves a preference for oracle_action.
-    """
 
     num_actions = len(ACTIONS)
 
@@ -988,18 +1173,10 @@ def build_oracle_target(
     ] = True
 
 
-    # --------------------------------------------------------
-    # Legal moves receive baseline logit 0.
-    # --------------------------------------------------------
-
     target_logits[
         legal_mask
     ] = 0.0
 
-
-    # --------------------------------------------------------
-    # Oracle move receives preference logit 1.
-    # --------------------------------------------------------
 
     if not legal_mask[
         oracle_action
@@ -1015,10 +1192,6 @@ def build_oracle_target(
     ] = 1.0
 
 
-    # --------------------------------------------------------
-    # Temperature
-    # --------------------------------------------------------
-
     target_log_probs = F.log_softmax(
         target_logits / temperature,
         dim=0,
@@ -1030,22 +1203,11 @@ def build_oracle_target(
     )
 
 
-    # --------------------------------------------------------
-    # Numerical safety
-    # --------------------------------------------------------
-
     assert_finite_tensor(
         target_probs,
         "Oracle target probabilities",
     )
 
-
-    # --------------------------------------------------------
-    # Explicitly zero illegal actions.
-    #
-    # This also guarantees that later multiplication
-    # with safe log-probabilities cannot create NaN.
-    # --------------------------------------------------------
 
     target_probs = (
         target_probs
@@ -1055,10 +1217,6 @@ def build_oracle_target(
         )
     )
 
-
-    # --------------------------------------------------------
-    # Normalize once more for numerical robustness.
-    # --------------------------------------------------------
 
     target_sum = (
         target_probs.sum()
@@ -1927,23 +2085,6 @@ def train_oracle_epoch(
                     )
 
 
-                    # =================================================
-                    # IMPORTANT NUMERICAL FIX
-                    #
-                    # Illegal actions have:
-                    #
-                    #   target = 0
-                    #   log_prob = -inf
-                    #
-                    # Therefore:
-                    #
-                    #   0 * (-inf) = NaN
-                    #
-                    # We explicitly replace the illegal
-                    # log-probabilities by zero BEFORE the
-                    # multiplication.
-                    # =================================================
-
                     safe_oracle_log_probs = (
                         oracle_log_probs.masked_fill(
                             ~oracle_legal_mask,
@@ -1980,8 +2121,6 @@ def train_oracle_epoch(
 
                     # =================================================
                     # Cross entropy with soft target
-                    #
-                    # Only legal actions participate.
                     # =================================================
 
                     cross_entropy = -(
@@ -1990,10 +2129,6 @@ def train_oracle_epoch(
                         safe_oracle_log_probs
                     ).sum()
 
-
-                    # =================================================
-                    # Numerical safety
-                    # =================================================
 
                     if not torch.isfinite(
                         cross_entropy
@@ -2135,16 +2270,6 @@ def train_oracle_epoch(
                         )
 
 
-                    # =================================================
-                    # Confidence-weighted Oracle loss
-                    #
-                    # Confidence controls the strength
-                    # of the annotation.
-                    #
-                    # Criticality has already acted
-                    # through target temperature.
-                    # =================================================
-
                     oracle_policy_loss = (
                         (
                             policy_losses_tensor
@@ -2280,10 +2405,6 @@ def train_oracle_epoch(
             loss.backward()
 
 
-            # =================================================
-            # Gradient safety BEFORE clipping
-            # =================================================
-
             assert_gradients_finite(
                 model
             )
@@ -2295,10 +2416,6 @@ def train_oracle_epoch(
             )
 
 
-            # =================================================
-            # Gradient safety AFTER clipping
-            # =================================================
-
             assert_gradients_finite(
                 model
             )
@@ -2306,10 +2423,6 @@ def train_oracle_epoch(
 
             optimizer.step()
 
-
-            # =================================================
-            # Model safety AFTER update
-            # =================================================
 
             assert_model_finite(
                 model,
@@ -2470,10 +2583,6 @@ def train_oracle_epoch(
         avg_oracle_confidence = 0.0
 
 
-    # ========================================================
-    # Diagnostics
-    # ========================================================
-
     print()
 
     print(
@@ -2618,10 +2727,6 @@ def save_model_checkpoint(
     path,
 ):
 
-    # --------------------------------------------------------
-    # Never save a corrupted model.
-    # --------------------------------------------------------
-
     assert_model_finite(
         model,
         "model before checkpoint",
@@ -2695,6 +2800,17 @@ def main():
     oracle_data = (
         prepare_oracle_data(
             oracle_entries
+        )
+    )
+
+
+    # ========================================================
+    # Oracle reward map
+    # ========================================================
+
+    oracle_reward_map = (
+        build_oracle_reward_map(
+            oracle_data
         )
     )
 
@@ -2989,6 +3105,19 @@ def main():
 
 
             # =================================================
+            # Oracle reward diagnostics
+            # =================================================
+
+            oracle_hits = 0
+
+            oracle_positive_hits = 0
+
+            oracle_negative_hits = 0
+
+            oracle_reward_sum = 0.0
+
+
+            # =================================================
             # Construction RL replay buffer
             # =================================================
 
@@ -3049,6 +3178,83 @@ def main():
                 ] * len(trajectory)
 
 
+                # =================================================
+                # Oracle reward injection
+                #
+                # IMPORTANT:
+                #
+                # reward is read directly from the annotated FEN.
+                #
+                # +1 means:
+                #     good decision for the player to move.
+                #
+                # -1 means:
+                #     bad decision for the player to move.
+                #
+                # There is NO conversion using current_white.
+                #
+                # This happens BEFORE GAE.
+                # =================================================
+
+                game_oracle_hits = 0
+
+
+                if (
+                    ORACLE_REWARD_ENABLED
+                    and trajectory
+                ):
+
+                    for step_index, step in enumerate(
+                        trajectory
+                    ):
+
+                        fen = step["fen"]
+
+
+                        if fen not in (
+                            oracle_reward_map
+                        ):
+
+                            continue
+
+
+                        oracle_reward = (
+                            oracle_reward_map[
+                                fen
+                            ]
+                        )
+
+
+                        rewards[
+                            step_index
+                        ] += oracle_reward
+
+
+                        game_oracle_hits += 1
+
+
+                        oracle_hits += 1
+
+
+                        oracle_reward_sum += (
+                            oracle_reward
+                        )
+
+
+                        if oracle_reward > 0:
+
+                            oracle_positive_hits += 1
+
+
+                        elif oracle_reward < 0:
+
+                            oracle_negative_hits += 1
+
+
+                # ------------------------------------------------
+                # Terminal reward
+                # ------------------------------------------------
+
                 if trajectory:
 
                     if result == "1-0":
@@ -3080,13 +3286,35 @@ def main():
                         terminal_reward = 0.0
 
 
-                    rewards[-1] = (
+                    rewards[-1] += (
                         terminal_reward
                     )
 
 
                 # ------------------------------------------------
+                # Diagnostics for Oracle hits
+                # ------------------------------------------------
+
+                if game_oracle_hits > 0:
+
+                    print(
+                        f"Oracle reward hit: "
+                        f"{game_oracle_hits} "
+                        f"annotation(s) in game",
+                        flush=True,
+                    )
+
+
+                # ------------------------------------------------
                 # GAE
+                #
+                # CRITICAL:
+                #
+                # GAE now sees the Oracle-enriched reward vector.
+                #
+                # Therefore Oracle reward propagates backward
+                # through the trajectory into returns and
+                # advantages.
                 # ------------------------------------------------
 
                 advantages, returns = (
@@ -3156,9 +3384,41 @@ def main():
             )
 
 
+            # =================================================
+            # Oracle reward diagnostics
+            # =================================================
+
             print(
                 f"Oracle annotations available: "
                 f"{len(oracle_buffer)}",
+                flush=True,
+            )
+
+
+            print(
+                f"Oracle reward hits: "
+                f"{oracle_hits}",
+                flush=True,
+            )
+
+
+            print(
+                f"  Positive hits: "
+                f"{oracle_positive_hits}",
+                flush=True,
+            )
+
+
+            print(
+                f"  Negative hits: "
+                f"{oracle_negative_hits}",
+                flush=True,
+            )
+
+
+            print(
+                f"  Oracle reward sum: "
+                f"{oracle_reward_sum:+.1f}",
                 flush=True,
             )
 
@@ -3443,6 +3703,20 @@ def main():
                 f"{losses}L / "
                 f"{draws}D "
                 f"({score_rate:.1%})",
+                flush=True,
+            )
+
+
+            print(
+                f"Oracle reward hits: "
+                f"{oracle_hits}",
+                flush=True,
+            )
+
+
+            print(
+                f"Oracle reward sum: "
+                f"{oracle_reward_sum:+.1f}",
                 flush=True,
             )
 
