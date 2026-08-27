@@ -107,6 +107,27 @@ GAE_LAMBDA = 0.95
 
 
 # ============================================================
+# Oracle value
+# ============================================================
+
+# Strength of the Oracle value supervision.
+#
+# This is deliberately separate from VALUE_COEF because:
+#
+# VALUE_COEF:
+#     ordinary self-play critic
+#
+# ORACLE_VALUE_COEF:
+#     human Oracle value supervision
+#
+# The Oracle policy and Oracle value therefore have
+# independently controllable strengths.
+# ============================================================
+
+ORACLE_VALUE_COEF = 0.10
+
+
+# ============================================================
 # PPO diagnostics
 # ============================================================
 
@@ -140,13 +161,6 @@ ORACLE_QUEUE_PATH = (
 
 # ============================================================
 # Oracle policy confidence
-#
-# Confidence = importance / trust of annotation.
-#
-# It controls HOW MUCH the annotation contributes
-# to the Oracle policy loss.
-#
-# It does NOT alter the target distribution.
 # ============================================================
 
 ORACLE_CONFIDENCE_WEIGHTS = {
@@ -167,8 +181,6 @@ ORACLE_POLICY_COEF = 0.1
 
 # ============================================================
 # Oracle criticality
-#
-# Criticality controls the target temperature.
 # ============================================================
 
 ORACLE_CRITICALITY_TEMPERATURES = {
@@ -182,32 +194,6 @@ ORACLE_CRITICALITY_TEMPERATURES = {
     "outcome_independent":
         1.00,
 }
-
-
-# ============================================================
-# Oracle reward
-#
-# IMPORTANT:
-#
-# Oracle reward is defined in the reference frame of the
-# PLAYER TO MOVE.
-#
-# Therefore:
-#
-#     reward = +1
-#         -> good decision for the player to move
-#
-#     reward = -1
-#         -> bad decision for the player to move
-#
-# The Oracle reward MUST NOT be transformed using
-# current_white.
-#
-# It is injected directly into the reward of the trajectory
-# step corresponding to the annotated FEN.
-# ============================================================
-
-ORACLE_REWARD_ENABLED = True
 
 
 # ============================================================
@@ -652,6 +638,69 @@ def load_oracle_queue():
     )
 
 
+    # ========================================================
+    # Reward diagnostics
+    # ========================================================
+
+    reward_counts = {
+        -1.0: 0,
+         0.0: 0,
+         1.0: 0,
+    }
+
+
+    for entry in entries:
+
+        reward = entry.get(
+            "reward"
+        )
+
+
+        if reward is None:
+
+            continue
+
+
+        try:
+
+            reward = float(
+                reward
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            continue
+
+
+        if reward in reward_counts:
+
+            reward_counts[
+                reward
+            ] += 1
+
+
+    print()
+
+    print(
+        "Oracle reward distribution:"
+    )
+
+
+    for reward in (
+        -1.0,
+         0.0,
+         1.0,
+    ):
+
+        print(
+            f"  reward={reward:+.1f}: "
+            f"{reward_counts[reward]}"
+        )
+
+
     return entries
 
 
@@ -680,6 +729,11 @@ def prepare_oracle_data(
         )
 
 
+        reward = entry.get(
+            "reward"
+        )
+
+
         confidence = entry.get(
             "confidence"
         )
@@ -704,16 +758,6 @@ def prepare_oracle_data(
             )
 
 
-        # ----------------------------------------------------
-        # NEW:
-        # Oracle reward comes directly from the annotation.
-        # ----------------------------------------------------
-
-        reward = entry.get(
-            "reward"
-        )
-
-
         if fen is None:
 
             skipped += 1
@@ -722,6 +766,61 @@ def prepare_oracle_data(
 
 
         if oracle_move is None:
+
+            skipped += 1
+
+            continue
+
+
+        # ----------------------------------------------------
+        # Reward is fundamental.
+        #
+        # Every answered Oracle annotation must have one.
+        # ----------------------------------------------------
+
+        if reward is None:
+
+            print(
+                "WARNING: Oracle annotation "
+                "has no reward."
+            )
+
+            skipped += 1
+
+            continue
+
+
+        try:
+
+            reward = float(
+                reward
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            print(
+                f"WARNING: invalid Oracle "
+                f"reward={reward}"
+            )
+
+            skipped += 1
+
+            continue
+
+
+        if reward not in (
+            -1.0,
+             0.0,
+             1.0,
+        ):
+
+            print(
+                f"WARNING: Oracle reward must "
+                f"be -1, 0 or +1, got {reward}"
+            )
 
             skipped += 1
 
@@ -755,67 +854,6 @@ def prepare_oracle_data(
 
             continue
 
-
-        # ----------------------------------------------------
-        # Reward validation
-        # ----------------------------------------------------
-
-        if reward is None:
-
-            print(
-                f"WARNING: Oracle annotation "
-                f"has no reward: {fen}"
-            )
-
-            skipped += 1
-
-            continue
-
-
-        try:
-
-            reward = float(
-                reward
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-
-            print(
-                f"WARNING: invalid Oracle reward "
-                f"{reward!r} for FEN {fen}"
-            )
-
-            skipped += 1
-
-            continue
-
-
-        if not torch.isfinite(
-            torch.tensor(
-                reward
-            )
-        ):
-
-            print(
-                f"WARNING: non-finite Oracle reward "
-                f"{reward} for FEN {fen}"
-            )
-
-            skipped += 1
-
-            continue
-
-
-        # ----------------------------------------------------
-        # The current ALBERTA Oracle reward convention is
-        # player-to-move relative.
-        #
-        # We deliberately DO NOT transform it using
-        # current_white.
-        # ----------------------------------------------------
 
         try:
 
@@ -896,6 +934,9 @@ def prepare_oracle_data(
                 "action":
                     action_index,
 
+                "reward":
+                    reward,
+
                 "confidence":
                     confidence,
 
@@ -907,10 +948,6 @@ def prepare_oracle_data(
 
                 "criticality_temperature":
                     temperature,
-
-                # NEW
-                "reward":
-                    reward,
             }
         )
 
@@ -931,20 +968,18 @@ def prepare_oracle_data(
     # Reward distribution
     # ========================================================
 
-    reward_counts = {}
+    counts = {
+        -1.0: 0,
+         0.0: 0,
+         1.0: 0,
+    }
 
 
     for entry in oracle_data:
 
-        reward = entry["reward"]
-
-        reward_counts[reward] = (
-            reward_counts.get(
-                reward,
-                0,
-            )
-            + 1
-        )
+        counts[
+            entry["reward"]
+        ] += 1
 
 
     print()
@@ -954,16 +989,15 @@ def prepare_oracle_data(
     )
 
 
-    for (
-        reward,
-        count,
-    ) in sorted(
-        reward_counts.items()
+    for reward in (
+        -1.0,
+         0.0,
+         1.0,
     ):
 
         print(
             f"  reward={reward:+.1f}: "
-            f"{count}"
+            f"{counts[reward]}"
         )
 
 
@@ -971,7 +1005,7 @@ def prepare_oracle_data(
     # Criticality distribution
     # ========================================================
 
-    counts = {
+    criticality_counts = {
 
         "outcome_independent":
             0,
@@ -986,7 +1020,7 @@ def prepare_oracle_data(
 
     for entry in oracle_data:
 
-        counts[
+        criticality_counts[
             entry["criticality"]
         ] += 1
 
@@ -1001,7 +1035,7 @@ def prepare_oracle_data(
     for (
         name,
         count,
-    ) in counts.items():
+    ) in criticality_counts.items():
 
         print(
             f"  {name}: {count}"
@@ -1026,91 +1060,6 @@ def prepare_oracle_data(
 
 
     return oracle_data
-
-
-# ============================================================
-# Oracle reward map
-# ============================================================
-
-def build_oracle_reward_map(
-    oracle_data,
-):
-    """
-    Build:
-
-        FEN -> Oracle reward
-
-    The reward is kept exactly in the annotation's
-    player-to-move reference frame.
-
-    No current_white transformation is performed.
-    """
-
-    reward_map = {}
-
-
-    conflicts = 0
-
-
-    for entry in oracle_data:
-
-        fen = entry["fen"]
-
-        reward = entry["reward"]
-
-
-        if fen in reward_map:
-
-            previous_reward = (
-                reward_map[fen]
-            )
-
-
-            if previous_reward != reward:
-
-                conflicts += 1
-
-                raise RuntimeError(
-                    "Conflicting Oracle rewards "
-                    f"for the same FEN:\n"
-                    f"FEN={fen}\n"
-                    f"previous={previous_reward}\n"
-                    f"new={reward}"
-                )
-
-
-            continue
-
-
-        reward_map[fen] = reward
-
-
-    print()
-
-    print(
-        "======================================"
-    )
-
-    print(
-        "ORACLE REWARD MAP"
-    )
-
-    print(
-        "======================================"
-    )
-
-    print(
-        f"Annotated FENs with reward: "
-        f"{len(reward_map)}"
-    )
-
-    print(
-        f"Reward conflicts: "
-        f"{conflicts}"
-    )
-
-
-    return reward_map
 
 
 # ============================================================
@@ -1257,7 +1206,140 @@ def build_oracle_target(
 
 
 # ============================================================
-# Oracle policy training
+# Oracle value target
+# ============================================================
+
+def compute_oracle_value_target(
+    model,
+    oracle_board,
+    oracle_move,
+    reward,
+):
+
+    """
+    Compute the Oracle value target.
+
+    The Oracle reward is defined in the reference frame
+    of the player to move in the annotated FEN.
+
+    After oracle_move, the player to move changes.
+
+    Therefore:
+
+        V(s) = r + gamma * V_next_in_same_reference_frame
+
+    but the model evaluates s' from the opponent's
+    point of view, so:
+
+        V(s) = r - gamma * V(s')
+
+    where V(s') is the value from the new side-to-move
+    perspective.
+
+    Terminal successor:
+        no bootstrap is used.
+
+    Non-terminal successor:
+        one-step Oracle TD target is used.
+
+    The bootstrap value is detached.
+    """
+
+    board_after = (
+        oracle_board.copy(
+            stack=False
+        )
+    )
+
+
+    board_after.push(
+        oracle_move
+    )
+
+
+    # --------------------------------------------------------
+    # Terminal successor
+    # --------------------------------------------------------
+
+    if board_after.is_game_over():
+
+        return torch.tensor(
+            reward,
+            device=DEVICE,
+            dtype=torch.float32,
+        )
+
+
+    # --------------------------------------------------------
+    # Non-terminal successor
+    # --------------------------------------------------------
+
+    next_x = encode_boards(
+        [board_after]
+    ).to(DEVICE)
+
+
+    with torch.no_grad():
+
+        _, next_value = model(
+            next_x
+        )
+
+
+    assert_finite_tensor(
+        next_value,
+        "Oracle successor value",
+    )
+
+
+    next_value = (
+        next_value
+        .reshape(-1)[0]
+    )
+
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # next_value is from the opponent's perspective.
+    #
+    # Oracle reward is from the current player's
+    # perspective.
+    #
+    # Therefore the bootstrap is NEGATED.
+    # --------------------------------------------------------
+
+    target = (
+        torch.tensor(
+            reward,
+            device=DEVICE,
+            dtype=torch.float32,
+        )
+        -
+        GAMMA
+        *
+        next_value
+    )
+
+
+    target = torch.clamp(
+        target,
+        min=-1.0,
+        max=1.0,
+    )
+
+
+    assert_finite_tensor(
+        target,
+        "Oracle value target",
+    )
+
+
+    return target.detach()
+
+
+# ============================================================
+# Oracle policy + value training
 # ============================================================
 
 def train_oracle_epoch(
@@ -1313,6 +1395,7 @@ def train_oracle_epoch(
             0.0,
             0.0,
             0.0,
+            0.0,
         )
 
 
@@ -1330,6 +1413,8 @@ def train_oracle_epoch(
     total_critic = 0.0
 
     total_oracle_policy = 0.0
+
+    total_oracle_value = 0.0
 
     total_kl = 0.0
 
@@ -1867,6 +1952,12 @@ def train_oracle_epoch(
             )
 
 
+            oracle_value_loss = torch.tensor(
+                0.0,
+                device=DEVICE,
+            )
+
+
             oracle_policy_count = 0
 
 
@@ -1919,6 +2010,10 @@ def train_oracle_epoch(
 
                 policy_weights = []
 
+                value_losses = []
+
+                value_weights = []
+
 
                 batch_confidence_weight = 0.0
 
@@ -1938,6 +2033,11 @@ def train_oracle_epoch(
                     )
 
 
+                    reward = float(
+                        entry["reward"]
+                    )
+
+
                     confidence = (
                         entry["confidence"]
                     )
@@ -1945,6 +2045,20 @@ def train_oracle_epoch(
 
                     criticality = (
                         entry["criticality"]
+                    )
+
+
+                    confidence_weight = (
+                        ORACLE_CONFIDENCE_WEIGHTS[
+                            confidence
+                        ]
+                    )
+
+
+                    temperature = (
+                        ORACLE_CRITICALITY_TEMPERATURES[
+                            criticality
+                        ]
                     )
 
 
@@ -2003,20 +2117,6 @@ def train_oracle_epoch(
                         )
 
                         continue
-
-
-                    confidence_weight = (
-                        ORACLE_CONFIDENCE_WEIGHTS[
-                            confidence
-                        ]
-                    )
-
-
-                    temperature = (
-                        ORACLE_CRITICALITY_TEMPERATURES[
-                            criticality
-                        ]
-                    )
 
 
                     if (
@@ -2120,7 +2220,7 @@ def train_oracle_epoch(
 
 
                     # =================================================
-                    # Cross entropy with soft target
+                    # Policy cross entropy
                     # =================================================
 
                     cross_entropy = -(
@@ -2133,59 +2233,6 @@ def train_oracle_epoch(
                     if not torch.isfinite(
                         cross_entropy
                     ):
-
-                        print()
-                        print(
-                            "======================================"
-                        )
-                        print(
-                            "ORACLE NUMERICAL ERROR"
-                        )
-                        print(
-                            "======================================"
-                        )
-
-                        print(
-                            f"Oracle move : {oracle_move}"
-                        )
-
-                        print(
-                            f"Confidence  : {confidence}"
-                        )
-
-                        print(
-                            f"Weight      : "
-                            f"{confidence_weight}"
-                        )
-
-                        print(
-                            f"Criticality : {criticality}"
-                        )
-
-                        print(
-                            f"Temperature : "
-                            f"{temperature}"
-                        )
-
-                        print(
-                            f"Legal moves: "
-                            f"{len(legal_ids)}"
-                        )
-
-                        print(
-                            f"Target sum: "
-                            f"{target_probs.sum().item()}"
-                        )
-
-                        print(
-                            f"Target min: "
-                            f"{target_probs.min().item()}"
-                        )
-
-                        print(
-                            f"Target max: "
-                            f"{target_probs.max().item()}"
-                        )
 
                         raise RuntimeError(
                             "Oracle cross-entropy "
@@ -2203,6 +2250,80 @@ def train_oracle_epoch(
                     )
 
 
+                    # =================================================
+                    # Oracle VALUE target
+                    # =================================================
+                    #
+                    # reward is defined from the perspective
+                    # of the player to move in the annotated FEN.
+                    #
+                    # After oracle_move, the side to move changes.
+                    #
+                    # Therefore:
+                    #
+                    #   target = reward - gamma * V(next)
+                    #
+                    # The minus sign is essential.
+                    # =================================================
+
+                    oracle_value_target = (
+                        compute_oracle_value_target(
+                            model=model,
+                            oracle_board=board,
+                            oracle_move=board.parse_uci(
+                                oracle_move
+                            ),
+                            reward=reward,
+                        )
+                    )
+
+
+                    # ------------------------------------------------
+                    # Current V(s)
+                    # ------------------------------------------------
+
+                    current_value = (
+                        model(
+                            oracle_x[i:i + 1]
+                        )[1]
+                        .reshape(-1)[0]
+                    )
+
+
+                    assert_finite_tensor(
+                        current_value,
+                        "Oracle current value",
+                    )
+
+
+                    assert_finite_tensor(
+                        oracle_value_target,
+                        "Oracle value target",
+                    )
+
+
+                    value_loss = F.mse_loss(
+                        current_value,
+                        oracle_value_target,
+                    )
+
+
+                    assert_finite_tensor(
+                        value_loss,
+                        "Oracle value loss",
+                    )
+
+
+                    value_losses.append(
+                        value_loss
+                    )
+
+
+                    value_weights.append(
+                        confidence_weight
+                    )
+
+
                     batch_confidence_weight += (
                         confidence_weight
                     )
@@ -2214,7 +2335,7 @@ def train_oracle_epoch(
 
 
                 # =================================================
-                # Aggregate Oracle loss
+                # Aggregate Oracle policy loss
                 # =================================================
 
                 if policy_losses:
@@ -2232,18 +2353,6 @@ def train_oracle_epoch(
                             device=DEVICE,
                             dtype=torch.float32,
                         )
-                    )
-
-
-                    assert_finite_tensor(
-                        policy_losses_tensor,
-                        "Oracle policy losses",
-                    )
-
-
-                    assert_finite_tensor(
-                        policy_weights_tensor,
-                        "Oracle policy weights",
                     )
 
 
@@ -2291,8 +2400,74 @@ def train_oracle_epoch(
                     )
 
 
+                # =================================================
+                # Aggregate Oracle value loss
+                # =================================================
+
+                if value_losses:
+
+                    value_losses_tensor = (
+                        torch.stack(
+                            value_losses
+                        )
+                    )
+
+
+                    value_weights_tensor = (
+                        torch.tensor(
+                            value_weights,
+                            device=DEVICE,
+                            dtype=torch.float32,
+                        )
+                    )
+
+
+                    value_weight_sum = (
+                        value_weights_tensor.sum()
+                    )
+
+
+                    if not torch.isfinite(
+                        value_weight_sum
+                    ):
+
+                        raise RuntimeError(
+                            "Oracle value weight sum "
+                            "became non-finite."
+                        )
+
+
+                    if value_weight_sum <= 0.0:
+
+                        raise RuntimeError(
+                            "Oracle value weight sum "
+                            "is zero."
+                        )
+
+
+                    oracle_value_loss = (
+                        (
+                            value_losses_tensor
+                            *
+                            value_weights_tensor
+                        ).sum()
+                        /
+                        (
+                            value_weight_sum
+                            +
+                            FINITE_EPS
+                        )
+                    )
+
+
+                    assert_finite_tensor(
+                        oracle_value_loss,
+                        "Oracle value loss",
+                    )
+
+
                     oracle_policy_count = (
-                        len(policy_losses)
+                        len(value_losses)
                     )
 
 
@@ -2341,6 +2516,12 @@ def train_oracle_epoch(
                 ORACLE_POLICY_COEF
                 *
                 oracle_policy_loss
+
+                +
+
+                ORACLE_VALUE_COEF
+                *
+                oracle_value_loss
             )
 
 
@@ -2364,27 +2545,32 @@ def train_oracle_epoch(
                 )
 
                 print(
-                    f"Actor       : "
+                    f"Actor        : "
                     f"{actor_loss.item()}"
                 )
 
                 print(
-                    f"Critic      : "
+                    f"Critic       : "
                     f"{critic_loss.item()}"
                 )
 
                 print(
-                    f"Entropy     : "
+                    f"Entropy      : "
                     f"{entropy.item()}"
                 )
 
                 print(
-                    f"Oracle      : "
+                    f"OraclePolicy : "
                     f"{oracle_policy_loss.item()}"
                 )
 
                 print(
-                    f"KL          : "
+                    f"OracleValue  : "
+                    f"{oracle_value_loss.item()}"
+                )
+
+                print(
+                    f"KL           : "
                     f"{approx_kl.item()}"
                 )
 
@@ -2454,6 +2640,11 @@ def train_oracle_epoch(
             )
 
 
+            total_oracle_value += (
+                oracle_value_loss.item()
+            )
+
+
             total_kl += (
                 approx_kl.item()
             )
@@ -2502,6 +2693,13 @@ def train_oracle_epoch(
     )
 
 
+    avg_oracle_value = (
+        total_oracle_value
+        /
+        total_updates
+    )
+
+
     avg_kl = (
         total_kl
         /
@@ -2517,7 +2715,7 @@ def train_oracle_epoch(
 
 
     # ========================================================
-    # Final average safety
+    # Final safety
     # ========================================================
 
     for (
@@ -2536,6 +2734,9 @@ def train_oracle_epoch(
 
         "avg_oracle_policy":
             avg_oracle_policy,
+
+        "avg_oracle_value":
+            avg_oracle_value,
 
         "avg_kl":
             avg_kl,
@@ -2611,6 +2812,12 @@ def train_oracle_epoch(
 
 
     print(
+        f"Oracle value coefficient: "
+        f"{ORACLE_VALUE_COEF:.4f}"
+    )
+
+
+    print(
         "Oracle confidence weights: "
         "low=0.50 / medium=0.75 / high=0.99"
     )
@@ -2656,6 +2863,12 @@ def train_oracle_epoch(
 
 
     print(
+        f"Oracle value loss: "
+        f"{avg_oracle_value:.6f}"
+    )
+
+
+    print(
         f"Policy KL: "
         f"{avg_kl:.6e}"
     )
@@ -2677,6 +2890,7 @@ def train_oracle_epoch(
         avg_actor,
         avg_critic,
         avg_oracle_policy,
+        avg_oracle_value,
         avg_kl,
     )
 
@@ -2805,17 +3019,6 @@ def main():
 
 
     # ========================================================
-    # Oracle reward map
-    # ========================================================
-
-    oracle_reward_map = (
-        build_oracle_reward_map(
-            oracle_data
-        )
-    )
-
-
-    # ========================================================
     # RL model
     # ========================================================
 
@@ -2863,6 +3066,7 @@ def main():
             entry["oracle_move"],
             entry["confidence"],
             entry["criticality"],
+            entry["reward"],
         )
 
 
@@ -3105,19 +3309,6 @@ def main():
 
 
             # =================================================
-            # Oracle reward diagnostics
-            # =================================================
-
-            oracle_hits = 0
-
-            oracle_positive_hits = 0
-
-            oracle_negative_hits = 0
-
-            oracle_reward_sum = 0.0
-
-
-            # =================================================
             # Construction RL replay buffer
             # =================================================
 
@@ -3178,83 +3369,6 @@ def main():
                 ] * len(trajectory)
 
 
-                # =================================================
-                # Oracle reward injection
-                #
-                # IMPORTANT:
-                #
-                # reward is read directly from the annotated FEN.
-                #
-                # +1 means:
-                #     good decision for the player to move.
-                #
-                # -1 means:
-                #     bad decision for the player to move.
-                #
-                # There is NO conversion using current_white.
-                #
-                # This happens BEFORE GAE.
-                # =================================================
-
-                game_oracle_hits = 0
-
-
-                if (
-                    ORACLE_REWARD_ENABLED
-                    and trajectory
-                ):
-
-                    for step_index, step in enumerate(
-                        trajectory
-                    ):
-
-                        fen = step["fen"]
-
-
-                        if fen not in (
-                            oracle_reward_map
-                        ):
-
-                            continue
-
-
-                        oracle_reward = (
-                            oracle_reward_map[
-                                fen
-                            ]
-                        )
-
-
-                        rewards[
-                            step_index
-                        ] += oracle_reward
-
-
-                        game_oracle_hits += 1
-
-
-                        oracle_hits += 1
-
-
-                        oracle_reward_sum += (
-                            oracle_reward
-                        )
-
-
-                        if oracle_reward > 0:
-
-                            oracle_positive_hits += 1
-
-
-                        elif oracle_reward < 0:
-
-                            oracle_negative_hits += 1
-
-
-                # ------------------------------------------------
-                # Terminal reward
-                # ------------------------------------------------
-
                 if trajectory:
 
                     if result == "1-0":
@@ -3286,35 +3400,13 @@ def main():
                         terminal_reward = 0.0
 
 
-                    rewards[-1] += (
+                    rewards[-1] = (
                         terminal_reward
                     )
 
 
                 # ------------------------------------------------
-                # Diagnostics for Oracle hits
-                # ------------------------------------------------
-
-                if game_oracle_hits > 0:
-
-                    print(
-                        f"Oracle reward hit: "
-                        f"{game_oracle_hits} "
-                        f"annotation(s) in game",
-                        flush=True,
-                    )
-
-
-                # ------------------------------------------------
                 # GAE
-                #
-                # CRITICAL:
-                #
-                # GAE now sees the Oracle-enriched reward vector.
-                #
-                # Therefore Oracle reward propagates backward
-                # through the trajectory into returns and
-                # advantages.
                 # ------------------------------------------------
 
                 advantages, returns = (
@@ -3384,10 +3476,6 @@ def main():
             )
 
 
-            # =================================================
-            # Oracle reward diagnostics
-            # =================================================
-
             print(
                 f"Oracle annotations available: "
                 f"{len(oracle_buffer)}",
@@ -3395,36 +3483,23 @@ def main():
             )
 
 
-            print(
-                f"Oracle reward hits: "
-                f"{oracle_hits}",
-                flush=True,
-            )
-
-
-            print(
-                f"  Positive hits: "
-                f"{oracle_positive_hits}",
-                flush=True,
-            )
-
-
-            print(
-                f"  Negative hits: "
-                f"{oracle_negative_hits}",
-                flush=True,
-            )
-
-
-            print(
-                f"  Oracle reward sum: "
-                f"{oracle_reward_sum:+.1f}",
-                flush=True,
-            )
-
+            # =================================================
+            # Oracle is HISTORICAL.
+            #
+            # There is deliberately NO:
+            #
+            #     oracle reward hit
+            #
+            #     FEN matching against self-play
+            #
+            #     injection into current trajectory
+            #
+            # Oracle annotations are trained directly from
+            # OracleReplayBuffer.
+            # =================================================
 
             # =================================================
-            # RL / Oracle policy
+            # RL / Oracle policy + value
             # =================================================
 
             (
@@ -3432,6 +3507,7 @@ def main():
                 actor_loss,
                 critic_loss,
                 oracle_policy_loss,
+                oracle_value_loss,
                 approx_kl,
             ) = train_oracle_epoch(
                 model=model,
@@ -3447,6 +3523,7 @@ def main():
                 f"| Actor={actor_loss:.4f} "
                 f"| Critic={critic_loss:.4f} "
                 f"| OraclePolicy={oracle_policy_loss:.4f} "
+                f"| OracleValue={oracle_value_loss:.4f} "
                 f"| KL={approx_kl:.6f}",
                 flush=True,
             )
@@ -3708,22 +3785,15 @@ def main():
 
 
             print(
-                f"Oracle reward hits: "
-                f"{oracle_hits}",
-                flush=True,
-            )
-
-
-            print(
-                f"Oracle reward sum: "
-                f"{oracle_reward_sum:+.1f}",
-                flush=True,
-            )
-
-
-            print(
-                f"RL Oracle policy loss: "
+                f"Oracle policy loss: "
                 f"{oracle_policy_loss:.6f}",
+                flush=True,
+            )
+
+
+            print(
+                f"Oracle value loss: "
+                f"{oracle_value_loss:.6f}",
                 flush=True,
             )
 

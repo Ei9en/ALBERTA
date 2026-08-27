@@ -21,6 +21,7 @@ class OracleReplayBuffer:
         oracle_move,
         confidence,
         criticality,
+        reward,
     ):
 
         self.buffer.append({
@@ -36,6 +37,9 @@ class OracleReplayBuffer:
 
             "criticality":
                 criticality,
+
+            "reward":
+                reward,
         })
 
 
