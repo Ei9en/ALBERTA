@@ -31,7 +31,7 @@ RL2_CHECKPOINT = (
     / "oracle_epoch_20.pt"
 )
 
-GAMES = 100
+GAMES = 1000
 TEMPERATURE = 2
 
 
@@ -112,15 +112,15 @@ def play_game(
 def main():
 
     print("=" * 70)
-    print("ALBERTA - RL10 vs RL20")
+    print("ALBERTA - RL vs AL")
     print("=" * 70)
 
     print(
-        f"RL10  : {RL1_CHECKPOINT}"
+        f"RL  : {RL1_CHECKPOINT}"
     )
 
     print(
-        f"RL20: {RL2_CHECKPOINT}"
+        f"AL: {RL2_CHECKPOINT}"
     )
 
     print(
@@ -141,13 +141,13 @@ def main():
     # Load models
     # --------------------------------------------------------
 
-    print("Loading RL10...")
+    print("Loading RL...")
 
     rl10 = load_model(
         RL1_CHECKPOINT
     )
 
-    print("Loading RL20...")
+    print("Loading AL...")
 
     rlal10 = load_model(
         RL2_CHECKPOINT
@@ -188,7 +188,7 @@ def main():
 
         print(
             f"Game {i + 1:2d}/{GAMES}: "
-            f"RL10 White vs RL20 Black -> "
+            f"RL White vs AL Black -> "
             f"{result}"
         )
 
@@ -219,7 +219,7 @@ def main():
 
         print(
             f"Game {GAMES // 2 + i + 1:2d}/{GAMES}: "
-            f"RL20 White vs RL10 Black -> "
+            f"AL White vs RL Black -> "
             f"{result}"
         )
 
@@ -243,11 +243,11 @@ def main():
     print("=" * 70)
 
     print(
-        f"RL10   wins : {rl10_wins}"
+        f"RL   wins : {rl10_wins}"
     )
 
     print(
-        f"RL20 wins : {rlal10_wins}"
+        f"AL wins : {rlal10_wins}"
     )
 
     print(
@@ -257,12 +257,12 @@ def main():
     print()
 
     print(
-        f"RL10 score   : "
+        f"RL score   : "
         f"{rl10_score / GAMES * 100:.1f}%"
     )
 
     print(
-        f"RL20 score : "
+        f"AL score : "
         f"{rlal10_score / GAMES * 100:.1f}%"
     )
 
@@ -270,11 +270,11 @@ def main():
 
     if rl10_score > rlal10_score:
 
-        print("Winner: RL10")
+        print("Winner: RL")
 
     elif rlal10_score > rl10_score:
 
-        print("Winner: RL20")
+        print("Winner: AL")
 
     else:
 

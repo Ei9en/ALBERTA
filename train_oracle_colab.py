@@ -53,7 +53,7 @@ PROJECT_ROOT = Path(
 # Temperature
 # ============================================================
 
-TEMPERATURE_SELFPLAY = 2
+TEMPERATURE_SELFPLAY = 2.0
 
 
 # ============================================================
@@ -72,7 +72,7 @@ CHECKPOINT_EPOCH = START_EPOCH - 1
 LEAGUE_DIR = (
     PROJECT_ROOT
     / "checkpoints"
-    / "league"
+    / "league_al"
 )
 
 
@@ -141,12 +141,12 @@ ORACLE_QUEUE_PATH = (
 # ============================================================
 # Oracle policy confidence
 #
-# Confidence = trust in the annotation.
+# Confidence = importance / trust of annotation.
 #
 # It controls HOW MUCH the annotation contributes
 # to the Oracle policy loss.
 #
-# It does NOT control target distribution shape.
+# It does NOT alter the target distribution.
 # ============================================================
 
 ORACLE_CONFIDENCE_WEIGHTS = {
@@ -168,43 +168,124 @@ ORACLE_POLICY_COEF = 1.0
 # ============================================================
 # Oracle criticality
 #
-# Criticality is interpreted as a TEMPERATURE.
+# Criticality controls the target temperature.
 #
-# It controls how concentrated the target policy should be.
+# Lower temperature:
+#   -> stronger concentration on oracle_move
 #
-# critical
-#     -> very concentrated on oracle_move
+# Higher temperature:
+#   -> more freedom among legal moves
 #
-# non_critical
-#     -> moderate preference for oracle_move
+# Interpretation:
 #
-# outcome_independent
-#     -> diffuse distribution over legal moves
+# critical:
+#   "the precise choice matters"
 #
-# IMPORTANT:
+# non_critical:
+#   "several choices can preserve the outcome"
 #
-# Criticality does NOT multiply the loss.
-#
-# Confidence and criticality therefore represent two
-# genuinely different pieces of information:
-#
-#   confidence  = "How much should I trust this annotation?"
-#
-#   criticality = "How sharply should the policy react
-#                  to this annotation?"
+# outcome_independent:
+#   "the immediate choice does not change the outcome,
+#    but the oracle move remains a useful preferred move"
 # ============================================================
 
 ORACLE_CRITICALITY_TEMPERATURES = {
 
     "critical":
-        0.25, # exp(4) times weight of other moves
+        0.25,
 
     "non_critical":
-        0.50, # exp(2) times weight of other moves
+        0.50,
 
     "outcome_independent":
-        1.00, # exp(1) times weight of other moves
+        1.00,
 }
+
+
+# ============================================================
+# Numerical safety
+# ============================================================
+
+FINITE_EPS = 1e-8
+
+
+# ============================================================
+# Utility: finite tensor check
+# ============================================================
+
+def assert_finite_tensor(
+    tensor,
+    name,
+):
+
+    if not torch.isfinite(
+        tensor
+    ).all():
+
+        bad_mask = ~torch.isfinite(
+            tensor
+        )
+
+        bad_count = (
+            bad_mask.sum().item()
+        )
+
+        raise RuntimeError(
+            f"NON-FINITE TENSOR: {name} "
+            f"contains {bad_count} non-finite values."
+        )
+
+
+# ============================================================
+# Utility: finite model check
+# ============================================================
+
+def assert_model_finite(
+    model,
+    name="model",
+):
+
+    for (
+        parameter_name,
+        parameter,
+    ) in model.named_parameters():
+
+        if not torch.isfinite(
+            parameter
+        ).all():
+
+            raise RuntimeError(
+                f"NON-FINITE MODEL PARAMETER: "
+                f"{name}.{parameter_name}"
+            )
+
+
+# ============================================================
+# Utility: finite gradients check
+# ============================================================
+
+def assert_gradients_finite(
+    model,
+):
+
+    for (
+        parameter_name,
+        parameter,
+    ) in model.named_parameters():
+
+        if parameter.grad is None:
+
+            continue
+
+
+        if not torch.isfinite(
+            parameter.grad
+        ).all():
+
+            raise RuntimeError(
+                "NON-FINITE GRADIENT: "
+                f"{parameter_name}"
+            )
 
 
 # ============================================================
@@ -266,6 +347,12 @@ def load_model():
             checkpoint[
                 "model_state_dict"
             ]
+        )
+
+
+        assert_model_finite(
+            model,
+            "loaded RL model",
         )
 
 
@@ -338,6 +425,12 @@ def load_model():
         model = ActorCritic(
             bc_model
         ).to(DEVICE)
+
+
+        assert_model_finite(
+            model,
+            "initial BC model",
+        )
 
 
         optimizer = Adam(
@@ -422,6 +515,12 @@ def load_model():
                 checkpoint[
                     "model_state_dict"
                 ]
+            )
+
+
+            assert_model_finite(
+                snapshot,
+                f"league_epoch_{epoch:03d}",
             )
 
 
@@ -577,6 +676,7 @@ def prepare_oracle_data(
             "confidence"
         )
 
+
         if confidence is None:
 
             confidence = entry.get(
@@ -587,6 +687,7 @@ def prepare_oracle_data(
         criticality = entry.get(
             "criticality"
         )
+
 
         if criticality is None:
 
@@ -658,6 +759,52 @@ def prepare_oracle_data(
             continue
 
 
+        confidence_weight = (
+            ORACLE_CONFIDENCE_WEIGHTS[
+                confidence
+            ]
+        )
+
+
+        temperature = (
+            ORACLE_CRITICALITY_TEMPERATURES[
+                criticality
+            ]
+        )
+
+
+        if not torch.isfinite(
+            torch.tensor(
+                confidence_weight
+            )
+        ):
+
+            raise RuntimeError(
+                f"Non-finite confidence weight: "
+                f"{confidence_weight}"
+            )
+
+
+        if not torch.isfinite(
+            torch.tensor(
+                temperature
+            )
+        ):
+
+            raise RuntimeError(
+                f"Non-finite temperature: "
+                f"{temperature}"
+            )
+
+
+        if temperature <= 0.0:
+
+            raise RuntimeError(
+                f"Invalid Oracle temperature: "
+                f"{temperature}"
+            )
+
+
         oracle_data.append(
             {
 
@@ -674,17 +821,13 @@ def prepare_oracle_data(
                     confidence,
 
                 "confidence_weight":
-                    ORACLE_CONFIDENCE_WEIGHTS[
-                        confidence
-                    ],
+                    confidence_weight,
 
                 "criticality":
                     criticality,
 
                 "criticality_temperature":
-                    ORACLE_CRITICALITY_TEMPERATURES[
-                        criticality
-                    ],
+                    temperature,
             }
         )
 
@@ -775,64 +918,97 @@ def build_oracle_target(
     """
     Build a soft oracle target distribution.
 
-    The oracle action receives a preference logit of 1.
-    All other legal actions receive a preference logit of 0.
+    Legal moves receive finite logits.
 
-    Temperature controls how strongly this preference
-    is expressed.
+    The oracle action receives a logit of 1.
+    Other legal actions receive a logit of 0.
 
-    Therefore:
+    The logits are divided by temperature.
 
-        T = 0.25
-            -> very concentrated target
+    Lower T:
+        stronger concentration on oracle_action.
 
-        T = 1.00
-            -> moderate target
+    Higher T:
+        broader distribution.
 
-        T = 2.00
-            -> diffuse target
+    Illegal actions:
+        probability 0.
 
-    Illegal actions receive probability 0.
-
-    This means criticality is represented structurally
-    in the target distribution rather than as a loss weight.
+    IMPORTANT:
+        outcome_independent does NOT mean uniform.
+        T=1 still preserves a preference for oracle_action.
     """
 
     num_actions = len(ACTIONS)
 
 
-    target_logits = torch.zeros(
-        num_actions,
+    if temperature <= 0.0:
+
+        raise ValueError(
+            f"Temperature must be > 0, "
+            f"got {temperature}"
+        )
+
+
+    target_logits = torch.full(
+        (
+            num_actions,
+        ),
+        float("-inf"),
         device=device,
         dtype=torch.float32,
     )
 
 
     legal_mask = torch.zeros(
-        num_actions,
+        (
+            num_actions,
+        ),
         device=device,
         dtype=torch.bool,
     )
 
 
+    legal_indices = list(
+        legal_ids
+    )
+
+
+    if len(
+        legal_indices
+    ) == 0:
+
+        raise RuntimeError(
+            "Oracle target has no legal moves."
+        )
+
+
     legal_mask[
-        list(legal_ids)
+        legal_indices
     ] = True
 
 
     # --------------------------------------------------------
-    # Only legal moves participate in the target.
+    # Legal moves receive baseline logit 0.
     # --------------------------------------------------------
 
-    target_logits = target_logits.masked_fill(
-        ~legal_mask,
-        float("-inf"),
-    )
+    target_logits[
+        legal_mask
+    ] = 0.0
 
 
     # --------------------------------------------------------
-    # Oracle move gets the preference signal.
+    # Oracle move receives preference logit 1.
     # --------------------------------------------------------
+
+    if not legal_mask[
+        oracle_action
+    ]:
+
+        raise RuntimeError(
+            "Oracle action is not legal."
+        )
+
 
     target_logits[
         oracle_action
@@ -840,7 +1016,7 @@ def build_oracle_target(
 
 
     # --------------------------------------------------------
-    # Temperature controls concentration.
+    # Temperature
     # --------------------------------------------------------
 
     target_log_probs = F.log_softmax(
@@ -851,6 +1027,71 @@ def build_oracle_target(
 
     target_probs = torch.exp(
         target_log_probs
+    )
+
+
+    # --------------------------------------------------------
+    # Numerical safety
+    # --------------------------------------------------------
+
+    assert_finite_tensor(
+        target_probs,
+        "Oracle target probabilities",
+    )
+
+
+    # --------------------------------------------------------
+    # Explicitly zero illegal actions.
+    #
+    # This also guarantees that later multiplication
+    # with safe log-probabilities cannot create NaN.
+    # --------------------------------------------------------
+
+    target_probs = (
+        target_probs
+        .masked_fill(
+            ~legal_mask,
+            0.0,
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # Normalize once more for numerical robustness.
+    # --------------------------------------------------------
+
+    target_sum = (
+        target_probs.sum()
+    )
+
+
+    if not torch.isfinite(
+        target_sum
+    ):
+
+        raise RuntimeError(
+            "Oracle target normalization "
+            "became non-finite."
+        )
+
+
+    if target_sum <= 0.0:
+
+        raise RuntimeError(
+            "Oracle target has zero total probability."
+        )
+
+
+    target_probs = (
+        target_probs
+        /
+        target_sum
+    )
+
+
+    assert_finite_tensor(
+        target_probs,
+        "Normalized Oracle target probabilities",
     )
 
 
@@ -886,6 +1127,16 @@ def train_oracle_epoch(
         ):
 
             module.eval()
+
+
+    # --------------------------------------------------------
+    # Model safety
+    # --------------------------------------------------------
+
+    assert_model_finite(
+        model,
+        "model before epoch",
+    )
 
 
     # --------------------------------------------------------
@@ -926,8 +1177,6 @@ def train_oracle_epoch(
 
     total_entropy = 0.0
 
-
-    # Oracle diagnostics
 
     total_oracle_confidence_weight = 0.0
 
@@ -986,6 +1235,18 @@ def train_oracle_epoch(
             )
 
 
+            assert_finite_tensor(
+                policy,
+                "RL policy logits",
+            )
+
+
+            assert_finite_tensor(
+                values,
+                "RL values",
+            )
+
+
             # =================================================
             # BC policy
             # =================================================
@@ -995,6 +1256,12 @@ def train_oracle_epoch(
                 bc_policy, _ = bc_model(
                     x
                 )
+
+
+            assert_finite_tensor(
+                bc_policy,
+                "BC policy logits",
+            )
 
 
             # =================================================
@@ -1031,17 +1298,6 @@ def train_oracle_epoch(
             )
 
 
-            advantages = (
-                raw_advantages
-                -
-                raw_advantages.mean()
-            ) / (
-                raw_advantages.std()
-                +
-                1e-8
-            )
-
-
             old_log_probs = torch.tensor(
                 [
                     s["old_log_prob"]
@@ -1059,6 +1315,76 @@ def train_oracle_epoch(
                 ],
                 device=DEVICE,
                 dtype=torch.long,
+            )
+
+
+            assert_finite_tensor(
+                plys,
+                "PPO plys",
+            )
+
+            assert_finite_tensor(
+                returns,
+                "PPO returns",
+            )
+
+            assert_finite_tensor(
+                raw_advantages,
+                "PPO raw advantages",
+            )
+
+            assert_finite_tensor(
+                old_log_probs,
+                "PPO old log probabilities",
+            )
+
+
+            # =================================================
+            # Advantages
+            # =================================================
+
+            advantage_mean = (
+                raw_advantages.mean()
+            )
+
+
+            advantage_std = (
+                raw_advantages.std()
+            )
+
+
+            if not torch.isfinite(
+                advantage_mean
+            ):
+
+                raise RuntimeError(
+                    "Non-finite advantage mean."
+                )
+
+
+            if not torch.isfinite(
+                advantage_std
+            ):
+
+                raise RuntimeError(
+                    "Non-finite advantage std."
+                )
+
+
+            advantages = (
+                raw_advantages
+                -
+                advantage_mean
+            ) / (
+                advantage_std
+                +
+                FINITE_EPS
+            )
+
+
+            assert_finite_tensor(
+                advantages,
+                "Normalized advantages",
             )
 
 
@@ -1097,15 +1423,19 @@ def train_oracle_epoch(
             # RL policy
             # =================================================
 
-            legal_policy = policy.masked_fill(
-                ~legal_mask,
-                float("-inf"),
+            legal_policy = (
+                policy.masked_fill(
+                    ~legal_mask,
+                    float("-inf"),
+                )
             )
 
 
-            legal_bc_policy = bc_policy.masked_fill(
-                ~legal_mask,
-                float("-inf"),
+            legal_bc_policy = (
+                bc_policy.masked_fill(
+                    ~legal_mask,
+                    float("-inf"),
+                )
             )
 
 
@@ -1126,6 +1456,22 @@ def train_oracle_epoch(
                     ~legal_mask,
                     0.0,
                 )
+            )
+
+
+            assert_finite_tensor(
+                rl_log_probs[
+                    legal_mask
+                ],
+                "RL legal log probabilities",
+            )
+
+
+            assert_finite_tensor(
+                bc_log_probs[
+                    legal_mask
+                ],
+                "BC legal log probabilities",
             )
 
 
@@ -1167,6 +1513,14 @@ def train_oracle_epoch(
             )
 
 
+            assert_finite_tensor(
+                combined_log_probs[
+                    legal_mask
+                ],
+                "Combined legal log probabilities",
+            )
+
+
             # =================================================
             # Self-play temperature
             # =================================================
@@ -1184,6 +1538,14 @@ def train_oracle_epoch(
             )
 
 
+            assert_finite_tensor(
+                log_probs[
+                    legal_mask
+                ],
+                "PPO legal log probabilities",
+            )
+
+
             selected_log_probs = (
                 log_probs
                 .gather(
@@ -1191,6 +1553,12 @@ def train_oracle_epoch(
                     actions.unsqueeze(1),
                 )
                 .squeeze(1)
+            )
+
+
+            assert_finite_tensor(
+                selected_log_probs,
+                "Selected PPO log probabilities",
             )
 
 
@@ -1205,8 +1573,20 @@ def train_oracle_epoch(
             )
 
 
+            assert_finite_tensor(
+                log_ratio,
+                "PPO log ratio",
+            )
+
+
             ratio = torch.exp(
                 log_ratio
+            )
+
+
+            assert_finite_tensor(
+                ratio,
+                "PPO ratio",
             )
 
 
@@ -1218,6 +1598,12 @@ def train_oracle_epoch(
                     -
                     log_ratio
                 ).mean()
+            )
+
+
+            assert_finite_tensor(
+                approx_kl,
+                "Approximate KL",
             )
 
 
@@ -1259,6 +1645,12 @@ def train_oracle_epoch(
             ).mean()
 
 
+            assert_finite_tensor(
+                actor_loss,
+                "Actor loss",
+            )
+
+
             # =================================================
             # Entropy
             # =================================================
@@ -1285,10 +1677,14 @@ def train_oracle_epoch(
             ).mean()
 
 
+            assert_finite_tensor(
+                entropy,
+                "Entropy",
+            )
+
+
             # =================================================
             # Standard RL critic
-            #
-            # Completely independent from Oracle annotations.
             # =================================================
 
             critic_loss = F.mse_loss(
@@ -1297,17 +1693,14 @@ def train_oracle_epoch(
             )
 
 
+            assert_finite_tensor(
+                critic_loss,
+                "Critic loss",
+            )
+
+
             # =================================================
             # Oracle policy
-            #
-            # CONFIDENCE:
-            #   controls annotation weight.
-            #
-            # CRITICALITY:
-            #   controls target temperature.
-            #
-            # They are deliberately NOT collapsed into one
-            # scalar weight.
             # =================================================
 
             oracle_policy_loss = torch.tensor(
@@ -1319,7 +1712,9 @@ def train_oracle_epoch(
             oracle_policy_count = 0
 
 
-            if len(oracle_buffer) > 0:
+            if len(
+                oracle_buffer
+            ) > 0:
 
                 oracle_batch_size = min(
                     BATCH_SIZE,
@@ -1340,8 +1735,7 @@ def train_oracle_epoch(
                         entry["fen"]
                     )
 
-                    for entry
-                    in oracle_batch
+                    for entry in oracle_batch
                 ]
 
 
@@ -1357,19 +1751,25 @@ def train_oracle_epoch(
                 )
 
 
+                assert_finite_tensor(
+                    oracle_policy_logits,
+                    "Oracle policy logits",
+                )
+
+
                 policy_losses = []
 
                 policy_weights = []
 
 
-                # ------------------------------------------------
-                # Diagnostics
-                # ------------------------------------------------
-
                 batch_confidence_weight = 0.0
 
                 batch_temperature = 0.0
 
+
+                # =================================================
+                # Oracle annotations
+                # =================================================
 
                 for i, entry in enumerate(
                     oracle_batch
@@ -1400,6 +1800,11 @@ def train_oracle_epoch(
 
                     except KeyError:
 
+                        print(
+                            f"WARNING: skipping unknown "
+                            f"oracle move {oracle_move}"
+                        )
+
                         continue
 
 
@@ -1419,7 +1824,25 @@ def train_oracle_epoch(
                     }
 
 
+                    if len(
+                        legal_ids
+                    ) == 0:
+
+                        print(
+                            "WARNING: skipping Oracle "
+                            "position with no legal moves."
+                        )
+
+                        continue
+
+
                     if oracle_action not in legal_ids:
+
+                        print(
+                            "WARNING: skipping Oracle "
+                            "position because oracle move "
+                            "is not legal."
+                        )
 
                         continue
 
@@ -1438,26 +1861,59 @@ def train_oracle_epoch(
                     )
 
 
+                    if (
+                        confidence_weight
+                        <=
+                        0.0
+                    ):
+
+                        print(
+                            "WARNING: skipping Oracle "
+                            "annotation with non-positive "
+                            "confidence weight."
+                        )
+
+                        continue
+
+
+                    if (
+                        temperature
+                        <=
+                        0.0
+                    ):
+
+                        raise RuntimeError(
+                            "Oracle temperature "
+                            "must be positive."
+                        )
+
+
                     # =================================================
-                    # Current policy over legal moves
+                    # Oracle legal mask
                     # =================================================
 
-                    legal_mask_oracle = torch.zeros(
-                        oracle_policy_logits.shape[1],
-                        dtype=torch.bool,
-                        device=DEVICE,
+                    oracle_legal_mask = (
+                        torch.zeros(
+                            oracle_policy_logits.shape[1],
+                            dtype=torch.bool,
+                            device=DEVICE,
+                        )
                     )
 
 
-                    legal_mask_oracle[
+                    oracle_legal_mask[
                         list(legal_ids)
                     ] = True
 
 
+                    # =================================================
+                    # Current policy over legal moves
+                    # =================================================
+
                     legal_oracle_policy = (
                         oracle_policy_logits[i]
                         .masked_fill(
-                            ~legal_mask_oracle,
+                            ~oracle_legal_mask,
                             float("-inf"),
                         )
                     )
@@ -1472,7 +1928,38 @@ def train_oracle_epoch(
 
 
                     # =================================================
-                    # Soft oracle target
+                    # IMPORTANT NUMERICAL FIX
+                    #
+                    # Illegal actions have:
+                    #
+                    #   target = 0
+                    #   log_prob = -inf
+                    #
+                    # Therefore:
+                    #
+                    #   0 * (-inf) = NaN
+                    #
+                    # We explicitly replace the illegal
+                    # log-probabilities by zero BEFORE the
+                    # multiplication.
+                    # =================================================
+
+                    safe_oracle_log_probs = (
+                        oracle_log_probs.masked_fill(
+                            ~oracle_legal_mask,
+                            0.0,
+                        )
+                    )
+
+
+                    assert_finite_tensor(
+                        safe_oracle_log_probs,
+                        "Safe Oracle log probabilities",
+                    )
+
+
+                    # =================================================
+                    # Soft Oracle target
                     # =================================================
 
                     target_probs = (
@@ -1485,20 +1972,90 @@ def train_oracle_epoch(
                     )
 
 
+                    assert_finite_tensor(
+                        target_probs,
+                        "Oracle target probabilities",
+                    )
+
+
                     # =================================================
                     # Cross entropy with soft target
                     #
-                    #   -sum q(a) log pi(a)
-                    #
-                    # Criticality has already been encoded
-                    # in q(a) through temperature.
+                    # Only legal actions participate.
                     # =================================================
 
                     cross_entropy = -(
                         target_probs
                         *
-                        oracle_log_probs
+                        safe_oracle_log_probs
                     ).sum()
+
+
+                    # =================================================
+                    # Numerical safety
+                    # =================================================
+
+                    if not torch.isfinite(
+                        cross_entropy
+                    ):
+
+                        print()
+                        print(
+                            "======================================"
+                        )
+                        print(
+                            "ORACLE NUMERICAL ERROR"
+                        )
+                        print(
+                            "======================================"
+                        )
+
+                        print(
+                            f"Oracle move : {oracle_move}"
+                        )
+
+                        print(
+                            f"Confidence  : {confidence}"
+                        )
+
+                        print(
+                            f"Weight      : "
+                            f"{confidence_weight}"
+                        )
+
+                        print(
+                            f"Criticality : {criticality}"
+                        )
+
+                        print(
+                            f"Temperature : "
+                            f"{temperature}"
+                        )
+
+                        print(
+                            f"Legal moves: "
+                            f"{len(legal_ids)}"
+                        )
+
+                        print(
+                            f"Target sum: "
+                            f"{target_probs.sum().item()}"
+                        )
+
+                        print(
+                            f"Target min: "
+                            f"{target_probs.min().item()}"
+                        )
+
+                        print(
+                            f"Target max: "
+                            f"{target_probs.max().item()}"
+                        )
+
+                        raise RuntimeError(
+                            "Oracle cross-entropy "
+                            "became non-finite."
+                        )
 
 
                     policy_losses.append(
@@ -1521,6 +2078,10 @@ def train_oracle_epoch(
                     )
 
 
+                # =================================================
+                # Aggregate Oracle loss
+                # =================================================
+
                 if policy_losses:
 
                     policy_losses_tensor = (
@@ -1539,14 +2100,49 @@ def train_oracle_epoch(
                     )
 
 
+                    assert_finite_tensor(
+                        policy_losses_tensor,
+                        "Oracle policy losses",
+                    )
+
+
+                    assert_finite_tensor(
+                        policy_weights_tensor,
+                        "Oracle policy weights",
+                    )
+
+
+                    weight_sum = (
+                        policy_weights_tensor.sum()
+                    )
+
+
+                    if not torch.isfinite(
+                        weight_sum
+                    ):
+
+                        raise RuntimeError(
+                            "Oracle policy weight sum "
+                            "became non-finite."
+                        )
+
+
+                    if weight_sum <= 0.0:
+
+                        raise RuntimeError(
+                            "Oracle policy weight sum "
+                            "is zero."
+                        )
+
+
                     # =================================================
                     # Confidence-weighted Oracle loss
                     #
-                    # Confidence says how much we trust
-                    # the annotation.
+                    # Confidence controls the strength
+                    # of the annotation.
                     #
-                    # Criticality says how concentrated
-                    # the target should be.
+                    # Criticality has already acted
+                    # through target temperature.
                     # =================================================
 
                     oracle_policy_loss = (
@@ -1557,10 +2153,16 @@ def train_oracle_epoch(
                         ).sum()
                         /
                         (
-                            policy_weights_tensor.sum()
+                            weight_sum
                             +
-                            1e-8
+                            FINITE_EPS
                         )
+                    )
+
+
+                    assert_finite_tensor(
+                        oracle_policy_loss,
+                        "Oracle policy loss",
                     )
 
 
@@ -1618,6 +2220,55 @@ def train_oracle_epoch(
 
 
             # =================================================
+            # TOTAL LOSS SAFETY
+            # =================================================
+
+            if not torch.isfinite(
+                loss
+            ):
+
+                print()
+                print(
+                    "======================================"
+                )
+                print(
+                    "FATAL: NON-FINITE TOTAL LOSS"
+                )
+                print(
+                    "======================================"
+                )
+
+                print(
+                    f"Actor       : "
+                    f"{actor_loss.item()}"
+                )
+
+                print(
+                    f"Critic      : "
+                    f"{critic_loss.item()}"
+                )
+
+                print(
+                    f"Entropy     : "
+                    f"{entropy.item()}"
+                )
+
+                print(
+                    f"Oracle      : "
+                    f"{oracle_policy_loss.item()}"
+                )
+
+                print(
+                    f"KL          : "
+                    f"{approx_kl.item()}"
+                )
+
+                raise RuntimeError(
+                    "Total loss became non-finite."
+                )
+
+
+            # =================================================
             # Backward
             # =================================================
 
@@ -1629,13 +2280,41 @@ def train_oracle_epoch(
             loss.backward()
 
 
+            # =================================================
+            # Gradient safety BEFORE clipping
+            # =================================================
+
+            assert_gradients_finite(
+                model
+            )
+
+
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
                 1.0,
             )
 
 
+            # =================================================
+            # Gradient safety AFTER clipping
+            # =================================================
+
+            assert_gradients_finite(
+                model
+            )
+
+
             optimizer.step()
+
+
+            # =================================================
+            # Model safety AFTER update
+            # =================================================
+
+            assert_model_finite(
+                model,
+                "model after optimizer step",
+            )
 
 
             # =================================================
@@ -1725,6 +2404,47 @@ def train_oracle_epoch(
 
 
     # ========================================================
+    # Final average safety
+    # ========================================================
+
+    for (
+        name,
+        value,
+    ) in {
+
+        "avg_loss":
+            avg_loss,
+
+        "avg_actor":
+            avg_actor,
+
+        "avg_critic":
+            avg_critic,
+
+        "avg_oracle_policy":
+            avg_oracle_policy,
+
+        "avg_kl":
+            avg_kl,
+
+        "avg_entropy":
+            avg_entropy,
+
+    }.items():
+
+        if not torch.isfinite(
+            torch.tensor(
+                value
+            )
+        ):
+
+            raise RuntimeError(
+                f"Non-finite training average: "
+                f"{name}={value}"
+            )
+
+
+    # ========================================================
     # Oracle diagnostics
     # ========================================================
 
@@ -1735,6 +2455,7 @@ def train_oracle_epoch(
             /
             total_oracle_annotations
         )
+
 
         avg_oracle_confidence = (
             total_oracle_confidence_weight
@@ -1886,6 +2607,77 @@ def save_replay_buffer(
 
 
 # ============================================================
+# Safe checkpoint
+# ============================================================
+
+def save_model_checkpoint(
+    model,
+    optimizer,
+    epoch,
+    loss,
+    path,
+):
+
+    # --------------------------------------------------------
+    # Never save a corrupted model.
+    # --------------------------------------------------------
+
+    assert_model_finite(
+        model,
+        "model before checkpoint",
+    )
+
+
+    if not torch.isfinite(
+        torch.tensor(
+            loss
+        )
+    ):
+
+        raise RuntimeError(
+            f"Refusing to save checkpoint: "
+            f"loss={loss} is non-finite."
+        )
+
+
+    path = Path(
+        path
+    )
+
+
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+
+    torch.save(
+        {
+
+            "epoch":
+                epoch,
+
+            "model_state_dict":
+                model.state_dict(),
+
+            "optimizer_state_dict":
+                optimizer.state_dict(),
+
+            "loss":
+                loss,
+        },
+        path,
+    )
+
+
+    print(
+        "Checkpoint saved:",
+        path,
+        flush=True,
+    )
+
+
+# ============================================================
 # Main
 # ============================================================
 
@@ -1923,6 +2715,12 @@ def main():
     # ========================================================
 
     bc_model = load_bc_agent(5)
+
+
+    assert_model_finite(
+        bc_model,
+        "BC5 model",
+    )
 
 
     bc_model_selfplay = copy.deepcopy(
@@ -1963,7 +2761,9 @@ def main():
     # DEBUG BUFFER
     # ========================================================
 
-    if len(oracle_buffer) > 0:
+    if len(
+        oracle_buffer
+    ) > 0:
 
         print(
             "DEBUG BUFFER:",
@@ -2254,8 +3054,11 @@ def main():
                     if result == "1-0":
 
                         terminal_reward = (
+
                             1.0
+
                             if current_white
+
                             else -1.0
                         )
 
@@ -2263,8 +3066,11 @@ def main():
                     elif result == "0-1":
 
                         terminal_reward = (
+
                             -1.0
+
                             if current_white
+
                             else 1.0
                         )
 
@@ -2325,9 +3131,11 @@ def main():
             # =================================================
 
             score_rate = (
+
                 wins
                 +
                 0.5 * draws
+
             ) / GAMES_PER_EPOCH
 
 
@@ -2452,35 +3260,12 @@ def main():
                 )
 
 
-                save_path.parent.mkdir(
-                    parents=True,
-                    exist_ok=True,
-                )
-
-
-                torch.save(
-                    {
-
-                        "epoch":
-                            epoch,
-
-                        "model_state_dict":
-                            model.state_dict(),
-
-                        "optimizer_state_dict":
-                            optimizer.state_dict(),
-
-                        "loss":
-                            rl_loss,
-                    },
-                    save_path,
-                )
-
-
-                print(
-                    "Oracle RL checkpoint saved:",
-                    save_path,
-                    flush=True,
+                save_model_checkpoint(
+                    model=model,
+                    optimizer=optimizer,
+                    epoch=epoch,
+                    loss=rl_loss,
+                    path=save_path,
                 )
 
 
@@ -2498,26 +3283,18 @@ def main():
                 )
 
 
-                torch.save(
-                    {
-
-                        "epoch":
-                            epoch,
-
-                        "model_state_dict":
-                            model.state_dict(),
-
-                        "optimizer_state_dict":
-                            optimizer.state_dict(),
-
-                        "loss":
-                            rl_loss,
-                    },
-                    PROJECT_ROOT
-                    /
-                    "checkpoints"
-                    /
-                    "oracle_best.pt",
+                save_model_checkpoint(
+                    model=model,
+                    optimizer=optimizer,
+                    epoch=epoch,
+                    loss=rl_loss,
+                    path=(
+                        PROJECT_ROOT
+                        /
+                        "checkpoints"
+                        /
+                        "oracle_best.pt"
+                    ),
                 )
 
 
@@ -2534,6 +3311,12 @@ def main():
             snapshot = copy.deepcopy(
                 model
             ).to(DEVICE)
+
+
+            assert_model_finite(
+                snapshot,
+                f"snapshot epoch {epoch}",
+            )
 
 
             snapshot.eval()
