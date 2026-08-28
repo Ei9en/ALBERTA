@@ -3,8 +3,12 @@ import uuid
 import argparse
 from pathlib import Path
 from datetime import datetime, timezone
+import math
 
 import numpy as np
+import chess
+import chess.variant
+
 from distribution_I import W_H, W_U, W_HU
 
 
@@ -17,13 +21,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_FILE = (
     PROJECT_ROOT
     / "data"
-    / "uncertainty_stats_1-10.json"
+    / "uncertainty_stats_oracle_21-30.json"
 )
 
 QUEUE_FILE = (
     PROJECT_ROOT
     / "data"
-    / "oracle_queue_1-10.jsonl"
+    / "oracle_queue_21-30.jsonl"
 )
 
 
@@ -45,21 +49,17 @@ def percentile_rank(values):
             "Not enough values for percentile rank."
         )
 
-
     order = np.argsort(
         values,
         kind="stable"
     )
 
-    sorted_values = values[
-        order
-    ]
+    sorted_values = values[order]
 
     ranks = np.empty(
         n,
         dtype=np.float64
     )
-
 
     start = 0
 
@@ -76,13 +76,11 @@ def percentile_rank(values):
         ):
             end += 1
 
-
         rank = (
             (start + end - 1)
             /
             2.0
         )
-
 
         ranks[
             order[start:end]
@@ -92,12 +90,9 @@ def percentile_rank(values):
             (n - 1)
         )
 
-
         start = end
 
-
     return ranks
-
 
 
 # ============================================================
@@ -120,16 +115,37 @@ def extract_side(fens):
 
         sides.append(side)
 
-
     return np.array(
         sides,
         dtype="<U1"
     )
 
 
+# ============================================================
+# Count legal Atomic moves
+# ============================================================
+
+def count_legal_moves(fen):
+
+    try:
+
+        board = chess.variant.AtomicBoard(
+            fen
+        )
+
+        return board.legal_moves.count()
+
+    except Exception as e:
+
+        raise ValueError(
+            f"Could not parse Atomic FEN:\n"
+            f"{fen}\n"
+            f"Error: {e}"
+        )
+
 
 # ============================================================
-# Side aware normalization
+# Side-aware normalization
 # ============================================================
 
 def normalize_side_aware(
@@ -142,16 +158,21 @@ def normalize_side_aware(
         dtype=np.float64
     )
 
-
-    for side in [
+    for side in (
         "w",
         "b"
-    ]:
+    ):
 
         mask = (
             sides == side
         )
 
+        if np.sum(mask) < 2:
+
+            raise ValueError(
+                f"Not enough positions for side "
+                f"{side} normalization."
+            )
 
         normalized[
             mask
@@ -161,9 +182,278 @@ def normalize_side_aware(
             ]
         )
 
-
     return normalized
 
+
+# ============================================================
+# Build candidate order
+# ============================================================
+
+def build_candidate_order(
+    I,
+    mode
+):
+
+    n = len(I)
+
+    if n == 0:
+
+        raise ValueError(
+            "No positions available."
+        )
+
+    # --------------------------------------------------------
+    # HIGH
+    # Highest I first
+    # --------------------------------------------------------
+
+    if mode == "high":
+
+        order = np.argsort(
+            I,
+            kind="stable"
+        )[::-1]
+
+        description = (
+            "Highest I (top 0.02%)"
+        )
+
+    # --------------------------------------------------------
+    # LOW
+    # Lowest I first
+    # --------------------------------------------------------
+
+    elif mode == "low":
+
+        order = np.argsort(
+            I,
+            kind="stable"
+        )
+
+        description = (
+            "Lowest I (bottom 0.02%)"
+        )
+
+    # --------------------------------------------------------
+    # MIDDLE
+    # Start at median and expand outward
+    # --------------------------------------------------------
+
+    elif mode == "middle":
+
+        sorted_indices = np.argsort(
+            I,
+            kind="stable"
+        )
+
+        center = n // 2
+
+        order_list = []
+
+        left = center - 1
+        right = center
+
+        while (
+            left >= 0
+            or right < n
+        ):
+
+            if right < n:
+
+                order_list.append(
+                    sorted_indices[right]
+                )
+
+                right += 1
+
+            if left >= 0:
+
+                order_list.append(
+                    sorted_indices[left]
+                )
+
+                left -= 1
+
+        order = np.array(
+            order_list,
+            dtype=np.int64
+        )
+
+        description = (
+            "Middle I (around median, ±0.01%)"
+        )
+
+    else:
+
+        raise ValueError(
+            f"Unknown selection mode: {mode}"
+        )
+
+    return order, description
+
+
+# ============================================================
+# Load existing queue IDs
+# ============================================================
+
+def load_existing_ids():
+
+    if not QUEUE_FILE.exists():
+
+        return set()
+
+    existing_ids = set()
+
+    with open(
+        QUEUE_FILE,
+        "r",
+        encoding="utf-8"
+    ) as f:
+
+        for line in f:
+
+            if not line.strip():
+
+                continue
+
+            item = json.loads(line)
+
+            existing_ids.add(
+                item["query_id"]
+            )
+
+    return existing_ids
+
+
+# ============================================================
+# Select positions
+# ============================================================
+
+def select_positions(
+    data,
+    I,
+    mode,
+    existing_ids
+):
+
+    n = len(I)
+
+    if n == 0:
+
+        raise ValueError(
+            "No positions available."
+        )
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # Budget is 0.02% of the ORIGINAL dataset.
+    #
+    # ceil() guarantees that we reach the requested budget.
+    # --------------------------------------------------------
+
+    target_count = max(
+        1,
+        math.ceil(
+            n * 0.0002
+        )
+    )
+
+    candidate_order, description = (
+        build_candidate_order(
+            I,
+            mode
+        )
+    )
+
+    selected = []
+
+    checked = 0
+    rejected_moves = 0
+    rejected_duplicates = 0
+
+    # --------------------------------------------------------
+    # Examine candidates in I priority order.
+    #
+    # Legal move count is calculated ONLY when the position
+    # is reached as a candidate.
+    # --------------------------------------------------------
+
+    for idx in candidate_order:
+
+        checked += 1
+
+        record = data[idx]
+
+        # ----------------------------------------------------
+        # Check duplicate BEFORE expensive chess processing
+        # ----------------------------------------------------
+
+        query_id = uuid.uuid5(
+            uuid.NAMESPACE_DNS,
+            record["fen"]
+        ).hex
+
+        if query_id in existing_ids:
+
+            rejected_duplicates += 1
+
+            continue
+
+        # ----------------------------------------------------
+        # Check legal move count
+        # ----------------------------------------------------
+
+        legal_count = count_legal_moves(
+            record["fen"]
+        )
+
+        if legal_count <= 1:
+
+            rejected_moves += 1
+
+            continue
+
+        # ----------------------------------------------------
+        # Valid new annotation
+        # ----------------------------------------------------
+
+        selected.append(
+            idx
+        )
+
+        # IMPORTANT:
+        # Add immediately so the same FEN cannot be selected
+        # twice during this run.
+        existing_ids.add(
+            query_id
+        )
+
+        if len(selected) >= target_count:
+
+            break
+
+    # --------------------------------------------------------
+    # Safety check
+    # --------------------------------------------------------
+
+    if len(selected) < target_count:
+
+        raise RuntimeError(
+            "Could not find enough new eligible positions "
+            "to reach the requested 0.02% annotation budget."
+        )
+
+    return (
+        np.array(
+            selected,
+            dtype=np.int64
+        ),
+        description,
+        checked,
+        rejected_moves,
+        rejected_duplicates
+    )
 
 
 # ============================================================
@@ -174,22 +464,25 @@ def main():
 
     parser = argparse.ArgumentParser(
         description=
-        "Seed ALBERTA oracle queue using active learning threshold."
+        "Seed ALBERTA oracle queue using active learning score."
     )
-
 
     parser.add_argument(
-        "--percentile",
-        type=float,
-        default=99.98,
+        "--mode",
+        choices=[
+            "high",
+            "low",
+            "middle"
+        ],
+        default="high",
         help=
-        "Selection percentile (default: 99.98 = 0.02%% budget)"
+        "Selection mode: "
+        "high = highest I, "
+        "low = lowest I, "
+        "middle = around median."
     )
 
-
     args = parser.parse_args()
-
-
 
     print("=" * 70)
     print(
@@ -197,17 +490,19 @@ def main():
     )
     print("=" * 70)
 
-
+    print()
+    print(
+        f"Selection mode : {args.mode}"
+    )
 
     # --------------------------------------------------------
-    # Load uncertainty data
+    # Load data
     # --------------------------------------------------------
 
     print()
     print(
         "Loading uncertainty statistics..."
     )
-
 
     with open(
         DATA_FILE,
@@ -217,12 +512,9 @@ def main():
 
         data = json.load(f)
 
-
     print(
         f"Positions loaded : {len(data):,}"
     )
-
-
 
     # --------------------------------------------------------
     # Extract signals
@@ -236,7 +528,6 @@ def main():
         dtype=object
     )
 
-
     H = np.array(
         [
             x["H"]
@@ -244,7 +535,6 @@ def main():
         ],
         dtype=np.float64
     )
-
 
     U = np.array(
         [
@@ -254,7 +544,6 @@ def main():
         dtype=np.float64
     )
 
-
     HU = np.array(
         [
             x["HU"]
@@ -263,34 +552,37 @@ def main():
         dtype=np.float64
     )
 
-
     sides = extract_side(
         fens
     )
 
-
-
     # --------------------------------------------------------
-    # Compute active learning score
+    # Side-aware normalization
     # --------------------------------------------------------
+
+    print()
+    print(
+        "Computing side-aware normalization..."
+    )
 
     H_norm = normalize_side_aware(
         H,
         sides
     )
 
-
     U_norm = normalize_side_aware(
         U,
         sides
     )
-
 
     HU_norm = normalize_side_aware(
         HU,
         sides
     )
 
+    # --------------------------------------------------------
+    # Compute I
+    # --------------------------------------------------------
 
     I = (
         W_H * H_norm
@@ -300,28 +592,51 @@ def main():
         W_HU * HU_norm
     )
 
-
-
-    # --------------------------------------------------------
-    # Threshold selection
-    # --------------------------------------------------------
-
-    threshold = np.percentile(
-        I,
-        args.percentile
+    print(
+        "Active learning score computed."
     )
 
+    # --------------------------------------------------------
+    # Existing queue
+    # --------------------------------------------------------
 
-    selected_indices = np.where(
-        I >= threshold
-    )[0]
+    existing_ids = load_existing_ids()
 
-    selected_indices = selected_indices[
-        np.argsort(
-            I[selected_indices]
-        )[::-1]
+    print()
+    print(
+        f"Existing queue entries : "
+        f"{len(existing_ids):,}"
+    )
+
+    # --------------------------------------------------------
+    # Selection
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "Searching candidates..."
+    )
+
+    (
+        selected_indices,
+        description,
+        checked,
+        rejected_moves,
+        rejected_duplicates
+    ) = select_positions(
+        data,
+        I,
+        args.mode,
+        existing_ids
+    )
+
+    selected_I = I[
+        selected_indices
     ]
 
+    # --------------------------------------------------------
+    # Selection statistics
+    # --------------------------------------------------------
 
     print()
     print(
@@ -330,60 +645,60 @@ def main():
     print("-" * 70)
 
     print(
-        f"Percentile : P{args.percentile}"
+        f"Mode                : "
+        f"{description}"
     )
 
     print(
-        f"Threshold  : {threshold:.9f}"
+        f"Target annotations  : "
+        f"{len(selected_indices):,}"
     )
 
     print(
-        f"Selected   : {len(selected_indices):,}"
+        f"Candidates checked  : "
+        f"{checked:,}"
     )
 
     print(
-        f"Budget     : "
-        f"{100 * len(selected_indices) / len(I):.5f}%"
+        f"Rejected (<=1 move) : "
+        f"{rejected_moves:,}"
     )
 
+    print(
+        f"Rejected (duplicate): "
+        f"{rejected_duplicates:,}"
+    )
 
+    print(
+        f"Budget               : "
+        f"{100 * len(selected_indices) / len(data):.5f}%"
+    )
 
-    # --------------------------------------------------------
-    # Load existing queue
-    # --------------------------------------------------------
+    print(
+        f"I min selected       : "
+        f"{selected_I.min():.9f}"
+    )
 
-    if QUEUE_FILE.exists():
+    print(
+        f"I max selected       : "
+        f"{selected_I.max():.9f}"
+    )
 
-        with open(
-            QUEUE_FILE,
-            "r",
-            encoding="utf-8"
-        ) as f:
+    print(
+        f"I mean selected      : "
+        f"{selected_I.mean():.9f}"
+    )
 
-            existing = [
-                json.loads(line)
-                for line in f
-            ]
-
-    else:
-
-        existing = []
-
-
-
-    existing_ids = {
-        x["query_id"]
-        for x in existing
-    }
-
-
+    print(
+        f"I median selected    : "
+        f"{np.median(selected_I):.9f}"
+    )
 
     # --------------------------------------------------------
-    # Append new positions
+    # Append to queue
     # --------------------------------------------------------
 
     added = 0
-
 
     with open(
         QUEUE_FILE,
@@ -391,78 +706,58 @@ def main():
         encoding="utf-8"
     ) as f:
 
-
         for idx in selected_indices:
 
-
             record = data[idx]
-
 
             query_id = uuid.uuid5(
                 uuid.NAMESPACE_DNS,
                 record["fen"]
             ).hex
 
-
-
-            if query_id in existing_ids:
-
-                continue
-
-
-
             item = {
 
                 "query_id":
                     query_id,
 
-
                 "fen":
                     record["fen"],
-
 
                 "H":
                     float(H[idx]),
 
-
                 "U":
                     float(U[idx]),
-
 
                 "HU":
                     float(HU[idx]),
 
-
                 "I":
                     float(I[idx]),
-
 
                 "status":
                     "pending",
 
-
                 "oracle_move":
                     None,
-
 
                 "oracle_confidence":
                     None,
 
-
                 "oracle_situation":
                     None,
-
 
                 "created_at":
                     datetime.now(
                         timezone.utc
                     ).isoformat(),
 
+                "reward":
+                    None,
 
                 "answered_at":
                     None
             }
-
 
             f.write(
                 json.dumps(item)
@@ -470,10 +765,11 @@ def main():
                 "\n"
             )
 
-
             added += 1
 
-
+    # --------------------------------------------------------
+    # Final report
+    # --------------------------------------------------------
 
     print()
     print("=" * 70)
@@ -483,13 +779,21 @@ def main():
     print("=" * 70)
 
     print(
-        f"Added : {added:,}"
+        f"Selected : {len(selected_indices):,}"
     )
 
     print(
-        f"File  : {QUEUE_FILE}"
+        f"Added    : {added:,}"
     )
 
+    print(
+        f"Budget   : "
+        f"{100 * added / len(data):.5f}%"
+    )
+
+    print(
+        f"File     : {QUEUE_FILE}"
+    )
 
 
 if __name__ == "__main__":

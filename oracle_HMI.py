@@ -27,7 +27,7 @@ class OracleHMI(QMainWindow):
 
     def __init__(
         self,
-        queue_path="data/oracle_queue_1-10.jsonl",
+        queue_path="data/oracle_queue_21-30.jsonl",
     ):
 
         super().__init__()
@@ -200,11 +200,28 @@ class OracleHMI(QMainWindow):
             else "Black"
         )
 
-        uncertainty = (
-            self.current_query.score * 100
-        )
+        # ----------------------------------------------------
+        # Active-learning score
+        #
+        # Normal AL positions have a numeric I score.
+        # Manually injected positions have I = None.
+        # ----------------------------------------------------
 
-        stats = self.queue.stats()
+        if self.current_query.score is None:
+
+            uncertainty_text = (
+                "Manual corner injection"
+            )
+
+        else:
+
+            uncertainty = (
+                self.current_query.score * 100
+            )
+
+            uncertainty_text = (
+                f"{uncertainty:.2f}%"
+            )
 
         text = f"""
 <b>Side to move:</b><br>
@@ -213,7 +230,7 @@ class OracleHMI(QMainWindow):
 <br>
 
 <b>Agent uncertainty (relative):</b><br>
-{uncertainty:.2f}%
+{uncertainty_text}
 
 <br>
 
@@ -434,5 +451,4 @@ def main():
 
 
 if __name__ == "__main__":
-
     main()

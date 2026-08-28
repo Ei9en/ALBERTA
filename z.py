@@ -46,8 +46,8 @@ CHECKPOINTS = {
     "RL20": (
         PROJECT_ROOT
         / "checkpoints"
-        / "rl_epoch"
-        / "rl_epoch_40.pt"
+        / "oracle_epoch"
+        / "oracle_epoch_30.pt"
     ),
 
 }

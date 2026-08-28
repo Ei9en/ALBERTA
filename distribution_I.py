@@ -21,10 +21,46 @@ DATA_FILE = (
 # ============================================================
 # Weights
 # ============================================================
+# ----------------------------------------------------------------------
+# I-WEIGHT CALIBRATION — NON-REDUNDANCY CORRECTION
+#
+# We start from empirically calibrated weights (wH, wU, wHU).
+# Because H, U and HU are not independent signals, we correct their
+# weights according to their pairwise Spearman correlations.
+#
+# For each signal Xi, its non-redundancy coefficient is defined as:
+#
+#     di = 1 - product_{j != i} rho(Xi, Xj)
+#
+# Hence:
+#
+#     dH  = 1 - rho(H, U)  * rho(H, HU)
+#     dU  = 1 - rho(U, H)  * rho(U, HU)
+#     dHU = 1 - rho(H, HU) * rho(U, HU)
+#
+# A highly redundant signal receives a smaller di and therefore a
+# smaller effective weight. Conversely, opposite-sign correlations
+# can produce di > 1 and slightly increase the corresponding weight.
+#
+# The corrected weights are first computed multiplicatively:
+#
+#     w_tilde_i = wi * di
+#
+# and then normalized so that the final weights still sum to 1:
+#
+#     wi' = (wi * di) / sum_k(wk * dk)
+#
+# This preserves the relative calibration while accounting for the
+# information overlap between H, U and HU.
+# ----------------------------------------------------------------------
 
-W_H = 0.2285
-W_U = 0.5363
-W_HU = 0.2352
+
+#              1-----10-11----20-21-----30-31--
+
+W_H = 0.1679  # 0.1608 # 0.1692 # 0.1679 #
+W_U = 0.6045  # 0.5965 # 0.6195 # 0.6045 #
+W_HU = 0.2276 # 0.2425 # 0.2113 # 0.2276 #
+
 
 
 # ============================================================
@@ -962,7 +998,7 @@ def main():
     output_path = (
         PROJECT_ROOT
         / "data"
-        / "I_distribution.png"
+        / "I_distribution_1-10.png"
     )
 
     plt.savefig(

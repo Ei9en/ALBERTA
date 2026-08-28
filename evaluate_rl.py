@@ -21,17 +21,17 @@ RL1_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
     / "rl_epoch"
-    / "rl_epoch_20.pt"
+    / "rl_epoch_50.pt"
 )
 
 RL2_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
-    / "oracle_epoch"
-    / "oracle_epoch_20.pt"
+    / "rl_epoch"
+    / "rl_epoch_60.pt"
 )
 
-GAMES = 250
+GAMES = 200
 TEMPERATURE = 2
 
 

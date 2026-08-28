@@ -80,11 +80,11 @@ import matplotlib.pyplot as plt
 # ============================================================
 
 INPUT_PATH = Path(
-    "data/uncertainty_stats_1-10.json"
+    "data/uncertainty_stats_oracle_21-30.json"
 )
 
 OUTPUT_DIR = Path(
-    "data/uncertainty_analysis_1-10"
+    "data/uncertainty_analysis_oracle_21-30"
 )
 
 RANDOM_SEED = 42
