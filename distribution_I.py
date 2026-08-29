@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_FILE = (
     PROJECT_ROOT
     / "data"
-    / "uncertainty_stats_1-10.json"
+    / "uncertainty_stats_oracle_21-30.json"
 )
 
 
@@ -998,7 +998,7 @@ def main():
     output_path = (
         PROJECT_ROOT
         / "data"
-        / "I_distribution_1-10.png"
+        / "I_distribution_21_30_high.png"
     )
 
     plt.savefig(

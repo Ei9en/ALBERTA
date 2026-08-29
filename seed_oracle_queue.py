@@ -27,7 +27,7 @@ DATA_FILE = (
 QUEUE_FILE = (
     PROJECT_ROOT
     / "data"
-    / "oracle_queue_21-30.jsonl"
+    / "oracle_queue_21-30_high.jsonl"
 )
 
 

@@ -294,7 +294,6 @@ def load_model():
         "======================================"
     )
 
-
     if RESUME_RL:
 
         print(
@@ -305,7 +304,6 @@ def load_model():
             "======================================"
         )
 
-
         checkpoint_path = (
             PROJECT_ROOT
             / "checkpoints"
@@ -313,11 +311,9 @@ def load_model():
             / f"rl_epoch_{RESUME_EPOCH}.pt"
         )
 
-
         print(
             f"Checkpoint: {checkpoint_path}"
         )
-
 
         bc_model = ChessResNet(
             num_actions=len(ACTIONS),
@@ -325,17 +321,14 @@ def load_model():
             blocks=4,
         )
 
-
         model = ActorCritic(
             bc_model
         ).to(DEVICE)
-
 
         checkpoint = torch.load(
             checkpoint_path,
             map_location=DEVICE,
         )
-
 
         model.load_state_dict(
             checkpoint[
@@ -343,18 +336,15 @@ def load_model():
             ]
         )
 
-
         assert_model_finite(
             model,
             "loaded RL model",
         )
 
-
         optimizer = Adam(
             model.parameters(),
             lr=LR,
         )
-
 
         if "optimizer_state_dict" in checkpoint:
 
@@ -364,18 +354,15 @@ def load_model():
                 ]
             )
 
-
             print(
                 "Optimizer state loaded."
             )
-
 
         print(
             f"RL checkpoint loaded "
             f"(epoch "
             f"{checkpoint.get('epoch', '?')})."
         )
-
 
     else:
 
@@ -387,7 +374,6 @@ def load_model():
             "======================================"
         )
 
-
         bc5_path = (
             PROJECT_ROOT
             / "checkpoints"
@@ -395,19 +381,16 @@ def load_model():
             / "bc_v3_epoch_5.pt"
         )
 
-
         bc_model = ChessResNet(
             num_actions=len(ACTIONS),
             channels=32,
             blocks=4,
         )
 
-
         checkpoint = torch.load(
             bc5_path,
             map_location=DEVICE,
         )
-
 
         bc_model.load_state_dict(
             checkpoint[
@@ -415,28 +398,23 @@ def load_model():
             ]
         )
 
-
         model = ActorCritic(
             bc_model
         ).to(DEVICE)
-
 
         assert_model_finite(
             model,
             "initial BC model",
         )
 
-
         optimizer = Adam(
             model.parameters(),
             lr=LR,
         )
 
-
         print(
             "Initial policy loaded from BC5."
         )
-
 
     # ========================================================
     # League
@@ -446,24 +424,19 @@ def load_model():
         max_agents=LEAGUE_MAX_AGENTS
     )
 
-
     bc4 = load_bc_agent(4)
-
 
     league.add_agent(
         "bc_epoch_4",
         bc4,
     )
 
-
     bc5 = load_bc_agent(5)
-
 
     league.add_agent(
         "bc_epoch_5",
         bc5,
     )
-
 
     # ========================================================
     # Reprise league
@@ -471,8 +444,32 @@ def load_model():
 
     if RESUME_RL:
 
-        for epoch in range(
+        # Keep only the 10 most recent RL snapshots.
+        #
+        # With BC4 + BC5:
+        #
+        # 10 RL snapshots
+        # + 2 BC snapshots
+        # = 12 agents maximum.
+        #
+        # Example:
+        # RESUME_EPOCH = 30
+        # -> league_epoch_021 ... league_epoch_030
+
+        league_start = max(
             1,
+            RESUME_EPOCH - 9
+        )
+
+        print()
+        print(
+            f"Loading league snapshots "
+            f"{league_start:03d} -> "
+            f"{RESUME_EPOCH:03d}"
+        )
+
+        for epoch in range(
+            league_start,
             RESUME_EPOCH + 1,
         ):
 
@@ -481,17 +478,19 @@ def load_model():
                 / f"league_epoch_{epoch:03d}.pt"
             )
 
-
             if not path.exists():
 
-                continue
+                print(
+                    f"WARNING: missing league snapshot: "
+                    f"{path}"
+                )
 
+                continue
 
             checkpoint = torch.load(
                 path,
                 map_location=DEVICE,
             )
-
 
             snapshot_base = ChessResNet(
                 num_actions=len(ACTIONS),
@@ -499,11 +498,9 @@ def load_model():
                 blocks=4,
             )
 
-
             snapshot = ActorCritic(
                 snapshot_base
             )
-
 
             snapshot.load_state_dict(
                 checkpoint[
@@ -511,38 +508,31 @@ def load_model():
                 ]
             )
 
-
             assert_model_finite(
                 snapshot,
                 f"league_epoch_{epoch:03d}",
             )
 
-
             snapshot = snapshot.to(
                 DEVICE
             )
 
-
             snapshot.eval()
-
 
             league.add_agent(
                 f"league_epoch_{epoch:03d}",
                 snapshot,
             )
 
-
             print(
                 f"Loaded league_epoch_{epoch:03d}"
             )
-
 
     print()
 
     print(
         f"League loaded: {len(league)} agents"
     )
-
 
     return (
         model,
