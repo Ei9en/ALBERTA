@@ -1,540 +1,867 @@
-Sommaire temporaire — ALBERTA
+ALBERTA — Sommaire exhaustif
 0. Abstract
-Problématique
-Hypothèse
-Méthode proposée
-Protocole expérimental
-Principaux résultats
-Contribution
+0.1. Context
+0.2. Problem statement
+0.3. Hypothesis
+0.4. Proposed approach
+0.5. Experimental methodology
+0.6. Main results
+0.7. Contributions
+0.8. Keywords
 1. Introduction
-1.1. Contexte
-Prise de décision dans les systèmes cyber-physiques
-Agents autonomes et apprentissage par renforcement
-Difficulté de l'apprentissage de comportements complexes à partir du seul signal de récompense
-1.2. Problématique
-Coût de l'information humaine
-Limites du RL pur
-Difficulté à identifier les situations nécessitant une supervision humaine
-Problème de l'utilisation efficace d'un budget d'annotation extrêmement faible
-1.3. Hypothèse
-L'incertitude d'un agent peut permettre d'identifier des situations informativement pertinentes
-Une supervision humaine parcimonieuse peut corriger ou orienter la politique
-L'Active Learning peut donc améliorer un agent RL sans nécessiter une supervision massive
-1.4. Objectifs du projet
-Construire un agent RL fonctionnel
-Construire une mesure d'incertitude exploitable
-Développer une stratégie d'Active Learning
-Introduire une supervision humaine parcimonieuse
-Mesurer son influence sur la politique et les performances
-1.5. Contributions du projet
-Architecture ALBERTA
-Utilisation d'une league historique comme source d'incertitude
-Combinaison des signaux \(H\), \(U\) et \(HU\)
-Normalisation conditionnelle au joueur
-Annotation humaine extrêmement parcimonieuse
-Injection Oracle dans l'apprentissage RL
-Protocole expérimental contrôlé
-1.6. Organisation du rapport
+1.1. Context and Motivation
+1.1.1. Decision-making in autonomous systems
+1.1.2. Reinforcement learning for sequential decision-making
+1.1.3. Human expertise as a source of information
+1.1.4. The cost of human supervision
+1.2. Problem Statement
+1.2.1. Limitations of reward-only reinforcement learning
+1.2.2. Difficulty of identifying problematic decisions
+1.2.3. Human annotation as a scarce resource
+1.2.4. The challenge of extremely sparse supervision
+1.3. Research Hypothesis
+1.3.1. Decision uncertainty as a proxy for information value
+1.3.2. Active selection of human queries
+1.3.3. Sparse expert supervision
+1.3.4. Combining reinforcement learning and human feedback
+1.4. Objectives
+1.4.1. Building a functional RL agent
+1.4.2. Designing an uncertainty estimator
+1.4.3. Designing an active learning mechanism
+1.4.4. Integrating human supervision into RL
+1.4.5. Evaluating the effect of sparse supervision
+1.5. Research Questions
+1.5.1. Can historical policy disagreement identify difficult decisions?
+1.5.2. Can a very small annotation budget improve the learned policy?
+1.5.3. Does human supervision improve decision quality?
+1.5.4. Does active selection outperform random annotation?
+1.5.5. Does the intervention generalize beyond annotated positions?
+1.6. Contributions
+1.6.1. ALBERTA architecture
+1.6.2. Historical league-based uncertainty estimation
+1.6.3. Combined \(H\), \(U\), and \(HU\) information signals
+1.6.4. Side-aware uncertainty calibration
+1.6.5. Extremely sparse active annotation
+1.6.6. Human Oracle integration into RL
+1.6.7. Policy-level evaluation methodology
+1.7. Scope of the Project
+1.7.1. Experimental scope
+1.7.2. Atomic Chess as a case study
+1.7.3. What is and is not claimed about CPS
+1.8. Organization of the Report
 2. Background and Related Concepts
 2.1. Reinforcement Learning
-Markov Decision Processes
-États, actions, récompenses
-Policy
-Value function
-Actor-Critic
-PPO
-2.2. Self-play
-Apprentissage par confrontation
-Problèmes de non-stationnarité
-Nécessité d'une référence historique
-2.3. Active Learning
-Principe général
-Uncertainty sampling
-Query selection
-Annotation budget
-Différence entre apprentissage passif et actif
-2.4. Human-in-the-loop learning
-Rôle de l'expert humain
-Human feedback
-Supervision de politique
-Supervision de récompense
-2.5. Uncertainty in decision-making
-Outcome uncertainty
-Policy uncertainty
-Importance de leur distinction
-2.6. Learning from sparse supervision
-Faible quantité de labels
-Généralisation
-Catastrophic / undesirable policy shifts
-Trade-off entre RL et supervision humaine
-2.7. Pourquoi les jeux sont un environnement pertinent
-Décision séquentielle
-État entièrement observable
-Évaluation objective
-Self-play
-Possibilité de générer massivement des situations difficiles
+2.1.1. Markov Decision Processes
+2.1.2. States
+2.1.3. Actions
+2.1.4. Transition dynamics
+2.1.5. Rewards
+2.1.6. Policies
+2.1.7. Value functions
+2.1.8. Advantage functions
+2.2. Actor-Critic Methods
+2.2.1. Actor
+2.2.2. Critic
+2.2.3. Shared representations
+2.2.4. Policy and value optimization
+2.3. Proximal Policy Optimization
+2.3.1. Motivation
+2.3.2. Policy ratio
+2.3.3. Clipped objective
+2.3.4. Value objective
+2.3.5. Entropy regularization
+2.3.6. GAE
+2.4. Self-Play
+2.4.1. Learning through confrontation
+2.4.2. Non-stationarity
+2.4.3. Self-play dynamics
+2.4.4. Historical opponents
+2.5. League-Based Reinforcement Learning
+2.5.1. Motivation
+2.5.2. Historical snapshots
+2.5.3. Opponent diversity
+2.5.4. League size
+2.5.5. League as a behavioral ensemble
+2.6. Behavioral Cloning
+2.6.1. Imitation learning
+2.6.2. Supervised policy learning
+2.6.3. Advantages for RL initialization
+2.6.4. Limitations of behavioral cloning
+2.7. Active Learning
+2.7.1. Passive versus active learning
+2.7.2. Query selection
+2.7.3. Uncertainty sampling
+2.7.4. Information-efficient annotation
+2.7.5. Annotation budgets
+2.8. Human-in-the-Loop Learning
+2.8.1. Human feedback
+2.8.2. Expert supervision
+2.8.3. Policy supervision
+2.8.4. Reward supervision
+2.8.5. Sparse human feedback
+2.9. Uncertainty in Decision-Making
+2.9.1. Outcome uncertainty
+2.9.2. Policy uncertainty
+2.9.3. Epistemic uncertainty
+2.9.4. Behavioral disagreement
+2.9.5. Why uncertainty does not necessarily imply losing positions
+2.10. Learning from Sparse Supervision
+2.10.1. Sparse labels
+2.10.2. Generalization
+2.10.3. Policy drift
+2.10.4. Undesirable policy changes
+2.10.5. Stability versus adaptation
+2.11. Games as Experimental Environments
+2.11.1. Sequential decision-making
+2.11.2. Fully observable states
+2.11.3. Objective evaluation
+2.11.4. Massive data generation
+2.11.5. Self-play
+2.11.6. Difficult decision states
 3. ALBERTA
-3.1. Présentation générale
-Signification de l'acronyme
-Vision du système
+3.1. Project Overview
+3.1.1. ALBERTA acronym
+3.1.2. Design goals
+3.1.3. Overall learning paradigm
 
-ALBERTA = Active Learning, Behavioral-cloning and Evolution-based Reinforcement Thrifty Agent
+Active Learning, Behavioral-cloning & Evolution-based Reinforcement Thrifty Agent
 
-3.2. Architecture générale
-                 ┌─────────────────┐
-                 │ Behavioral      │
-                 │ Cloning         │
-                 └────────┬────────┘
-                          ↓
-                 ┌─────────────────┐
-                 │ RL / Self-play  │
-                 └────────┬────────┘
-                          ↓
-                 ┌─────────────────┐
-                 │ Historical      │
-                 │ League          │
-                 └────────┬────────┘
-                          ↓
-                 ┌─────────────────┐
-                 │ Uncertainty     │
-                 │ estimation      │
-                 └────────┬────────┘
-                          ↓
-                 ┌─────────────────┐
-                 │ Active Learning │
-                 └────────┬────────┘
-                          ↓
-                    Human Oracle
-                          ↓
-                 ┌─────────────────┐
-                 │ Oracle-guided   │
-                 │ RL              │
-                 └────────┬────────┘
-                          ↓
-                    New agent
-                          │
-                          └──→ League
-3.3. Design philosophy
-Thrifty learning
-Utilisation parcimonieuse de l'humain
-Sélection informative plutôt que supervision exhaustive
-Conservation du signal RL
-3.4. Cycle d'apprentissage
-Génération de données
-Estimation de l'incertitude
-Sélection des requêtes
-Annotation
-Réinjection
-Nouvelle génération de données
-Répétition
+3.2. Design Philosophy
+3.2.1. Thrifty learning
+3.2.2. Human information as a scarce resource
+3.2.3. Selective supervision
+3.2.4. Preservation of the RL signal
+3.2.5. Incremental intervention
+3.3. Overall Architecture
+3.3.1. Behavioral cloning
+3.3.2. Reinforcement learning
+3.3.3. Historical league
+3.3.4. Uncertainty estimation
+3.3.5. Active query selection
+3.3.6. Human Oracle
+3.3.7. Oracle-guided RL
+3.4. Learning Cycle
+3.4.1. Data generation
+3.4.2. Policy evaluation
+3.4.3. Uncertainty estimation
+3.4.4. Query selection
+3.4.5. Human annotation
+3.4.6. Oracle-guided update
+3.4.7. League update
+3.4.8. Iteration
+3.5. System Components
+3.5.1. Neural network
+3.5.2. Self-play engine
+3.5.3. League manager
+3.5.4. Uncertainty statistics
+3.5.5. Oracle queue
+3.5.6. Annotation interface
+3.5.7. Oracle replay data
 4. Experimental Environment: Atomic Chess
-4.1. Pourquoi Atomic Chess
-Complexité décisionnelle
-Règles particulières
-Importance de la tactique
-Décisions non triviales
-4.2. Formalisation du problème
-États
-Actions
-Transitions
-Récompenses
-Conditions terminales
-4.3. Représentation des positions
-FEN
-Encodage de l'état
-Espace d'actions
-4.4. Difficultés spécifiques à Atomic
-Explosions
-Rois adjacents
-Menaces non conventionnelles
-Positions gagnantes mais difficiles à convertir
-4.5. Atomic comme proxy pour la prise de décision
-Justification du choix du domaine
-Limites de l'extrapolation vers les CPS
+4.1. Why Atomic Chess?
+4.1.1. Decision complexity
+4.1.2. Tactical nature
+4.1.3. Non-standard chess dynamics
+4.1.4. Suitability for human decision supervision
+4.2. Rules Relevant to the Experiment
+4.2.1. Explosions
+4.2.2. King adjacency
+4.2.3. Capture mechanics
+4.2.4. Terminal conditions
+4.3. Formalization
+4.3.1. State space
+4.3.2. Action space
+4.3.3. Transition function
+4.3.4. Reward
+4.3.5. Episode termination
+4.4. Position Representation
+4.4.1. FEN
+4.4.2. Board encoding
+4.4.3. Legal action masking
+4.4.4. Action indexing
+4.5. Challenges Specific to Atomic Chess
+4.5.1. Tactical explosions
+4.5.2. King geometry
+4.5.3. Forced sequences
+4.5.4. Non-intuitive strategic evaluations
+4.5.5. Difficult conversion of winning positions
+4.6. Atomic Chess as a Decision-Making Benchmark
+4.6.1. Advantages
+4.6.2. Limitations
+4.6.3. Relevance to CPS decision-making
 5. Behavioral Cloning
 5.1. Motivation
-Initialisation du RL
-Éviter un démarrage totalement aléatoire
+5.1.1. Avoiding random initialization
+5.1.2. Providing an initial behavioral prior
+5.1.3. Reducing RL warm-up
 5.2. Dataset
-Construction
-Format
-Distribution des positions
-5.3. Architecture du modèle
-5.4. Fonction de perte
-5.5. Entraînement
-Hyperparamètres
-Checkpoints
-Epochs
-5.6. Résultats du BC
-5.7. Limites du BC
-Imitation
-Absence d'amélioration autonome
-Dépendance aux données initiales
+5.2.1. Data source
+5.2.2. Dataset size
+5.2.3. Position extraction
+5.2.4. Action labels
+5.2.5. Train/validation considerations
+5.2.6. Side-to-move distribution
+5.3. Model Architecture
+5.3.1. ResNet backbone
+5.3.2. Number of channels
+5.3.3. Number of residual blocks
+5.3.4. Policy head
+5.4. Training Objective
+5.4.1. Policy cross-entropy
+5.4.2. Legal move masking
+5.4.3. Optimization
+5.5. Training Procedure
+5.5.1. Hyperparameters
+5.5.2. Epochs
+5.5.3. Checkpointing
+5.5.4. Model selection
+5.6. Results
+5.6.1. Training behavior
+5.6.2. Policy quality
+5.6.3. Selected checkpoint
+5.7. Limitations
+5.7.1. Imitation versus optimization
+5.7.2. Dataset bias
+5.7.3. Lack of autonomous improvement
 6. Reinforcement Learning Baseline
-6.1. Architecture RL
-Actor
-Critic
-Shared representation
-6.2. PPO
-Policy objective
-Value objective
-Clipping
-Entropy
-6.3. Self-play
-6.4. League
-Principe
-Snapshots historiques
-Sélection des adversaires
-Taille de la league
-6.5. Hyperparamètres
-Learning rate
-Batch size
-PPO epochs
-Games per epoch
-Value coefficient
-etc.
-6.6. Évolution de RL pur
-RL10
-RL20
-RL30
-Résultats intermédiaires
-6.7. Limites observées du RL pur
+6.1. RL Architecture
+6.1.1. Actor
+6.1.2. Critic
+6.1.3. Shared representation
+6.2. PPO Implementation
+6.2.1. Policy loss
+6.2.2. Value loss
+6.2.3. Entropy bonus
+6.2.4. Clipping
+6.2.5. GAE
+6.3. Self-Play Pipeline
+6.3.1. Game generation
+6.3.2. Parallelization
+6.3.3. Trajectory collection
+6.3.4. Reward assignment
+6.3.5. Replay construction
+6.4. Historical League
+6.4.1. Motivation
+6.4.2. BC4 and BC5
+6.4.3. RL snapshots
+6.4.4. Opponent selection
+6.4.5. Maximum league size
+6.5. Training Configuration
+6.5.1. Learning rate
+6.5.2. Games per epoch
+6.5.3. Batch size
+6.5.4. PPO epochs
+6.5.5. Value coefficient
+6.5.6. Entropy coefficient
+6.5.7. Temperature
+6.6. RL Training
+6.6.1. RL10
+6.6.2. RL20
+6.6.3. RL30
+6.6.4. RL70
+6.6.5. RL100
+6.7. Baseline Behavior
+6.7.1. Self-play performance
+6.7.2. Policy evolution
+6.7.3. Entropy evolution
+6.7.4. Stability
+6.8. Limitations of the RL Baseline
 7. Historical League as an Uncertainty Estimator
 
-C'est probablement une des parties les plus originales du projet.
+Probablement un des chapitres centraux du rapport.
 
 7.1. Motivation
-Un seul réseau ne fournit pas nécessairement une estimation fiable de son incertitude
-Les différentes générations de l'agent contiennent une information comportementale
-7.2. Historical policy ensemble
-Snapshots
-Distribution des actions
-Divergence entre politiques
+7.1.1. Why a single policy is insufficient
+7.1.2. Historical behavioral information
+7.1.3. Ensemble disagreement
+7.2. Historical Policy Ensemble
+7.2.1. League snapshots
+7.2.2. Policy distributions
+7.2.3. Action probabilities
+7.2.4. Behavioral disagreement
 7.3. Definition of \(H\)
-Construction
-Interprétation
+7.3.1. Construction
+7.3.2. Mathematical definition
+7.3.3. Interpretation
+7.3.4. Relation to policy disagreement
 7.4. Definition of \(U\)
-Variance / dispersion des valeurs entre agents
-Interprétation
-7.5. Interaction \(HU\)
-7.6. Construction du score d'intérêt
-$$ I = w_H H + w_U U + w_{HU} HU $$
-7.7. Calibration des poids
-\(w_H = 0.144\)
-\(w_U = 0.527\)
-\(w_{HU} = 0.329\)
-7.8. Normalisation percentile
-Motivation
-Robustesse aux outliers
-7.9. Découverte de l'asymétrie White/Black
-Distribution du dataset
-Distribution de \(U\)
-Forte surreprésentation des positions White parmi les plus incertaines
-7.10. Side-aware normalization
-Normalisation séparée
-Suppression du biais de couleur
-Validation
-7.11. Résultat de calibration
-Avant normalisation
-Après normalisation
-~54,9 % White dans les positions sélectionnées
-Enrichissement ~1,099×
+7.4.1. Value predictions
+7.4.2. Dispersion across agents
+7.4.3. Mathematical definition
+7.4.4. Interpretation
+7.5. Interaction Term \(HU\)
+7.5.1. Motivation
+7.5.2. Definition
+7.5.3. Interpretation
+7.6. Interest Score
+7.6.1. Definition
+$$ I=w_HH+w_UU+w_{HU}HU $$
+7.6.2. Interpretation
+7.6.3. Ranking positions by \(I\)
+7.7. Weight Calibration
+7.7.1. Calibration methodology
+7.7.2. \(w_H\)
+7.7.3. \(w_U\)
+7.7.4. \(w_{HU}\)
+
+Final:
+
+$$ w_H=0.144,\quad w_U=0.527,\quad w_{HU}=0.329 $$
+7.8. Percentile Normalization
+7.8.1. Motivation
+7.8.2. Outlier robustness
+7.8.3. Relative ranking
+7.9. Discovery of Side Asymmetry
+7.9.1. White/Black distribution
+7.9.2. Distribution of \(U\)
+7.9.3. Extreme-\(U\) positions
+7.9.4. Identification of the bias
+7.10. Side-Aware Normalization
+7.10.1. Motivation
+7.10.2. Separate normalization
+7.10.3. Corrected interest score
+7.10.4. Validation
+7.11. Calibration Results
+7.11.1. Before normalization
+7.11.2. After normalization
+7.11.3. White enrichment
+7.11.4. Remaining imbalance
 7.12. Interpretation
-Incertitude comportementale
-Différence entre difficulté de décision et difficulté de résultat
+7.12.1. Policy uncertainty
+7.12.2. Outcome uncertainty
+7.12.3. Decision difficulty
+7.12.4. Winning but uncertain positions
 8. Active Learning Query Selection
-8.1. Objectif
-Transformer l'incertitude en requêtes humaines
-8.2. Budget d'annotation
-Budget initial
-Évolution vers 0,02 %
-Justification du caractère « thrifty »
-8.3. Threshold selection
-Distribution de \(I\)
-Sélection des positions au-dessus du seuil
-8.4. Queue Oracle
-Architecture
-JSONL
-Identifiant des requêtes
-Métadonnées
-8.5. Annotation workflow
-Sélection
-Présentation IHM
-Annotation
-Validation
-Réinjection
-8.6. Fiabilité du pipeline
-Backward compatibility
-Validation des annotations
-Gestion des positions discarded
-Reward / Oracle annotations
+8.1. From Uncertainty to Human Queries
+8.1.1. Candidate generation
+8.1.2. Interest ranking
+8.1.3. Query threshold
+8.2. Annotation Budget
+8.2.1. Initial budget
+8.2.2. Reduction to 0.02%
+8.2.3. Rationale
+8.2.4. Thrifty learning
+8.3. Threshold Selection
+8.3.1. Score distribution
+8.3.2. Percentile threshold
+8.3.3. Number of selected positions
+8.4. Oracle Queue
+8.4.1. JSONL format
+8.4.2. Query identifiers
+8.4.3. Position metadata
+8.4.4. Annotation status
+8.5. Annotation Interface
+8.5.1. Human-computer interface
+8.5.2. Board interaction
+8.5.3. Move selection
+8.5.4. Annotation controls
+8.5.5. Validation
+8.6. Annotation Pipeline
+8.6.1. Selection
+8.6.2. Human annotation
+8.6.3. Storage
+8.6.4. Data validation
+8.6.5. Reinjection
+8.7. Pipeline Reliability
+8.7.1. Queue integrity
+8.7.2. Annotation consistency
+8.7.3. Handling incomplete annotations
+8.7.4. Reward-only annotations
+8.7.5. Oracle annotations
 9. Human Oracle Design
-9.1. Nature des annotations
-9.1.1. Oracle move
-Action recommandée
-9.1.2. Confidence
-Low
-Medium
-High
-9.1.3. Situation
-Critical
-Non-critical
-Outcome-independent
-9.1.4. Reward
-\(-1\)
-\(0\)
-\(+1\)
-9.2. Outcome uncertainty vs policy uncertainty
-9.3. Cas particulièrement révélateur
-Positions complètement gagnantes
-Roi adverse difficile à mater
-Forte incertitude de politique malgré résultat quasi certain
-9.4. Annotation de la criticalité
-Pourquoi certaines positions gagnantes ont été considérées critiques
-Orientation du roi
-Importance de la séquence décisionnelle
-9.5. Distribution finale des annotations
-174 annotations utilisées
-Reward distribution
-Confidence
-Criticality
+9.1. Motivation
+9.1.1. What information should the human provide?
+9.1.2. Why a move alone is insufficient
+9.1.3. Confidence
+9.1.4. Criticality
+9.1.5. Reward
+9.2. Oracle Move
+9.2.1. Expert action
+9.2.2. Legal action constraint
+9.3. Confidence
+9.3.1. Low
+9.3.2. Medium
+9.3.3. High
+9.4. Criticality
+9.4.1. Critical
+9.4.2. Non-critical
+9.4.3. Outcome-independent
+9.5. Reward Annotation
+9.5.1. Win
+9.5.2. Draw
+9.5.3. Loss
+9.6. Outcome Uncertainty vs Policy Uncertainty
+9.6.1. Conceptual distinction
+9.6.2. Winning but difficult positions
+9.6.3. Conversion difficulty
+9.7. Criticality and Tactical Structure
+9.7.1. King orientation
+9.7.2. Forced sequences
+9.7.3. Importance of the current decision
+9.8. Annotation Distribution
+9.8.1. Number of annotations
+9.8.2. Confidence distribution
+9.8.3. Criticality distribution
+9.8.4. Reward distribution
+9.8.5. Oracle move distribution
+9.9. Annotation Effort
+9.9.1. Human time
+9.9.2. Difficult positions
+9.9. Qualitative observations
 10. Oracle-Guided Reinforcement Learning
 10.1. Motivation
-Conserver le RL comme signal principal
-Utiliser l'Oracle comme signal complémentaire
-10.2. Oracle policy target
-Distribution cible
-Temperature
-10.3. Confidence weighting
-Low = 0.50
-Medium = 0.75
-High = 0.99
-10.4. Criticality weighting
-Critical: \(T=0.25\)
-Non-critical: \(T=0.50\)
-Outcome-independent: \(T=1.00\)
-10.5. Oracle policy loss
-10.6. Oracle value loss
-10.7. Coefficients
-Policy coefficient
-Value coefficient
-10.8. Interaction avec PPO
-RL objective
-Oracle objective
-Combined objective
-10.9. Discussion d'une force de rappel RL
-Pourquoi une contrainte explicite vers la politique RL pure pourrait être pertinente
-KL / policy anchoring
-Trade-off plasticité / conservation
-11. Active Learning Training Protocol
-11.1. Experimental schedule
-RL pur
-Injection AL
-Réinjection périodique
-11.2. Annotation frequency
-Injection toutes les 10 epochs
-11.3. Annotation budget
-0,02 %
-11.4. Training to epoch 30
-11.5. Training continuation to epoch 100
-Protocole longitudinal
-Hypothèses
+10.1.1. Preserve RL as the primary learning signal
+10.1.2. Human supervision as a corrective signal
+10.1.3. Avoiding full behavioral cloning
+10.2. Oracle Policy Target
+10.2.1. One-hot target
+10.2.2. Temperature smoothing
+10.2.3. Criticality-dependent temperature
+10.3. Confidence Weighting
+10.3.1. Low confidence
+10.3.2. Medium confidence
+10.3.3. High confidence
+10.4. Criticality Weighting
+10.4.1. Critical
+10.4.2. Non-critical
+10.4.3. Outcome-independent
+10.5. Oracle Policy Loss
+10.5.1. Mathematical formulation
+10.5.2. Legal move masking
+10.5.3. Confidence weighting
+10.5.4. Criticality weighting
+10.6. Oracle Value Loss
+10.6.1. Human reward target
+10.6.2. Value supervision
+10.6.3. Oracle value coefficient
+10.7. Combined Objective
+10.7.1. PPO objective
+10.7.2. Oracle policy objective
+10.7.3. Oracle value objective
+10.7.4. Total loss
+10.8. Interaction Between RL and Oracle
+10.8.1. Reinforcement signal
+10.8.2. Policy correction
+10.8.3. Value correction
+10.8.4. Plasticity versus stability
+10.9. Potential Policy Anchoring
+10.9.1. Motivation
+10.9.2. KL regularization
+10.9.3. RL-policy reference
+10.9.4. Future extension
+11. Experimental Protocol
+11.1. Experimental Questions
+11.1.1. Policy adaptation
+11.1.2. Decision quality
+11.1.3. Performance
+11.1.4. Generalization
+11.1.5. Stability
+11.2. Experimental Groups
+11.2.1. RL baseline
+11.2.2. RL + Active Learning
+11.2.3. Optional random annotation baseline
+11.2.4. Optional full-\(I\) annotation baseline
+11.3. Training Schedule
+11.3.1. BC initialization
+11.3.2. RL training
+11.3.3. Active learning cycle
+11.3.4. Oracle injection
+11.3.5. Continued RL
+11.4. Experimental Epochs
+11.4.1. Epoch 10
+11.4.2. Epoch 20
+11.4.3. Epoch 30
+11.4.4. Epoch 70
+11.4.5. Epoch 100
+11.5. Controlled Evaluation
+11.5.1. Identical positions
+11.5.2. Identical temperature
+11.5.3. Identical legal moves
+11.5.4. Paired comparisons
+11.6. Statistical Methodology
+11.6.1. Mean
+11.6.2. Median
+11.6.3. Variance
+11.6.4. Confidence intervals
+11.6.5. Statistical tests
+11.6.6. Effect size
 12. Policy-Level Evaluation
-12.1. RL30 vs RLAL30
-12.2. Evaluation on random positions
-1 000 positions
-KL divergence
-L1 distance
-Entropy
-Best-move changes
-12.3. Evaluation on annotated positions
-KL
-L1
-Oracle probability
-Oracle rank
-Oracle best move
-12.4. Résultats
-Metric	RL30 → RLAL30
-Mean Δ Oracle probability	+0.1136
-Oracle best move	10.8 % → 36.4 %
-Mean Oracle rank	16.7 → 9.1
-Positions improved	83.6 %
-12.5. Analyse par confiance
-High
-Medium
-Low
-12.6. Analyse par criticalité
-Critical
-Non-critical
-Outcome-independent
-12.7. Interpretation
-Modification ciblée de la politique
-Généralisation
-Effet de la supervision humaine
+12.1. Evaluation Objectives
+12.1.1. Measuring policy change
+12.1.2. Measuring alignment with Oracle
+12.1.3. Measuring policy concentration
+12.1.4. Measuring generalization
+12.2. Random Positions
+12.2.1. Dataset construction
+12.2.2. 1,000-position evaluation
+12.2.3. KL divergence
+12.2.4. L1 policy distance
+12.2.5. Entropy variation
+12.2.6. Best-move changes
+12.3. Annotated Positions
+12.3.1. Evaluation subset
+12.3.2. KL divergence
+12.3.3. L1 distance
+12.3.4. Oracle probability
+12.3.5. Oracle rank
+12.3.6. Oracle best move
+12.4. Oracle Alignment
+12.4.1. Before intervention
+12.4.2. After intervention
+12.4.3. Probability shift
+12.4.4. Rank shift
+12.4.5. Best-move alignment
+12.5. Breakdown by Confidence
+12.5.1. High confidence
+12.5.2. Medium confidence
+12.5.3. Low confidence
+12.6. Breakdown by Criticality
+12.6.1. Critical
+12.6.2. Non-critical
+12.6.3. Outcome-independent
+12.7. Generalization
+12.7.1. Annotated positions
+12.7.2. Random positions
+12.7.3. Distribution shift
+12.7.4. Evidence for or against generalization
+12.8. Policy Drift
+12.8.1. Magnitude of policy changes
+12.8.2. Entropy changes
+12.8.3. Best-move changes
+12.8.4. Potential overcorrection
 13. Performance Evaluation
-13.1. Experimental protocol
-Self-play
-T = 2
-Positions initiales identiques
-Inversion des couleurs
-Paired games
+13.1. Evaluation Protocol
+13.1.1. Self-play
+13.1.2. Temperature
+13.1.3. Starting positions
+13.1.4. Color inversion
+13.1.5. Paired games
 13.2. RL30 vs RLAL30
-2 000 parties
-13.3. First evaluation
-RL: 42,4 %
-RLAL: 57,6 %
-13.4. Second evaluation
-RL: 39,1 %
-RLAL: 60,9 %
-13.5. Combined evidence
-Reproductibilité
-Variance entre évaluations
-13.6. Statistical significance
-Intervalle de confiance
-Test statistique approprié
-Effect size
-13.7. Long-term experiment
-RL100 vs RLAL100
-Évolution du gain
-14. Analysis and Discussion
-14.1. Does AL actually improve decision-making?
-Policy-level evidence
-Performance-level evidence
-14.2. Why can uncertainty be high in winning positions?
-Outcome uncertainty
-Policy uncertainty
-Conversion difficulty
-14.3. What does the human Oracle add?
-Explicit tactical knowledge
-Guidance rather than outcome information
-Sparse supervision
-14.4. Efficiency of the annotation budget
-0,02 %
-Gain obtenu
-Annotation efficiency
-14.5. Does AL outperform simply training longer?
-RL vs RLAL
-Future RL100 analysis
-14.6. Does AL alter the agent too strongly?
-KL
-Entropy
-Best-move changes
-Possible policy drift
-14.7. Stability of the intervention
-Repeated annotation cycles
-Evolution over epochs
-14.8. Failure cases
-Positions worsened
-Low-confidence annotations
-Oracle disagreement
-Potential annotation noise
-15. Limitations
-15.1. Atomic Chess as experimental domain
-15.2. Human annotation scale
-15.3. Oracle quality and subjectivity
-15.4. Sparse annotation coverage
-15.5. Evaluation against the same RL family
-15.6. Lack of MCTS / Minimax
-Agent is not designed to be a state-of-the-art Atomic engine
-Focus on learning rather than search
-15.7. Uncertainty estimator limitations
-15.8. Possible dependence on the historical league
-15.9. Generalization to real CPS
-16. Toward Cyber-Physical Systems
+13.2.1. First evaluation
+13.2.2. Second evaluation
+13.2.3. Combined results
+13.3. Performance Metrics
+13.3.1. Win rate
+13.3.2. Draw rate
+13.3.3. Score rate
+13.3.4. Color-specific performance
+13.4. Statistical Analysis
+13.4.1. Confidence interval
+13.4.2. Significance
+13.4.3. Effect size
+13.5. Long-Term Evaluation
+13.5.1. RL70 vs RLAL70
+13.5.2. RL100 vs RLAL100
+13.5.3. Evolution of the performance gap
+13.6. Does Active Learning Beat More RL?
+13.6.1. Equal compute comparison
+13.6.2. Equal training duration
+13.6.3. Performance versus annotation cost
+14. Ablation Studies
 
-Cette partie sera importante pour ton positionnement professionnel.
+Celui-ci pourrait être très intéressant scientifiquement si tu arrives à faire quelques expériences supplémentaires.
 
-16.1. Why the methodology is relevant to CPS
-16.2. Mapping the components
+14.1. Annotation Strategy
+14.1.1. Active selection
+14.1.2. Random selection
+14.1.3. Full-\(I\) high-score selection
+14.2. Uncertainty Components
+14.2.1. \(H\) only
+14.2.2. \(U\) only
+14.2.3. \(HU\) only
+14.2.4. \(H+U\)
+14.2.5. Full \(I\)
+14.3. Normalization
+14.3.1. No normalization
+14.3.2. Global normalization
+14.3.3. Side-aware normalization
+14.4. Oracle Information
+14.4.1. Move only
+14.4.2. Move + confidence
+14.4.3. Move + criticality
+14.4.4. Move + reward
+14.4.5. Full annotation
+14.5. Oracle Strength
+14.5.1. Policy coefficient
+14.5.2. Value coefficient
+14.5.3. Temperature
+14.6. Annotation Budget
+14.6.1. 0.02%
+14.6.2. Higher budget
+14.6.3. Budget-performance relationship
+15. Analysis and Discussion
+15.1. Main Findings
+15.1.1. Does AL change the policy?
+15.1.2. Does it improve Oracle alignment?
+15.1.3. Does it improve performance?
+15.2. Why Does the Oracle Have an Effect?
+15.2.1. Explicit tactical knowledge
+15.2.2. Correction of local policy errors
+15.2.3. Human knowledge unavailable from reward alone
+15.3. Why Are Difficult Positions Informative?
+15.3.1. High policy disagreement
+15.3.2. Winning but uncertain positions
+15.3.3. Conversion difficulty
+15.3.4. Corner positions
+15.4. The Effect of Extremely Sparse Annotation
+15.4.1. 0.02% budget
+15.4.2. Information density
+15.4.3. Annotation efficiency
+15.5. Generalization
+15.5.1. Local policy adaptation
+15.5.2. Random-position behavior
+15.5.3. Evidence of undesirable generalization
+15.5.4. Possible distributional explanations
+15.6. Policy Stability
+15.6.1. KL divergence
+15.6.2. L1 distance
+15.6.3. Entropy
+15.6.4. Best-move changes
+15.7. Failure Cases
+15.7.1. Positions made worse
+15.7.2. Oracle disagreements
+15.7.3. Annotation noise
+15.7.4. Overcorrection
+15.7.5. Poor generalization
+15.8. What Did Not Work?
+15.8.1. Limitations discovered experimentally
+15.8.2. Unexpected behavior
+15.8.3. Failed hypotheses
+15.8.4. Lessons learned
+15.9. Research Interpretation
+15.9.1. Evidence supporting the hypothesis
+15.9.2. Evidence against the hypothesis
+15.9.3. What can actually be concluded
+16. Limitations
+16.1. Experimental Domain
+16.1.1. Atomic Chess
+16.1.2. Game-specific structure
+16.1.3. Limited ecological validity
+16.2. Human Oracle
+16.2.1. Single human annotator
+16.2.2. Subjectivity
+16.2.3. Annotation noise
+16.2.4. Limited annotation scale
+16.3. Uncertainty Estimation
+16.3.1. Dependence on league diversity
+16.3.2. Historical snapshots
+16.3.3. Proxy nature of \(H\) and \(U\)
+16.3.4. Calibration limitations
+16.4. Learning Architecture
+16.4.1. PPO
+16.4.2. CNN representation
+16.4.3. No search
+16.4.4. No MCTS
+16.4.5. No Minimax
+16.5. Evaluation
+16.5.1. Limited number of games
+16.5.2. Same RL family
+16.5.3. Potential evaluation bias
+16.6. Generalization to CPS
+16.6.1. Structural analogy
+16.6.2. Missing physical dynamics
+16.6.3. Missing safety constraints
+16.6.4. Missing continuous control
+17. Toward Cyber-Physical Systems
+17.1. Motivation
+17.1.1. Decision-making in CPS
+17.1.2. Human expertise in CPS
+17.1.3. Cost of expert supervision
+17.2. Mapping ALBERTA to CPS
 ALBERTA	CPS analogue
 Chess state	System state
 Move	Control/action
 Reward	Operational objective
-Historical league	Ensemble of policies/controllers
+Policy	Controller
+Historical league	Historical controllers
 Uncertainty	Decision uncertainty
-Oracle	Human/domain expert
-Active query	Informative operating condition
-16.3. Potential applications
-Autonomous robotics
-Industrial control
-Autonomous vehicles
-Energy systems
-Human-in-the-loop control
-16.4. Simulation-based extension
-MuJoCo
-Isaac Sim
-CPS environment
-16.5. Proposed future experiment
-ALBERTA transferred from game environment to simulated CPS
-17. Future Work
-17.1. Long-term RL/AL training
-RL100
-Repeated AL cycles
-17.2. RL policy anchoring
-KL regularization
-Elastic / spring-like constraint
-17.3. Richer Oracle annotations
-Action quality
-Comparative action ranking
-Alternative actions
-Counterfactual feedback
-17.4. Improved uncertainty estimation
-Ensemble disagreement
-Epistemic uncertainty
-Calibration
-17.5. Adaptive annotation budgets
-Dynamic 0.02 %
-Difficulty-dependent budget
-17.6. Transfer to CPS
-17.7. Search-enhanced agent
-MCTS
-Minimax
-Hybrid policy/search architecture
-18. Reproducibility and Implementation
-18.1. Repository structure
-18.2. Environment
-Python
-PyTorch
-GPU requirements
-18.3. Training scripts
-18.4. Checkpoint management
-18.5. Data formats
-JSONL
-Replay buffers
-League snapshots
-18.6. Configuration
-18.7. Reproducing the experiments
-BC
-RL
-AL query generation
-Annotation
-Oracle RL
-Evaluation
-19. Conclusion
-19.1. Summary of findings
-19.2. Main contribution
-Active learning for sparse human-guided RL
-19.3. Main experimental result
-Improvement with 0,02 % annotation budget
-19.4. Interpretation
-Human information can complement RL
-Uncertainty can guide where that information is most valuable
-19.5. Broader perspective
-Human-efficient decision learning
-CPS applications
+Oracle	Domain expert
+Query	Informative operating condition
+17.3. Potential Application Domains
+17.3.1. Autonomous robotics
+17.3.2. Industrial control
+17.3.3. Autonomous vehicles
+17.3.4. Energy systems
+17.3.5. Human-in-the-loop control
+17.4. Simulation-Based Extension
+17.4.1. MuJoCo
+17.4.2. Isaac Sim
+17.4.3. Simulated CPS
+17.4.4. Continuous state spaces
+17.4.5. Continuous actions
+17.5. Proposed CPS Experiment
+17.5.1. Baseline controller
+17.5.2. Historical controller ensemble
+17.5.3. Uncertainty estimation
+17.5.4. Expert query
+17.5.5. Controller adaptation
+17.6. Safety Considerations
+17.6.1. Human supervision
+17.6.2. Safe exploration
+17.6.3. Constraint-aware learning
+18. Future Work
+18.1. Long-Term Training
+18.1.1. RL100
+18.1.2. RL/AL cycles
+18.1.3. Longer-term stability
+18.2. Improved Oracle Feedback
+18.2.1. Comparative action quality
+18.2.2. Action ranking
+18.2.3. Alternative actions
+18.2.4. Counterfactual feedback
+18.2.5. Quality scores
+18.3. Improved Uncertainty
+18.3.1. Larger ensembles
+18.3.2. Ensemble disagreement
+18.3.3. Epistemic uncertainty
+18.3.4. Better calibration
+18.3.5. Learned query models
+18.4. Adaptive Annotation Budget
+18.4.1. Dynamic budget
+18.4.2. Difficulty-dependent budget
+18.4.3. Cost-aware query selection
+18.5. Policy Anchoring
+18.5.1. KL regularization
+18.5.2. Reference-policy constraint
+18.5.3. Elastic / spring-like policy constraint
+18.6. Search-Enhanced Agent
+18.6.1. Minimax
+18.6.2. MCTS
+18.6.3. Hybrid policy/search
+18.7. POMDP Extension
+18.7.1. Partial observability
+18.7.2. Belief states
+18.7.3. Decision uncertainty
+18.7.4. Human information acquisition
+18.8. Transfer to CPS
+18.8.1. Continuous control
+18.8.2. Simulation
+18.8.3. Real-world constraints
+18.8.4. Safety
+19. Reproducibility and Implementation
+19.1. Software Architecture
+19.1.1. Repository structure
+19.1.2. Source modules
+19.1.3. Training scripts
+19.1.4. Evaluation scripts
+19.2. Environment
+19.2.1. Python
+19.2.2. PyTorch
+19.2.3. python-chess
+19.2.4. CUDA
+19.2.5. GPU requirements
+19.3. Data Formats
+19.3.1. JSONL
+19.3.2. Checkpoints
+19.3.3. Replay buffers
+19.3.4. League snapshots
+19.3.5. Oracle annotations
+19.4. Configuration
+19.4.1. Hyperparameters
+19.4.2. Paths
+19.4.3. Training configuration
+19.5. Experiment Reproduction
+19.5.1. Behavioral cloning
+19.5.2. RL baseline
+19.5.3. Uncertainty estimation
+19.5.4. Query generation
+19.5.5. Annotation
+19.5.6. Oracle-guided training
+19.5.7. Evaluation
+19.6. Computational Resources
+19.6.1. Local development
+19.6.2. Google Colab
+19.6.3. GPU configuration
+19.6.4. Training cost
+20. Conclusion
+20.1. Summary
+20.1.1. Problem
+20.1.2. Method
+20.1.3. Experiments
+20.1.4. Results
+20.2. Main Findings
+20.2.1. Historical uncertainty
+20.2.2. Active selection
+20.2.3. Human supervision
+20.2.4. Policy adaptation
+20.2.5. Performance
+20.3. Main Contribution
+20.3.1. Human-efficient RL
+20.3.2. Active uncertainty-guided supervision
+20.3.3. ALBERTA architecture
+20.4. Broader Perspective
+20.4.1. Beyond games
+20.4.2. Toward CPS
+20.4.3. Toward human-efficient autonomous decision-making
 Appendices
-A. Mathematical formulation
-MDP
-PPO
-\(H\), \(U\), \(HU\)
-\(I\)
-Oracle losses
-B. Hyperparameters
-C. Full experimental results
-D. Statistical analysis
-E. Annotation schema
-F. Oracle queue schema
-G. Example annotated positions
-H. Additional policy visualizations
-I. Training curves
-J. Git commit / experiment tracking
+Appendix A — Mathematical Formulation
+A.1. MDP
+A.2. Policy
+A.3. Value function
+A.4. Advantage
+A.5. PPO
+A.6. GAE
+A.7. \(H\)
+A.8. \(U\)
+A.9. \(HU\)
+A.10. Interest score \(I\)
+A.11. Percentile normalization
+A.12. Oracle policy loss
+A.13. Oracle value loss
+A.14. Combined objective
+Appendix B — Full Hyperparameters
+B.1. BC
+B.2. RL
+B.3. League
+B.4. Active Learning
+B.5. Oracle
+B.6. Evaluation
+Appendix C — Full Experimental Results
+C.1. RL training
+C.2. RLAL training
+C.3. Performance evaluations
+C.4. Policy comparisons
+C.5. Ablations
+Appendix D — Statistical Analysis
+D.1. Confidence intervals
+D.2. Statistical tests
+D.3. Effect sizes
+D.4. Full distributions
+Appendix E — Annotation Schema
+E.1. Oracle move
+E.2. Confidence
+E.3. Criticality
+E.4. Reward
+Appendix F — Oracle Queue
+F.1. JSONL schema
+F.2. Example entries
+F.3. Queue lifecycle
+Appendix G — Annotation Examples
+G.1. Easy position
+G.2. Difficult position
+G.3. Corner position
+G.4. High uncertainty position
+G.5. Winning but policy-uncertain position
+Appendix H — Policy Visualizations
+H.1. Policy distributions
+H.2. KL distributions
+H.3. Entropy distributions
+H.4. Oracle probability
+H.5. Oracle rank
+Appendix I — Training Curves
+I.1. Loss
+I.2. Actor loss
+I.3. Critic loss
+I.4. KL
+I.5. Entropy
+I.6. Performance
+Appendix J — Computational Experiments
+J.1. Hardware
+J.2. Training times
+J.3. GPU utilization
+J.4. Computational budget
+Appendix K — Implementation Details
+K.1. Repository structure
+K.2. Important functions
+K.3. Checkpoint conventions
+K.4. Experiment identifiers

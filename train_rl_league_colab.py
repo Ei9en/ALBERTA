@@ -409,15 +409,16 @@ def load_model():
         bc5,
     )
 
-
     # ========================================================
-    # Reprise : charger snapshots
+    # Reprise : charger les 10 dernières snapshots
     # ========================================================
 
     if RESUME_RL:
 
+        start_epoch = max(1, LEAGUE_START_EPOCH)
+
         for epoch in range(
-            1,
+            start_epoch,
             RESUME_EPOCH + 1,
         ):
 
@@ -426,16 +427,13 @@ def load_model():
                 / f"league_epoch_{epoch:03d}.pt"
             )
 
-
             if not path.exists():
                 continue
-
 
             checkpoint = torch.load(
                 path,
                 map_location=DEVICE,
             )
-
 
             snapshot_base = ChessResNet(
                 num_actions=len(ACTIONS),
@@ -443,27 +441,22 @@ def load_model():
                 blocks=4,
             )
 
-
             snapshot = ActorCritic(
                 snapshot_base
             )
-
 
             snapshot.load_state_dict(
                 checkpoint["model_state_dict"]
             )
 
-
             snapshot = snapshot.to(DEVICE)
 
             snapshot.eval()
-
 
             league.add_agent(
                 f"league_epoch_{epoch:03d}",
                 snapshot,
             )
-
 
             print(
                 f"Loaded league_epoch_{epoch:03d}"

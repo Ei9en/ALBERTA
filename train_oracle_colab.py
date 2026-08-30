@@ -307,8 +307,8 @@ def load_model():
         checkpoint_path = (
             PROJECT_ROOT
             / "checkpoints"
-            / "rl_epoch"
-            / f"rl_epoch_{RESUME_EPOCH}.pt"
+            / "oracle_epoch"
+            / f"oracle_epoch_{RESUME_EPOCH}.pt"
         )
 
         print(

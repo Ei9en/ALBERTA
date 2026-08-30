@@ -14,75 +14,31 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_FILE = (
     PROJECT_ROOT
     / "data"
-    / "uncertainty_stats_oracle_21-30.json"
+    / "uncertainty_stats_1-100.json"
 )
 
 
 # ============================================================
 # Weights
 # ============================================================
-# ----------------------------------------------------------------------
-# I-WEIGHT CALIBRATION — NON-REDUNDANCY CORRECTION
-#
-# We start from empirically calibrated weights (wH, wU, wHU).
-# Because H, U and HU are not independent signals, we correct their
-# weights according to their pairwise Spearman correlations.
-#
-# For each signal Xi, its non-redundancy coefficient is defined as:
-#
-#     di = 1 - product_{j != i} rho(Xi, Xj)
-#
-# Hence:
-#
-#     dH  = 1 - rho(H, U)  * rho(H, HU)
-#     dU  = 1 - rho(U, H)  * rho(U, HU)
-#     dHU = 1 - rho(H, HU) * rho(U, HU)
-#
-# A highly redundant signal receives a smaller di and therefore a
-# smaller effective weight. Conversely, opposite-sign correlations
-# can produce di > 1 and slightly increase the corresponding weight.
-#
-# The corrected weights are first computed multiplicatively:
-#
-#     w_tilde_i = wi * di
-#
-# and then normalized so that the final weights still sum to 1:
-#
-#     wi' = (wi * di) / sum_k(wk * dk)
-#
-# This preserves the relative calibration while accounting for the
-# information overlap between H, U and HU.
-# ----------------------------------------------------------------------
 
-
-#              1-----10-11----20-21-----30-31--
-
-W_H = 0.1679  # 0.1608 # 0.1692 # 0.1679 #
-W_U = 0.6045  # 0.5965 # 0.6195 # 0.6045 #
-W_HU = 0.2276 # 0.2425 # 0.2113 # 0.2276 #
-
+W_H = -0.277
+W_U = 0.441
+W_HU = 0.282
 
 
 # ============================================================
 # Percentile-rank normalization
 # ============================================================
 
-def percentile_rank(
-    values,
-):
+def percentile_rank(values):
     """
     Convert values to empirical percentile ranks in [0, 1].
 
-    The ranking is performed independently inside each
-    side-to-move population.
+    Ties receive the same mid-rank.
 
-    The smallest value receives 0.
-    The largest value receives 1.
-
-    Ties receive the same percentile rank.
-
-    This preserves the ordering of the original signal while
-    removing its absolute scale.
+    This function is used independently for White-to-move and
+    Black-to-move positions.
     """
 
     values = np.asarray(
@@ -102,18 +58,12 @@ def percentile_rank(
         kind="stable",
     )
 
-    sorted_values = values[
-        order
-    ]
+    sorted_values = values[order]
 
     ranks = np.empty(
         n,
         dtype=np.float64,
     )
-
-    # --------------------------------------------------------
-    # Find groups of equal values
-    # --------------------------------------------------------
 
     start = 0
 
@@ -123,40 +73,21 @@ def percentile_rank(
 
         while (
             end < n
-            and sorted_values[end]
-            == sorted_values[start]
+            and sorted_values[end] == sorted_values[start]
         ):
             end += 1
-
-        # Mid-rank of the tied group.
-        #
-        # Example:
-        #
-        # positions 10..14
-        # -> average rank = 12
-        #
-        # Convert to [0, 1].
-        # ----------------------------------------------------
 
         rank = (
             (start + end - 1)
             / 2.0
         )
 
-        if n > 1:
+        percentile = (
+            rank
+            / (n - 1)
+        )
 
-            percentile = (
-                rank
-                / (n - 1)
-            )
-
-        else:
-
-            percentile = 0.0
-
-        ranks[
-            order[start:end]
-        ] = percentile
+        ranks[order[start:end]] = percentile
 
         start = end
 
@@ -167,9 +98,7 @@ def percentile_rank(
 # Extract side to move
 # ============================================================
 
-def extract_side_to_move(
-    fens,
-):
+def extract_side_to_move(fens):
 
     sides = []
 
@@ -180,12 +109,9 @@ def extract_side_to_move(
             side = fen.split()[1]
 
             if side not in ("w", "b"):
-
                 raise ValueError
 
-            sides.append(
-                side
-            )
+            sides.append(side)
 
         except (
             IndexError,
@@ -213,32 +139,182 @@ def normalize_side_aware(
 ):
     """
     Empirical percentile-rank normalization performed
-    independently for White-to-move and Black-to-move
-    positions.
+    independently for White-to-move and Black-to-move.
     """
 
-    normalized = np.zeros_like(
+    normalized = np.empty_like(
         values,
         dtype=np.float64,
     )
 
-    normalized[
-        white_mask
-    ] = percentile_rank(
-        values[
-            white_mask
-        ]
+    normalized[white_mask] = percentile_rank(
+        values[white_mask]
     )
 
-    normalized[
-        black_mask
-    ] = percentile_rank(
-        values[
-            black_mask
-        ]
+    normalized[black_mask] = percentile_rank(
+        values[black_mask]
     )
 
     return normalized
+
+
+# ============================================================
+# Min-max normalization
+# ============================================================
+
+def min_max_normalize(values):
+    """
+    Normalize values to [0, 1]:
+
+        x_norm = (x - xmin) / (xmax - xmin)
+
+    This is a strictly increasing affine transformation as long
+    as xmax > xmin, therefore it preserves the ranking of all
+    distinct values.
+    """
+
+    values = np.asarray(
+        values,
+        dtype=np.float64,
+    )
+
+    xmin = np.min(values)
+    xmax = np.max(values)
+
+    if not np.isfinite(xmin) or not np.isfinite(xmax):
+        raise RuntimeError(
+            "ERROR: non-finite I_min or I_max."
+        )
+
+    if xmax <= xmin:
+        raise RuntimeError(
+            "ERROR: I_max must be strictly greater than I_min."
+        )
+
+    normalized = (
+        values - xmin
+    ) / (
+        xmax - xmin
+    )
+
+    # Numerical safety.
+    #
+    # The theoretical range is exactly [0, 1], but floating-point
+    # arithmetic can produce values such as 1.0000000000000002.
+    # Clipping does not alter the ranking.
+    normalized = np.clip(
+        normalized,
+        0.0,
+        1.0,
+    )
+
+    return normalized, xmin, xmax
+
+
+# ============================================================
+# Ranking verification
+# ============================================================
+
+def verify_ranking_preserved(
+    original,
+    normalized,
+):
+    """
+    Verify that min-max normalization preserves ordering.
+
+    We do NOT compare argsort arrays directly because:
+      - ties can have arbitrary stable ordering;
+      - floating-point roundoff can affect exact equality.
+
+    Instead, we verify the monotonic relationship:
+
+        x_i < x_j  =>  f(x_i) <= f(x_j)
+
+    and:
+
+        x_i == x_j  =>  f(x_i) == f(x_j)
+
+    For the present affine transformation, this should always
+    hold up to floating-point tolerance.
+
+    The implementation checks the ordering through sorting.
+    """
+
+    original = np.asarray(
+        original,
+        dtype=np.float64,
+    )
+
+    normalized = np.asarray(
+        normalized,
+        dtype=np.float64,
+    )
+
+    if len(original) != len(normalized):
+        return False
+
+    order = np.argsort(
+        original,
+        kind="stable",
+    )
+
+    sorted_original = original[order]
+    sorted_normalized = normalized[order]
+
+    # --------------------------------------------------------
+    # Differences between consecutive original values.
+    # --------------------------------------------------------
+
+    original_diff = np.diff(
+        sorted_original
+    )
+
+    normalized_diff = np.diff(
+        sorted_normalized
+    )
+
+    # --------------------------------------------------------
+    # Where the original values are strictly increasing,
+    # normalized values must never decrease.
+    #
+    # We use a tolerance scaled to the numerical precision
+    # of the normalized interval.
+    # --------------------------------------------------------
+
+    strict_mask = (
+        original_diff
+        > 0.0
+    )
+
+    if np.any(strict_mask):
+
+        if np.any(
+            normalized_diff[strict_mask]
+            < -1e-14
+        ):
+            return False
+
+    # --------------------------------------------------------
+    # Where original values are exactly equal, the affine
+    # transformation must give exactly equal results.
+    # --------------------------------------------------------
+
+    equal_mask = (
+        original_diff
+        == 0.0
+    )
+
+    if np.any(equal_mask):
+
+        if np.any(
+            np.abs(
+                normalized_diff[equal_mask]
+            )
+            > 1e-14
+        ):
+            return False
+
+    return True
 
 
 # ============================================================
@@ -262,6 +338,7 @@ def main():
         "Loading uncertainty statistics"
     )
     print("-" * 70)
+
     print(
         f"File: {DATA_FILE}"
     )
@@ -313,6 +390,20 @@ def main():
         ],
         dtype=np.float64,
     )
+
+    # ========================================================
+    # Validate raw data
+    # ========================================================
+
+    if not (
+        np.all(np.isfinite(H))
+        and np.all(np.isfinite(U))
+        and np.all(np.isfinite(HU))
+    ):
+
+        raise RuntimeError(
+            "ERROR: H, U or HU contains non-finite values."
+        )
 
     sides = extract_side_to_move(
         fens
@@ -515,24 +606,19 @@ def main():
             )
 
     # ========================================================
-    # Multilinear active-learning score
+    # Raw active-learning score
     # ========================================================
     #
-    # H_norm, U_norm and HU_norm are already side-aware
-    # percentile ranks.
+    # No W_0 anymore.
     #
-    # We therefore combine them directly using the calibrated
-    # weights.
+    # I_raw = W_H * H_norm
+    #       + W_U * U_norm
+    #       + W_HU * HU_norm
     #
-    # IMPORTANT:
-    # Do NOT percentile-rank I again.
-    #
-    # A second percentile normalization would destroy the
-    # weighted continuous structure of the score and force I
-    # toward an almost perfectly uniform distribution.
+    # Note that W_H is negative.
     # ========================================================
 
-    I = (
+    I_raw = (
         W_H * H_norm
         +
         W_U * U_norm
@@ -540,25 +626,106 @@ def main():
         W_HU * HU_norm
     )
 
+    if not np.all(
+        np.isfinite(I_raw)
+    ):
+
+        raise RuntimeError(
+            "ERROR: raw I contains non-finite values."
+        )
+
     # ========================================================
-    # Score sanity check
+    # Raw I range
     # ========================================================
+
+    I_min = np.min(
+        I_raw
+    )
+
+    I_max = np.max(
+        I_raw
+    )
 
     print()
     print(
-        "I RANGE"
+        "RAW I RANGE"
     )
     print("-" * 70)
 
     print(
-        f"Min : "
-        f"{np.min(I):.9f}"
+        f"I_min : "
+        f"{I_min:.12f}"
     )
 
     print(
-        f"Max : "
-        f"{np.max(I):.9f}"
+        f"I_max : "
+        f"{I_max:.12f}"
     )
+
+    # ========================================================
+    # Min-max normalization
+    # ========================================================
+    #
+    # I_norm = (I_raw - I_min)
+    #          / (I_max - I_min)
+    #
+    # This changes the numerical scale but NOT the ranking.
+    # ========================================================
+
+    I, I_min_check, I_max_check = min_max_normalize(
+        I_raw
+    )
+
+    # ========================================================
+    # Ranking preservation
+    # ========================================================
+
+    ranking_preserved = verify_ranking_preserved(
+        I_raw,
+        I,
+    )
+
+    print()
+    print(
+        "MIN-MAX NORMALIZATION"
+    )
+    print("-" * 70)
+
+    print(
+        f"I_min : "
+        f"{I_min_check:.12f}"
+    )
+
+    print(
+        f"I_max : "
+        f"{I_max_check:.12f}"
+    )
+
+    print(
+        f"Normalized min : "
+        f"{np.min(I):.12f}"
+    )
+
+    print(
+        f"Normalized max : "
+        f"{np.max(I):.12f}"
+    )
+
+    print(
+        f"Ranking preserved : "
+        f"{ranking_preserved}"
+    )
+
+    if not ranking_preserved:
+
+        raise RuntimeError(
+            "ERROR: min-max normalization failed the "
+            "monotonicity check."
+        )
+
+    # ========================================================
+    # Score sanity check
+    # ========================================================
 
     if (
         np.min(I) < 0.0
@@ -566,7 +733,7 @@ def main():
     ):
 
         raise RuntimeError(
-            "ERROR: I is outside [0, 1]."
+            "ERROR: normalized I is outside [0, 1]."
         )
 
     # ========================================================
@@ -962,7 +1129,7 @@ def main():
 
     plt.xlim(
         0.0,
-        np.max(I),
+        1.0,
     )
 
     plt.axvline(
@@ -976,7 +1143,7 @@ def main():
     )
 
     plt.xlabel(
-        "Score I"
+        "Score I normalisé"
     )
 
     plt.ylabel(
@@ -998,7 +1165,7 @@ def main():
     output_path = (
         PROJECT_ROOT
         / "data"
-        / "I_distribution_21_30_high.png"
+        / "I_distribution_1-100.png"
     )
 
     plt.savefig(
