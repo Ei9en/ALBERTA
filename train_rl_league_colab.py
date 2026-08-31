@@ -18,18 +18,12 @@ import torch.nn.functional as F
 from torch.optim import Adam
 
 from src.selfplay.league import League
-
 from src.encoding import encode_boards
-
 from src.models.resnet import ChessResNet
 from src.models.actor_critic import ActorCritic
-
 from src.agents.ppo_agent import PPOAgent
-from src.selfplay.game import SelfPlayGame
-
 from src.rl.replay_buffer import ReplayBuffer
 from src.rl.uncertainty_stats import UncertaintyStats
-
 from src.actions_space import ACTIONS
 from src.actions_space import ACTION_TO_INDEX
 
@@ -46,20 +40,6 @@ PROJECT_ROOT = Path(
 # ============================================================
 # Temperature
 # ============================================================
-
-# Température utilisée UNIQUEMENT pour le self-play.
-#
-# Elle contrôle la distribution comportementale de PPOAgent.
-#
-# T = 1.0 :
-# distribution normale du réseau
-#
-# T > 1.0 :
-# exploration augmentée
-#
-# T < 1.0 :
-# distribution plus déterministe
-#
 
 TEMPERATURE_SELFPLAY = 2
 
@@ -124,6 +104,57 @@ ENTROPY_COEF = 0.01
 
 
 # ============================================================
+# DKL regularization
+# ============================================================
+
+DKL_COEF_MAX = 0.0025
+
+DKL_DECAY = 0.2636
+
+DKL_EXP_MAX = 25.042
+
+
+def get_dkl_lambda(epoch):
+    """
+    Lambda(e) =
+        0.0025 *
+        (1 - exp(-0.2636 * e))
+        /
+        (1 - exp(-25.042))
+    """
+
+    numerator = (
+        1.0
+        -
+        torch.exp(
+            torch.tensor(
+                -DKL_DECAY * epoch,
+                dtype=torch.float32,
+                device=DEVICE,
+            )
+        )
+    )
+
+    denominator = (
+        1.0
+        -
+        torch.exp(
+            torch.tensor(
+                -DKL_EXP_MAX,
+                dtype=torch.float32,
+                device=DEVICE,
+            )
+        )
+    )
+
+    return (
+        DKL_COEF_MAX
+        * numerator
+        / denominator
+    )
+
+
+# ============================================================
 # League
 # ============================================================
 
@@ -134,15 +165,11 @@ LEAGUE_END_EPOCH = START_EPOCH - 1
 LEAGUE_START_EPOCH = LEAGUE_END_EPOCH - 9
 
 
-
-
 # ============================================================
 # Model Loading
 # ============================================================
 
-def load_bc_agent(
-    epoch,
-):
+def load_bc_agent(epoch):
 
     path = (
         PROJECT_ROOT
@@ -151,52 +178,42 @@ def load_bc_agent(
         / f"bc_v3_epoch_{epoch}.pt"
     )
 
-
     bc_model = ChessResNet(
         num_actions=len(ACTIONS),
         channels=32,
         blocks=4,
     )
 
-
     checkpoint = torch.load(
         path,
         map_location=DEVICE,
     )
 
-
     bc_model.load_state_dict(
         checkpoint["model_state_dict"]
     )
-
 
     model = ActorCritic(
         bc_model
     )
 
-
     model.to(DEVICE)
 
     model.eval()
 
-
     return model
 
 
-def load_league_agent(
-    epoch,
-):
+def load_league_agent(epoch):
 
     name = (
         f"league_epoch_{epoch:03d}"
     )
 
-
     path = (
         LEAGUE_DIR
         / f"{name}.pt"
     )
-
 
     if not path.exists():
 
@@ -207,12 +224,10 @@ def load_league_agent(
 
         return None
 
-
     checkpoint = torch.load(
         path,
         map_location=DEVICE,
     )
-
 
     base_model = ChessResNet(
         num_actions=len(ACTIONS),
@@ -220,21 +235,17 @@ def load_league_agent(
         blocks=4,
     )
 
-
     model = ActorCritic(
         base_model
     )
-
 
     model.load_state_dict(
         checkpoint["model_state_dict"]
     )
 
-
     model.to(DEVICE)
 
     model.eval()
-
 
     return model
 
@@ -258,7 +269,6 @@ def load_model():
         "======================================"
     )
 
-
     if RESUME_RL:
 
         print("Resuming RL")
@@ -267,7 +277,6 @@ def load_model():
             "======================================"
         )
 
-
         checkpoint_path = (
             PROJECT_ROOT
             / "checkpoints"
@@ -275,11 +284,9 @@ def load_model():
             / f"rl_epoch_{RESUME_EPOCH}.pt"
         )
 
-
         print(
             f"Checkpoint: {checkpoint_path}"
         )
-
 
         bc_model = ChessResNet(
             num_actions=len(ACTIONS),
@@ -287,28 +294,23 @@ def load_model():
             blocks=4,
         )
 
-
         model = ActorCritic(
             bc_model
         ).to(DEVICE)
-
 
         checkpoint = torch.load(
             checkpoint_path,
             map_location=DEVICE,
         )
 
-
         model.load_state_dict(
             checkpoint["model_state_dict"]
         )
-
 
         optimizer = Adam(
             model.parameters(),
             lr=LR,
         )
-
 
         if "optimizer_state_dict" in checkpoint:
 
@@ -318,17 +320,14 @@ def load_model():
                 ]
             )
 
-
             print(
                 "Optimizer state loaded."
             )
-
 
         print(
             f"RL checkpoint loaded "
             f"(epoch {checkpoint.get('epoch', '?')})."
         )
-
 
     else:
 
@@ -340,7 +339,6 @@ def load_model():
             "======================================"
         )
 
-
         bc5_path = (
             PROJECT_ROOT
             / "checkpoints"
@@ -348,40 +346,33 @@ def load_model():
             / "bc_v3_epoch_5.pt"
         )
 
-
         bc_model = ChessResNet(
             num_actions=len(ACTIONS),
             channels=32,
             blocks=4,
         )
 
-
         checkpoint = torch.load(
             bc5_path,
             map_location=DEVICE,
         )
 
-
         bc_model.load_state_dict(
             checkpoint["model_state_dict"]
         )
 
-
         model = ActorCritic(
             bc_model
         ).to(DEVICE)
-
 
         optimizer = Adam(
             model.parameters(),
             lr=LR,
         )
 
-
         print(
             "Initial policy loaded from BC5."
         )
-
 
     # ========================================================
     # League initiale
@@ -391,18 +382,14 @@ def load_model():
         max_agents=LEAGUE_MAX_AGENTS
     )
 
-
     bc4 = load_bc_agent(4)
-
 
     league.add_agent(
         "bc_epoch_4",
         bc4,
     )
 
-
     bc5 = load_bc_agent(5)
-
 
     league.add_agent(
         "bc_epoch_5",
@@ -415,7 +402,10 @@ def load_model():
 
     if RESUME_RL:
 
-        start_epoch = max(1, LEAGUE_START_EPOCH)
+        start_epoch = max(
+            1,
+            LEAGUE_START_EPOCH,
+        )
 
         for epoch in range(
             start_epoch,
@@ -462,13 +452,11 @@ def load_model():
                 f"Loaded league_epoch_{epoch:03d}"
             )
 
-
     print()
 
     print(
         f"League loaded: {len(league)} agents"
     )
-
 
     return model, optimizer, league
 
@@ -492,19 +480,15 @@ _WORKER_LEAGUE_REGISTRY = None
 # Préparation modèle partagé
 # ============================================================
 
-def _prepare_shared_model(
-    model,
-):
+def _prepare_shared_model(model):
 
     cpu_model = copy.deepcopy(
         model
     ).to("cpu")
 
-
     cpu_model.eval()
 
     cpu_model.share_memory()
-
 
     return cpu_model
 
@@ -526,22 +510,17 @@ def _init_selfplay_worker(
     global _WORKER_LEAGUE_AGENTS
     global _WORKER_LEAGUE_REGISTRY
 
-
     torch.set_num_threads(1)
-
 
     _WORKER_CURRENT_MODEL = (
         current_model
     )
 
-
     _WORKER_CURRENT_MODEL.eval()
-
 
     _WORKER_LEAGUE_MODELS = (
         league_models
     )
-
 
     for model in (
         _WORKER_LEAGUE_MODELS.values()
@@ -549,11 +528,9 @@ def _init_selfplay_worker(
 
         model.eval()
 
-
     _WORKER_LEAGUE_REGISTRY = (
         league_registry
     )
-
 
     _WORKER_CURRENT_AGENT = PPOAgent(
         _WORKER_CURRENT_MODEL,
@@ -565,23 +542,18 @@ def _init_selfplay_worker(
         opening_prior_plies=6,
     )
 
-
     _WORKER_LEAGUE_AGENTS = {}
-
 
     for name in _WORKER_LEAGUE_REGISTRY:
 
         if name not in _WORKER_LEAGUE_MODELS:
             continue
 
-
         model = (
             _WORKER_LEAGUE_MODELS[name]
         )
 
-
         model.eval()
-
 
         _WORKER_LEAGUE_AGENTS[name] = (
             PPOAgent(
@@ -597,9 +569,7 @@ def _init_selfplay_worker(
 # Worker self-play
 # ============================================================
 
-def _selfplay_worker(
-    worker_args,
-):
+def _selfplay_worker(worker_args):
 
     (
         n_games,
@@ -607,12 +577,10 @@ def _selfplay_worker(
         batch_size,
     ) = worker_args
 
-
     global _WORKER_CURRENT_AGENT
     global _WORKER_LEAGUE_MODELS
     global _WORKER_LEAGUE_AGENTS
     global _WORKER_LEAGUE_REGISTRY
-
 
     # ========================================================
     # Active league
@@ -622,7 +590,6 @@ def _selfplay_worker(
         _WORKER_LEAGUE_REGISTRY
     )
 
-
     for name in active_names:
 
         if name not in _WORKER_LEAGUE_AGENTS:
@@ -630,14 +597,11 @@ def _selfplay_worker(
             if name not in _WORKER_LEAGUE_MODELS:
                 continue
 
-
             model = (
                 _WORKER_LEAGUE_MODELS[name]
             )
 
-
             model.eval()
-
 
             _WORKER_LEAGUE_AGENTS[name] = (
                 PPOAgent(
@@ -647,7 +611,6 @@ def _selfplay_worker(
                     device="cpu",
                 )
             )
-
 
     # ========================================================
     # Random seed
@@ -661,11 +624,9 @@ def _selfplay_worker(
         )
     )
 
-
     random.seed(seed)
 
     torch.manual_seed(seed)
-
 
     # ========================================================
     # Agents
@@ -675,11 +636,9 @@ def _selfplay_worker(
         _WORKER_CURRENT_AGENT
     )
 
-
     league_agents = (
         _WORKER_LEAGUE_AGENTS
     )
-
 
     opponent_names = [
         name
@@ -687,14 +646,12 @@ def _selfplay_worker(
         if name in league_agents
     ]
 
-
     if not opponent_names:
 
         raise RuntimeError(
             "Aucun adversaire disponible "
             "dans la league."
         )
-
 
     # ========================================================
     # Initialize games
@@ -704,20 +661,17 @@ def _selfplay_worker(
 
     completed_games = []
 
-
     for i in range(n_games):
 
         opponent_name = random.choice(
             opponent_names
         )
 
-
         opponent_agent = (
             league_agents[
                 opponent_name
             ]
         )
-
 
         if i % 2 == 0:
 
@@ -734,7 +688,6 @@ def _selfplay_worker(
             black_agent = current_agent
 
             current_is_white = False
-
 
         active_games.append(
             {
@@ -755,7 +708,6 @@ def _selfplay_worker(
             }
         )
 
-
     # ========================================================
     # Batched self-play
     # ========================================================
@@ -766,15 +718,9 @@ def _selfplay_worker(
 
             games_by_agent = {}
 
-
-            # ------------------------------------------------
-            # Group games by agent
-            # ------------------------------------------------
-
             for game in active_games:
 
                 board = game["board"]
-
 
                 agent = (
                     game["white"]
@@ -782,16 +728,10 @@ def _selfplay_worker(
                     else game["black"]
                 )
 
-
                 games_by_agent.setdefault(
                     agent,
                     [],
                 ).append(game)
-
-
-            # ------------------------------------------------
-            # Batched inference
-            # ------------------------------------------------
 
             for (
                 agent,
@@ -808,25 +748,17 @@ def _selfplay_worker(
                         start:start + batch_size
                     ]
 
-
                     if not batch_games:
                         continue
-
 
                     boards = [
                         game["board"]
                         for game in batch_games
                     ]
 
-
                     infos = agent.choose_moves(
                         boards
                     )
-
-
-                    # ----------------------------------------
-                    # Apply moves
-                    # ----------------------------------------
 
                     for (
                         game,
@@ -837,11 +769,6 @@ def _selfplay_worker(
                     ):
 
                         board = game["board"]
-
-
-                        # ------------------------------------
-                        # Store current-agent trajectory
-                        # ------------------------------------
 
                         if agent is current_agent:
 
@@ -875,33 +802,21 @@ def _selfplay_worker(
                                             for move
                                             in board.legal_moves
                                         ],
-                                    
+
                                     "ply":
                                         board.ply(),
                                 }
                             )
 
-
-                        # ------------------------------------
-                        # Push move
-                        # ------------------------------------
-
                         board.push(
                             info["move"]
                         )
 
-
-            # ------------------------------------------------
-            # Remove finished games
-            # ------------------------------------------------
-
             still_active = []
-
 
             for game in active_games:
 
                 board = game["board"]
-
 
                 if board.is_game_over():
 
@@ -922,20 +837,13 @@ def _selfplay_worker(
                         }
                     )
 
-
                 else:
 
                     still_active.append(
                         game
                     )
 
-
             active_games = still_active
-
-
-    # ========================================================
-    # Return silently
-    # ========================================================
 
     return completed_games
 
@@ -958,24 +866,20 @@ def collect_games_parallel(
 
     selfplay_start = time.perf_counter()
 
-
     if len(league) == 0:
 
         raise RuntimeError(
             "La league est vide."
         )
 
-
     if n_games <= 0:
 
         return []
-
 
     num_workers = min(
         num_workers,
         n_games,
     )
-
 
     games_per_task = max(
         12,
@@ -984,13 +888,11 @@ def collect_games_parallel(
         ),
     )
 
-
     worker_args = []
 
     remaining = n_games
 
     task_id = 0
-
 
     while remaining > 0:
 
@@ -998,7 +900,6 @@ def collect_games_parallel(
             games_per_task,
             remaining,
         )
-
 
         worker_args.append(
             (
@@ -1008,20 +909,16 @@ def collect_games_parallel(
             )
         )
 
-
         remaining -= task_games
 
         task_id += 1
 
-
     completed_games = []
-
 
     progress = tqdm(
         total=n_games,
         desc="League self-play",
     )
-
 
     for worker_games in pool.imap_unordered(
         _selfplay_worker,
@@ -1033,14 +930,11 @@ def collect_games_parallel(
             worker_games
         )
 
-
         progress.update(
             len(worker_games)
         )
 
-
     progress.close()
-
 
     if len(completed_games) != n_games:
 
@@ -1050,18 +944,15 @@ def collect_games_parallel(
             f"{n_games}"
         )
 
-
     selfplay_time = (
         time.perf_counter()
         - selfplay_start
     )
 
-
     total_positions = sum(
         len(game["trajectory"])
         for game in completed_games
     )
-
 
     print(
         f"Self-play time: "
@@ -1069,13 +960,11 @@ def collect_games_parallel(
         f"({selfplay_time / n_games:.2f}s/game)"
     )
 
-
     print(
         f"Self-play positions: "
         f"{total_positions} "
         f"({total_positions / n_games:.1f}/game)"
     )
-
 
     # ========================================================
     # Calcul U + H + HU
@@ -1085,14 +974,11 @@ def collect_games_parallel(
         time.perf_counter()
     )
 
-
     all_steps = []
-
 
     for game in completed_games:
 
         result = game["result"]
-
 
         for step in game["trajectory"]:
 
@@ -1101,7 +987,6 @@ def collect_games_parallel(
             all_steps.append(
                 step
             )
-
 
     if all_steps:
 
@@ -1112,23 +997,9 @@ def collect_games_parallel(
             for step in all_steps
         ]
 
-
-        # ====================================================
-        # Calcul U par batches
-        #
-        # IMPORTANT :
-        # Ne pas envoyer toutes les positions de l'epoch
-        # simultanément sur le GPU.
-        #
-        # Avec 2500 parties, cela peut représenter plusieurs
-        # centaines de milliers de positions.
-        # ====================================================
-
         U_BATCH_SIZE = 256
 
-
         uncertainties = []
-
 
         with torch.no_grad():
 
@@ -1142,11 +1013,9 @@ def collect_games_parallel(
                     start:start + U_BATCH_SIZE
                 ]
 
-
                 x = encode_boards(
                     batch_boards
                 ).to(DEVICE)
-
 
                 batch_uncertainties = (
                     league.uncertainty_batch(
@@ -1155,7 +1024,6 @@ def collect_games_parallel(
                     )
                 )
 
-
                 uncertainties.extend(
                     batch_uncertainties
                     .detach()
@@ -1163,13 +1031,7 @@ def collect_games_parallel(
                     .tolist()
                 )
 
-
                 del x
-
-
-        # ====================================================
-        # Ajouter U + H + HU aux positions
-        # ====================================================
 
         for (
             step,
@@ -1184,16 +1046,12 @@ def collect_games_parallel(
                 0.0,
             )
 
-
             HU = H * U
-
 
             step["uncertainty"] = U
 
             step["HU"] = HU
 
-
-            # Une entrée pour CHAQUE position.
             stats.add(
                 step["fen"],
                 step["action"],
@@ -1203,12 +1061,10 @@ def collect_games_parallel(
                 step["_game_result"],
             )
 
-
     uncertainty_time = (
         time.perf_counter()
         - uncertainty_start
     )
-
 
     print(
         f"U computation time: "
@@ -1216,13 +1072,11 @@ def collect_games_parallel(
         f"({uncertainty_time / max(len(all_steps), 1) * 1000:.2f}ms/position)"
     )
 
-
     print(
         f"Uncertainty records added: "
         f"{len(all_steps)}",
         flush=True,
     )
-
 
     return completed_games
 
@@ -1240,24 +1094,20 @@ def compute_gae(
 
     n = len(trajectory)
 
-
     if n == 0:
 
         return [], []
-
 
     values = [
         float(step["value"])
         for step in trajectory
     ]
 
-
     advantages = [
         0.0
     ] * n
 
     gae = 0.0
-
 
     for t in reversed(
         range(n)
@@ -1271,13 +1121,11 @@ def compute_gae(
 
             next_value = values[t + 1]
 
-
         delta = (
             rewards[t]
             + gamma * next_value
             - values[t]
         )
-
 
         gae = (
             delta
@@ -1286,16 +1134,13 @@ def compute_gae(
             * gae
         )
 
-
         advantages[t] = gae
-
 
     returns = [
         advantages[t]
         + values[t]
         for t in range(n)
     ]
-
 
     return (
         advantages,
@@ -1312,12 +1157,12 @@ def train_epoch(
     optimizer,
     buffer,
     bc_model,
+    epoch,
 ):
 
     model.train()
 
     bc_model.eval()
-
 
     # ========================================================
     # Freeze BatchNorm
@@ -1332,7 +1177,6 @@ def train_epoch(
 
             module.eval()
 
-
     if len(buffer) < BATCH_SIZE:
 
         print(
@@ -1344,14 +1188,13 @@ def train_epoch(
             0.0,
             0.0,
             0.0,
+            0.0,
         )
-
 
     TRAIN_STEPS = (
         len(buffer)
         // BATCH_SIZE
     )
-
 
     # ========================================================
     # Accumulators
@@ -1379,18 +1222,27 @@ def train_epoch(
 
     total_explained_variance = 0.0
 
+    # ========================================================
+    # DKL diagnostics
+    # ========================================================
+
+    total_dkl = 0.0
+
+    total_dkl_loss = 0.0
+
+    lambda_dkl = get_dkl_lambda(
+        epoch
+    )
 
     total_updates = (
         TRAIN_STEPS
         * SGD_EPOCHS
     )
 
-
     progress = tqdm(
         total=total_updates,
         desc="PPO Training",
     )
-
 
     # ========================================================
     # PPO updates
@@ -1408,7 +1260,6 @@ def train_epoch(
                 BATCH_SIZE
             )
 
-
             # =================================================
             # Encode boards
             # =================================================
@@ -1420,11 +1271,9 @@ def train_epoch(
                 for s in batch
             ]
 
-
             x = encode_boards(
                 boards
             ).to(DEVICE)
-
 
             # =================================================
             # Forward RL
@@ -1432,23 +1281,16 @@ def train_epoch(
 
             policy, values = model(x)
 
-
             # =================================================
             # Forward BC
-            #
-            # Le BC est un prior fixe.
-            # Aucun gradient ne doit passer dedans.
             # =================================================
 
             with torch.no_grad():
 
                 bc_policy, _ = bc_model(x)
 
-
             # =================================================
             # Ply
-            #
-            # Le BC prior décroît avec l'avancement de la partie.
             # =================================================
 
             plys = torch.tensor(
@@ -1460,26 +1302,8 @@ def train_epoch(
                 dtype=torch.float32,
             )
 
-
             # =================================================
             # BC prior décroissant
-            #
-            # alpha(ply) = (1 -  ply ) / BC_PRIOR
-            #
-            # ply = 0 :
-            #     alpha = 1
-            #
-            # ply = 20 :
-            #     alpha ~= 0.368
-            #
-            # ply = 40 :
-            #     alpha ~= 0.135
-            #
-            # ply = 60 :
-            #     alpha ~= 0.050
-            #
-            # Le BC guide donc fortement l'ouverture,
-            # puis laisse progressivement la place au RL.
             # =================================================
 
             BC_PRIOR_STRENGTH = 1.0
@@ -1494,7 +1318,6 @@ def train_epoch(
                 )
             )
 
-
             # =================================================
             # Returns
             # =================================================
@@ -1507,7 +1330,6 @@ def train_epoch(
                 device=DEVICE,
                 dtype=torch.float32,
             ).unsqueeze(1)
-
 
             # =================================================
             # Advantages RAW
@@ -1522,7 +1344,6 @@ def train_epoch(
                 dtype=torch.float32,
             )
 
-
             adv_mean = (
                 raw_advantages.mean()
             )
@@ -1530,7 +1351,6 @@ def train_epoch(
             adv_std = (
                 raw_advantages.std()
             )
-
 
             # =================================================
             # Advantage normalization
@@ -1544,17 +1364,8 @@ def train_epoch(
                 + 1e-8
             )
 
-
             # =================================================
             # Old log probabilities
-            #
-            # Ils ont été enregistrés pendant le self-play
-            # avec la distribution :
-            #
-            #     RL + BC prior décroissant + température
-            #
-            # Il faut donc reconstruire EXACTEMENT cette
-            # distribution ci-dessous.
             # =================================================
 
             old_log_probs = torch.tensor(
@@ -1565,7 +1376,6 @@ def train_epoch(
                 device=DEVICE,
                 dtype=torch.float32,
             )
-
 
             # =================================================
             # Legal mask
@@ -1580,7 +1390,6 @@ def train_epoch(
                 device=DEVICE,
             )
 
-
             actions = torch.tensor(
                 [
                     s["action"]
@@ -1589,7 +1398,6 @@ def train_epoch(
                 device=DEVICE,
                 dtype=torch.long,
             )
-
 
             for i, s in enumerate(batch):
 
@@ -1600,12 +1408,10 @@ def train_epoch(
                     ]
                 ]
 
-
                 legal_mask[
                     i,
                     ids,
                 ] = True
-
 
             # =================================================
             # Masquage des coups illégaux
@@ -1618,7 +1424,6 @@ def train_epoch(
                 )
             )
 
-
             legal_bc_policy = (
                 bc_policy.masked_fill(
                     ~legal_mask,
@@ -1626,12 +1431,8 @@ def train_epoch(
                 )
             )
 
-
             # =================================================
-            # Normalisation séparée
-            #
-            # Les deux réseaux sont transformés en distributions
-            # sur les seuls coups légaux.
+            # Distributions RL / BC
             # =================================================
 
             rl_log_probs = F.log_softmax(
@@ -1639,40 +1440,23 @@ def train_epoch(
                 dim=1,
             )
 
-
             bc_log_probs = F.log_softmax(
                 legal_bc_policy,
                 dim=1,
             )
 
-
             # =================================================
-            # BC prior
+            # DKL(RL || BC)
             #
-            # Produit géométrique :
+            # DKL = sum_a P_RL(a)
+            #             log(P_RL(a) / P_BC(a))
             #
-            # P_combined(a)
-            #     ∝
-            #     P_RL(a)
-            #     *
-            #     P_BC(a)^alpha
-            #
-            # avec alpha décroissant selon le ply.
+            # Le calcul est fait sur les coups légaux.
             # =================================================
 
-            # =========================================================
-            # BC prior
-            #
-            # IMPORTANT :
-            # Les coups illégaux sont -inf dans bc_log_probs.
-            # Or lorsque bc_weight = 0 :
-            #
-            #     0 * (-inf) = NaN
-            #
-            # On neutralise donc les coups illégaux AVANT
-            # la multiplication. rl_log_probs conserve déjà
-            # le masque légal.
-            # =========================================================
+            rl_probs_for_dkl = torch.exp(
+                rl_log_probs
+            )
 
             safe_bc_log_probs = (
                 bc_log_probs.masked_fill(
@@ -1681,6 +1465,51 @@ def train_epoch(
                 )
             )
 
+            safe_rl_log_probs = (
+                rl_log_probs.masked_fill(
+                    ~legal_mask,
+                    0.0,
+                )
+            )
+
+            dkl_per_position = (
+                rl_probs_for_dkl
+                *
+                (
+                    safe_rl_log_probs
+                    -
+                    safe_bc_log_probs
+                )
+            ).sum(
+                dim=1
+            )
+
+            delta_dkl = (
+                dkl_per_position.mean()
+            )
+
+            # =================================================
+            # Nouvelle loss DKL
+            #
+            # L_DKL = lambda(e) * DKL^2
+            # =================================================
+
+            dkl_loss = (
+                lambda_dkl
+                *
+                delta_dkl.pow(2)
+            )
+
+            # =================================================
+            # BC prior
+            # =================================================
+
+            safe_bc_log_probs = (
+                bc_log_probs.masked_fill(
+                    ~legal_mask,
+                    0.0,
+                )
+            )
 
             combined_log_probs = (
                 rl_log_probs
@@ -1690,12 +1519,8 @@ def train_epoch(
                 safe_bc_log_probs
             )
 
-
             # =================================================
             # Renormalisation
-            #
-            # IMPORTANT :
-            # combined_log_probs n'est pas encore normalisé.
             # =================================================
 
             combined_log_probs = F.log_softmax(
@@ -1703,13 +1528,8 @@ def train_epoch(
                 dim=1,
             )
 
-
             # =================================================
             # Température
-            #
-            # Même température que celle utilisée en self-play.
-            #
-            # P_T(a) ∝ exp(log P(a) / T)
             # =================================================
 
             ppo_logits = (
@@ -1718,15 +1538,13 @@ def train_epoch(
                 TEMPERATURE_SELFPLAY
             )
 
-
             log_probs = F.log_softmax(
                 ppo_logits,
                 dim=1,
             )
 
-
             # =================================================
-            # Log-prob du coup réellement joué
+            # Log-prob du coup joué
             # =================================================
 
             selected_log_probs = (
@@ -1738,7 +1556,6 @@ def train_epoch(
                 .squeeze(1)
             )
 
-
             # =================================================
             # PPO ratio
             # =================================================
@@ -1748,11 +1565,9 @@ def train_epoch(
                 - old_log_probs
             )
 
-
             ratio = torch.exp(
                 log_ratio
             )
-
 
             # =================================================
             # Policy KL
@@ -1766,7 +1581,6 @@ def train_epoch(
                 ).mean()
             )
 
-
             # =================================================
             # Clip fraction
             # =================================================
@@ -1777,13 +1591,11 @@ def train_epoch(
                 (ratio > 1.0 + PPO_CLIP)
             )
 
-
             clip_fraction = (
                 clipped_mask
                 .float()
                 .mean()
             )
-
 
             # =================================================
             # PPO actor objective
@@ -1794,7 +1606,6 @@ def train_epoch(
                 * advantages
             )
 
-
             clipped = (
                 torch.clamp(
                     ratio,
@@ -1804,24 +1615,18 @@ def train_epoch(
                 * advantages
             )
 
-
             actor_loss = -torch.min(
                 unclipped,
                 clipped,
             ).mean()
 
-
             # =================================================
             # Entropy
-            #
-            # Entropie de la distribution réellement utilisée
-            # par PPO/self-play.
             # =================================================
 
             probs = torch.exp(
                 log_probs
             )
-
 
             safe_log_probs = (
                 log_probs.masked_fill(
@@ -1829,7 +1634,6 @@ def train_epoch(
                     0.0,
                 )
             )
-
 
             entropy = -(
                 probs
@@ -1839,7 +1643,6 @@ def train_epoch(
                 dim=1
             ).mean()
 
-
             # =================================================
             # Critic
             # =================================================
@@ -1848,7 +1651,6 @@ def train_epoch(
                 values,
                 returns,
             )
-
 
             # =================================================
             # Critic diagnostics
@@ -1861,7 +1663,6 @@ def train_epoch(
             return_flat = (
                 returns.squeeze(1)
             )
-
 
             value_mean = (
                 value_flat.mean()
@@ -1879,18 +1680,15 @@ def train_epoch(
                 return_flat.std()
             )
 
-
             return_variance = torch.var(
                 return_flat,
                 unbiased=False,
             )
 
-
             residual_variance = torch.var(
                 return_flat - value_flat,
                 unbiased=False,
             )
-
 
             explained_variance = (
                 1.0
@@ -1903,9 +1701,14 @@ def train_epoch(
                 )
             )
 
-
             # =================================================
             # Total loss
+            #
+            # L =
+            #     L_actor
+            #     + VALUE_COEF * L_critic
+            #     - ENTROPY_COEF * H
+            #     + L_DKL
             # =================================================
 
             loss = (
@@ -1916,8 +1719,9 @@ def train_epoch(
                 -
                 ENTROPY_COEF
                 * entropy
+                +
+                dkl_loss
             )
-
 
             # =================================================
             # Pure PPO actor gradient
@@ -1930,25 +1734,20 @@ def train_epoch(
                 allow_unused=True,
             )
 
-
             actor_grad_sq = 0.0
-
 
             for grad in actor_gradients:
 
                 if grad is None:
                     continue
 
-
                 actor_grad_sq += (
                     grad.detach().norm(2).item() ** 2
                 )
 
-
             actor_grad_norm = (
                 actor_grad_sq ** 0.5
             )
-
 
             # =================================================
             # Pure critic gradient
@@ -1961,25 +1760,20 @@ def train_epoch(
                 allow_unused=True,
             )
 
-
             critic_grad_sq = 0.0
-
 
             for grad in critic_gradients:
 
                 if grad is None:
                     continue
 
-
                 critic_grad_sq += (
                     grad.detach().norm(2).item() ** 2
                 )
 
-
             critic_grad_norm = (
                 critic_grad_sq ** 0.5
             )
-
 
             # =================================================
             # Backward
@@ -1987,18 +1781,14 @@ def train_epoch(
 
             optimizer.zero_grad()
 
-
             loss.backward()
-
 
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
                 1.0,
             )
 
-
             optimizer.step()
-
 
             # =================================================
             # Accumulate
@@ -2054,12 +1844,21 @@ def train_epoch(
                 explained_variance.item()
             )
 
+            # =================================================
+            # DKL diagnostics
+            # =================================================
+
+            total_dkl += (
+                delta_dkl.item()
+            )
+
+            total_dkl_loss += (
+                dkl_loss.item()
+            )
 
             progress.update(1)
 
-
     progress.close()
-
 
     # ========================================================
     # Averages
@@ -2140,6 +1939,15 @@ def train_epoch(
         / total_updates
     )
 
+    avg_dkl = (
+        total_dkl
+        / total_updates
+    )
+
+    avg_dkl_loss = (
+        total_dkl_loss
+        / total_updates
+    )
 
     # ========================================================
     # Diagnostics
@@ -2159,12 +1967,15 @@ def train_epoch(
         "======================================"
     )
 
+    print(
+        f"Epoch:                 "
+        f"{epoch}"
+    )
 
     print(
         f"Self-play temperature: "
         f"{TEMPERATURE_SELFPLAY:.2f}"
     )
-
 
     print(
         f"BC prior strength:     "
@@ -2176,88 +1987,100 @@ def train_epoch(
         f"{BC_PRIOR_PLIES:.1f}"
     )
 
-
     print(
-        f"Advantage mean:       "
+        f"Advantage mean:        "
         f"{avg_adv_mean:+.6f}"
     )
 
     print(
-        f"Advantage std:        "
+        f"Advantage std:         "
         f"{avg_adv_std:.6f}"
     )
 
-
     print(
-        f"Return mean:          "
+        f"Return mean:           "
         f"{avg_return_mean:+.6f}"
     )
 
     print(
-        f"Return std:           "
+        f"Return std:            "
         f"{avg_return_std:.6f}"
     )
 
-
     print(
-        f"Value mean:           "
+        f"Value mean:            "
         f"{avg_value_mean:+.6f}"
     )
 
     print(
-        f"Value std:           "
+        f"Value std:             "
         f"{avg_value_std:.6f}"
     )
 
-
     print(
-        f"Critic MSE:           "
+        f"Critic MSE:            "
         f"{avg_critic:.6f}"
     )
 
     print(
-        f"Explained variance:   "
+        f"Explained variance:    "
         f"{avg_explained_variance:+.6f}"
     )
 
-
     print(
-        f"Actor gradient norm:  "
+        f"Actor gradient norm:   "
         f"{avg_actor_grad_norm:.6e}"
     )
 
     print(
-        f"Critic gradient norm: "
+        f"Critic gradient norm:  "
         f"{avg_critic_grad_norm:.6e}"
     )
 
-
     print(
-        f"Policy KL:            "
+        f"Policy KL:             "
         f"{avg_kl:.6e}"
     )
 
     print(
-        f"Clip fraction:        "
+        f"Clip fraction:         "
         f"{avg_clip_fraction:.2%}"
     )
 
     print(
-        f"Entropy:              "
+        f"Entropy:               "
         f"{avg_entropy:.6f}"
     )
 
+    print(
+        "--------------------------------------"
+    )
+
+    print(
+        f"DKL(RL || BC):         "
+        f"{avg_dkl:.6e}"
+    )
+
+    print(
+        f"DKL lambda:            "
+        f"{lambda_dkl.item():.6e}"
+    )
+
+    print(
+        f"DKL loss:              "
+        f"{avg_dkl_loss:.6e}"
+    )
 
     print(
         "======================================"
     )
-
 
     return (
         avg_loss,
         avg_actor,
         avg_critic,
         avg_kl,
+        avg_dkl,
     )
 
 
@@ -2279,7 +2102,6 @@ def save_checkpoint(
         / f"rl_epoch_{epoch}.pt"
     )
 
-
     torch.save(
         {
             "epoch":
@@ -2296,7 +2118,6 @@ def save_checkpoint(
         },
         path,
     )
-
 
     print(
         "Checkpoint saved:",
@@ -2320,7 +2141,6 @@ def save_replay_buffer(
         / f"replay_buffer_epoch_{epoch}.pkl"
     )
 
-
     with open(
         path,
         "wb",
@@ -2330,7 +2150,6 @@ def save_replay_buffer(
             buffer,
             f,
         )
-
 
     print(
         "Replay buffer saved:",
@@ -2361,7 +2180,6 @@ def main():
 
     bc_model_selfplay.eval()
 
-
     # ========================================================
     # Replay buffer
     # ========================================================
@@ -2370,19 +2188,13 @@ def main():
         capacity=300000
     )
 
-
     # ========================================================
     # Uncertainty statistics
-    #
-    # Nouveau run :
-    # on repart avec un JSON entièrement nouveau.
     # ========================================================
 
     stats = UncertaintyStats()
 
-
     best_loss = None
-
 
     # ========================================================
     # Parallel self-play
@@ -2391,7 +2203,6 @@ def main():
     NUM_WORKERS = 12
 
     SELFPLAY_BATCH_SIZE = 256
-
 
     # ========================================================
     # Shared current model
@@ -2402,20 +2213,17 @@ def main():
         flush=True,
     )
 
-
     shared_current_model = (
         _prepare_shared_model(
             model
         )
     )
 
-
     # ========================================================
     # Shared league models
     # ========================================================
 
     shared_league_models = {}
-
 
     for (
         name,
@@ -2428,7 +2236,6 @@ def main():
             )
         )
 
-
     # ========================================================
     # Préparer futurs slots
     # ========================================================
@@ -2439,7 +2246,6 @@ def main():
         - 1
     )
 
-
     for epoch in range(
         START_EPOCH,
         future_end + 1,
@@ -2449,11 +2255,9 @@ def main():
             f"league_epoch_{epoch:03d}"
         )
 
-
         if name in shared_league_models:
 
             continue
-
 
         placeholder = (
             copy.deepcopy(
@@ -2461,23 +2265,19 @@ def main():
             ).to("cpu")
         )
 
-
         placeholder.eval()
 
         placeholder.share_memory()
 
-
         shared_league_models[name] = (
             placeholder
         )
-
 
     print(
         f"Shared models ready: "
         f"{len(shared_league_models)} league slots",
         flush=True,
     )
-
 
     # ========================================================
     # Multiprocessing
@@ -2487,20 +2287,16 @@ def main():
         "spawn"
     )
 
-
     manager = ctx.Manager()
-
 
     league_registry = manager.list(
         league.names()
     )
 
-
     print(
         "\nInitial league registry:",
         flush=True,
     )
-
 
     for name in league_registry:
 
@@ -2508,7 +2304,6 @@ def main():
             f"  - {name}",
             flush=True,
         )
-
 
     # ========================================================
     # Pool
@@ -2540,25 +2335,21 @@ def main():
                 flush=True,
             )
 
-
             print(
                 f"===== Epoch {epoch} =====",
                 flush=True,
             )
-
 
             print(
                 "======================================",
                 flush=True,
             )
 
-
             wins = 0
 
             losses = 0
 
             draws = 0
-
 
             # =================================================
             # Self-play
@@ -2576,7 +2367,6 @@ def main():
                 batch_size=SELFPLAY_BATCH_SIZE,
             )
 
-
             # =================================================
             # Construction replay buffer
             # =================================================
@@ -2587,16 +2377,13 @@ def main():
                     game["trajectory"]
                 )
 
-
                 result = (
                     game["result"]
                 )
 
-
                 current_white = (
                     game["current_white"]
                 )
-
 
                 # =============================================
                 # Résultat
@@ -2612,7 +2399,6 @@ def main():
 
                         losses += 1
 
-
                 elif result == "0-1":
 
                     if current_white:
@@ -2623,11 +2409,9 @@ def main():
 
                         wins += 1
 
-
                 else:
 
                     draws += 1
-
 
                 # =============================================
                 # Rewards
@@ -2636,7 +2420,6 @@ def main():
                 rewards = [
                     0.0
                 ] * len(trajectory)
-
 
                 if trajectory:
 
@@ -2648,7 +2431,6 @@ def main():
                             else -1.0
                         )
 
-
                     elif result == "0-1":
 
                         terminal_reward = (
@@ -2657,16 +2439,13 @@ def main():
                             else 1.0
                         )
 
-
                     else:
 
                         terminal_reward = 0.0
 
-
                     rewards[-1] = (
                         terminal_reward
                     )
-
 
                 # =============================================
                 # GAE
@@ -2680,7 +2459,6 @@ def main():
                         gae_lambda=GAE_LAMBDA,
                     )
                 )
-
 
                 # =============================================
                 # Replay
@@ -2707,7 +2485,6 @@ def main():
                         step["ply"],
                     )
 
-
             # =================================================
             # Stats
             # =================================================
@@ -2717,13 +2494,11 @@ def main():
                 + 0.5 * draws
             ) / GAMES_PER_EPOCH
 
-
             print(
                 f"Replay buffer size: "
                 f"{len(buffer)}",
                 flush=True,
             )
-
 
             print(
                 f"Results: "
@@ -2734,7 +2509,6 @@ def main():
                 flush=True,
             )
 
-
             # =================================================
             # PPO
             # =================================================
@@ -2744,22 +2518,23 @@ def main():
                 actor_loss,
                 critic_loss,
                 approx_kl,
+                dkl,
             ) = train_epoch(
                 model,
                 optimizer,
                 buffer,
                 bc_model,
+                epoch,
             )
-
 
             print(
                 f"Loss={loss:.4f} "
                 f"| Actor={actor_loss:.4f} "
                 f"| Critic={critic_loss:.4f} "
-                f"| KL={approx_kl:.6f}",
+                f"| KL={approx_kl:.6f} "
+                f"| DKL(RL||BC)={dkl:.6f}",
                 flush=True,
             )
-
 
             # =================================================
             # Replay buffer sauvegarde
@@ -2772,26 +2547,19 @@ def main():
                     epoch,
                 )
 
-
             # =================================================
             # On-policy
             # =================================================
 
             buffer.clear()
 
-
             print(
                 "Replay buffer cleared after PPO update.",
                 flush=True,
             )
 
-
             # =================================================
             # Uncertainty stats
-            #
-            # save() écrit TOUT stats.data.
-            # Comme stats est conservé pendant tout le run,
-            # le JSON contient toutes les positions du run.
             # =================================================
 
             stats_path = (
@@ -2800,18 +2568,15 @@ def main():
                 / "uncertainty_stats.json"
             )
 
-
             stats.save(
                 stats_path
             )
-
 
             print(
                 f"Uncertainty JSON updated: "
                 f"{len(stats.data)} positions",
                 flush=True,
             )
-
 
             # =================================================
             # RL checkpoint
@@ -2830,7 +2595,6 @@ def main():
                     loss,
                 )
 
-
             # =================================================
             # Snapshot league
             # =================================================
@@ -2841,26 +2605,21 @@ def main():
                 ).to(DEVICE)
             )
 
-
             snapshot.eval()
-
 
             agent_name = (
                 f"league_epoch_{epoch:03d}"
             )
-
 
             league.add_agent(
                 agent_name,
                 snapshot,
             )
 
-
             snapshot_path = (
                 LEAGUE_DIR
                 / f"{agent_name}.pt"
             )
-
 
             torch.save(
                 {
@@ -2873,13 +2632,11 @@ def main():
                 snapshot_path,
             )
 
-
             print(
                 f"League snapshot saved: "
                 f"{snapshot_path}",
                 flush=True,
             )
-
 
             # =================================================
             # Shared snapshot
@@ -2894,13 +2651,11 @@ def main():
                     f"for {agent_name}"
                 )
 
-
             shared_snapshot = (
                 shared_league_models[
                     agent_name
                 ]
             )
-
 
             for (
                 key,
@@ -2913,9 +2668,7 @@ def main():
                     value.detach().cpu()
                 )
 
-
             shared_snapshot.eval()
-
 
             # =================================================
             # Registry
@@ -2925,13 +2678,11 @@ def main():
                 league.names()
             )
 
-
             print(
                 "Updated league registry:",
                 list(league_registry),
                 flush=True,
             )
-
 
             # =================================================
             # Shared current model
@@ -2948,7 +2699,6 @@ def main():
                     value.detach().cpu()
                 )
 
-
             # =================================================
             # Best checkpoint
             # =================================================
@@ -2959,7 +2709,6 @@ def main():
             ):
 
                 best_loss = loss
-
 
                 torch.save(
                     {
@@ -2980,12 +2729,10 @@ def main():
                     / "rl_best.pt",
                 )
 
-
                 print(
                     "New best checkpoint saved.",
                     flush=True,
                 )
-
 
             # =================================================
             # Summary
@@ -2996,7 +2743,6 @@ def main():
                 flush=True,
             )
 
-
             print(
                 f"Self-play: "
                 f"{wins}W / "
@@ -3006,6 +2752,23 @@ def main():
                 flush=True,
             )
 
+            print(
+                f"DKL(RL || BC): "
+                f"{dkl:.6e}",
+                flush=True,
+            )
+
+            print(
+                f"DKL lambda: "
+                f"{get_dkl_lambda(epoch).item():.6e}",
+                flush=True,
+            )
+
+            print(
+                f"DKL loss: "
+                f"{get_dkl_lambda(epoch).item() * dkl ** 2:.6e}",
+                flush=True,
+            )
 
             print(
                 f"League size: "
@@ -3013,9 +2776,7 @@ def main():
                 flush=True,
             )
 
-
     manager.shutdown()
-
 
     print(
         "\nRL training finished.",
