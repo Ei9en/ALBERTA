@@ -48,9 +48,9 @@ TEMPERATURE_SELFPLAY = 2
 # Reprise RL
 # ============================================================
 
-START_EPOCH = 11
+START_EPOCH = 1
 
-RESUME_RL = True
+RESUME_RL = False
 
 RESUME_EPOCH = START_EPOCH - 1
 
@@ -107,7 +107,7 @@ ENTROPY_COEF = 0.01
 # DKL regularization
 # ============================================================
 
-DKL_COEF_MAX = 0.0025
+DKL_COEF_MAX = 0.1 # F_0 = 5e-3 => lambda=0.25, then reducing lambda = 0.1 for epoch 21+
 
 DKL_DECAY = 0.2636
 
@@ -117,7 +117,7 @@ DKL_EXP_MAX = 25.042
 def get_dkl_lambda(epoch):
     """
     Lambda(e) =
-        0.0025 *
+        0.25 *
         (1 - exp(-0.2636 * e))
         /
         (1 - exp(-25.042))
@@ -175,7 +175,7 @@ def load_bc_agent(epoch):
         PROJECT_ROOT
         / "checkpoints"
         / "bc_epoch"
-        / f"bc_v3_epoch_{epoch}.pt"
+        / f"bc_epoch_{epoch}.pt"
     )
 
     bc_model = ChessResNet(
@@ -332,18 +332,18 @@ def load_model():
     else:
 
         print(
-            "Initializing RL from BC5"
+            "Initializing RL from BC7"
         )
 
         print(
             "======================================"
         )
 
-        bc5_path = (
+        bc7_path = (
             PROJECT_ROOT
             / "checkpoints"
             / "bc_epoch"
-            / "bc_v3_epoch_5.pt"
+            / "bc_epoch_7.pt"
         )
 
         bc_model = ChessResNet(
@@ -353,7 +353,7 @@ def load_model():
         )
 
         checkpoint = torch.load(
-            bc5_path,
+            bc7_path,
             map_location=DEVICE,
         )
 
@@ -371,7 +371,7 @@ def load_model():
         )
 
         print(
-            "Initial policy loaded from BC5."
+            "Initial policy loaded from BC7."
         )
 
     # ========================================================
@@ -382,18 +382,18 @@ def load_model():
         max_agents=LEAGUE_MAX_AGENTS
     )
 
-    bc4 = load_bc_agent(4)
+    bc6 = load_bc_agent(6)
 
     league.add_agent(
-        "bc_epoch_4",
-        bc4,
+        "bc_epoch_6",
+        bc6,
     )
 
-    bc5 = load_bc_agent(5)
+    b7 = load_bc_agent(7)
 
     league.add_agent(
-        "bc_epoch_5",
-        bc5,
+        "bc_epoch_7",
+        b7,
     )
 
     # ========================================================
@@ -1211,6 +1211,12 @@ def train_epoch(
     total_actor_grad_norm = 0.0
     total_critic_grad_norm = 0.0
 
+    # ========================================================
+    # NEW: DKL gradient diagnostic
+    # ========================================================
+
+    total_dkl_grad_norm = 0.0
+
     total_adv_mean = 0.0
     total_adv_std = 0.0
 
@@ -1498,6 +1504,39 @@ def train_epoch(
                 lambda_dkl
                 *
                 delta_dkl.pow(2)
+            )
+
+            # =================================================
+            # NEW: Gradient de L_DKL
+            #
+            # || ∇θ L_DKL ||_2
+            #
+            # θ = paramètres de la policy RL
+            #
+            # On conserve le graphe pour permettre ensuite
+            # le backward() de la loss totale.
+            # =================================================
+
+            dkl_gradients = torch.autograd.grad(
+                dkl_loss,
+                model.policy.parameters(),
+                retain_graph=True,
+                allow_unused=True,
+            )
+
+            dkl_grad_sq = 0.0
+
+            for grad in dkl_gradients:
+
+                if grad is None:
+                    continue
+
+                dkl_grad_sq += (
+                    grad.detach().norm(2).item() ** 2
+                )
+
+            dkl_grad_norm = (
+                dkl_grad_sq ** 0.5
             )
 
             # =================================================
@@ -1816,6 +1855,14 @@ def train_epoch(
                 critic_grad_norm
             )
 
+            # =================================================
+            # NEW: DKL gradient accumulation
+            # =================================================
+
+            total_dkl_grad_norm += (
+                dkl_grad_norm
+            )
+
             total_adv_mean += (
                 adv_mean.item()
             )
@@ -1901,6 +1948,15 @@ def train_epoch(
 
     avg_critic_grad_norm = (
         total_critic_grad_norm
+        / total_updates
+    )
+
+    # ========================================================
+    # NEW: Average DKL gradient norm
+    # ========================================================
+
+    avg_dkl_grad_norm = (
+        total_dkl_grad_norm
         / total_updates
     )
 
@@ -2035,6 +2091,11 @@ def train_epoch(
     print(
         f"Critic gradient norm:  "
         f"{avg_critic_grad_norm:.6e}"
+    )
+
+    print(
+        f"DKL gradient norm:     "
+        f"{avg_dkl_grad_norm:.6e}"
     )
 
     print(

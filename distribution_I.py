@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_FILE = (
     PROJECT_ROOT
     / "data"
-    / "uncertainty_stats_1-100.json"
+    / "uncertainty_stats_1-10.json"
 )
 
 
@@ -22,9 +22,9 @@ DATA_FILE = (
 # Weights
 # ============================================================
 
-W_H = -0.277
-W_U = 0.441
-W_HU = 0.282
+W_H = 0
+W_U = 1
+W_HU = 0
 
 
 # ============================================================
@@ -1165,7 +1165,7 @@ def main():
     output_path = (
         PROJECT_ROOT
         / "data"
-        / "I_distribution_1-100.png"
+        / "I_distribution_1-10.png"
     )
 
     plt.savefig(

@@ -16,7 +16,7 @@ DEFAULT_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
     / "bc_epoch"
-    / "bc_v3_epoch_5.pt"
+    / "bc_epoch_7.pt"
 )
 
 
@@ -25,7 +25,7 @@ class BCBotStochastic:
     def __init__(
         self,
         checkpoint=DEFAULT_CHECKPOINT,
-        temperature=1.5,
+        temperature=2,
     ):
 
         self.device = torch.device("cpu")

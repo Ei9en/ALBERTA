@@ -27,7 +27,7 @@ class OracleHMI(QMainWindow):
 
     def __init__(
         self,
-        queue_path="data/oracle_queue_21-30_high.jsonl",
+        queue_path="data/oracle_queue_1-10.jsonl",
     ):
 
         super().__init__()

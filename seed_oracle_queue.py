@@ -21,13 +21,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_FILE = (
     PROJECT_ROOT
     / "data"
-    / "uncertainty_stats_oracle_21-30.json"
+    / "uncertainty_stats_1-10.json"
 )
 
 QUEUE_FILE = (
     PROJECT_ROOT
     / "data"
-    / "oracle_queue_21-30_high.jsonl"
+    / "oracle_queue_1-10.jsonl"
 )
 
 

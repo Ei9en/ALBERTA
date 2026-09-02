@@ -23,21 +23,21 @@ from lichess_bot.atomic_engine.rl_bot import RLBot
 DEFAULT_RL_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
-    / "oracle_epoch"
-    / "oracle_epoch_30.pt"
+    / "rl_epoch"
+    / "rl_epoch_10.pt"
 )
 
 DEFAULT_AL_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
-    / "oracle_epoch"
-    / "oracle_epoch_31.pt"
+    / "rl_baseline"
+    / "rl_epoch_10.pt"
 )
 
 DEFAULT_QUEUE = (
     PROJECT_ROOT
     / "data"
-    / "oracle_queue_21-30_high_partial.jsonl"
+    / "oracle_queue_1-10.jsonl"
 )
 
 DEFAULT_POSITIONS = 1000

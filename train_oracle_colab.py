@@ -37,6 +37,7 @@ from train_rl_league_colab import (
     _init_selfplay_worker,
     collect_games_parallel,
     compute_gae,
+    get_dkl_lambda,
 )
 
 
@@ -91,7 +92,7 @@ LR = 3e-4
 
 GAMES_PER_EPOCH = 2500
 
-RL_EPOCHS = 10
+AL_EPOCHS = 1
 
 CHECKPOINT_EVERY = 5
 
@@ -367,18 +368,18 @@ def load_model():
     else:
 
         print(
-            "Initializing Oracle training from BC5"
+            "Initializing Oracle training from BC7"
         )
 
         print(
             "======================================"
         )
 
-        bc5_path = (
+        bc7_path = (
             PROJECT_ROOT
             / "checkpoints"
             / "bc_epoch"
-            / "bc_v3_epoch_5.pt"
+            / "bc_epoch_7.pt"
         )
 
         bc_model = ChessResNet(
@@ -388,7 +389,7 @@ def load_model():
         )
 
         checkpoint = torch.load(
-            bc5_path,
+            bc7_path,
             map_location=DEVICE,
         )
 
@@ -424,18 +425,18 @@ def load_model():
         max_agents=LEAGUE_MAX_AGENTS
     )
 
-    bc4 = load_bc_agent(4)
+    bc6 = load_bc_agent(6)
 
     league.add_agent(
-        "bc_epoch_4",
-        bc4,
+        "bc_epoch_6",
+        bc6,
     )
 
-    bc5 = load_bc_agent(5)
+    bc7 = load_bc_agent(7)
 
     league.add_agent(
-        "bc_epoch_5",
-        bc5,
+        "bc_epoch_7",
+        bc7,
     )
 
     # ========================================================
@@ -446,7 +447,7 @@ def load_model():
 
         # Keep only the 10 most recent RL snapshots.
         #
-        # With BC4 + BC5:
+        # With BC6 + BC7:
         #
         # 10 RL snapshots
         # + 2 BC snapshots
@@ -1332,12 +1333,17 @@ def compute_oracle_value_target(
 # Oracle policy + value training
 # ============================================================
 
+# ============================================================
+# Oracle policy + value training
+# ============================================================
+
 def train_oracle_epoch(
     model,
     optimizer,
     buffer,
     bc_model,
     oracle_buffer,
+    epoch,
 ):
 
     model.train()
@@ -1386,6 +1392,8 @@ def train_oracle_epoch(
             0.0,
             0.0,
             0.0,
+            0.0,
+            0.0,
         )
 
 
@@ -1409,6 +1417,12 @@ def train_oracle_epoch(
     total_kl = 0.0
 
     total_entropy = 0.0
+
+    total_dkl = 0.0
+
+    total_dkl_loss = 0.0
+
+    total_dkl_lambda = 0.0
 
 
     total_oracle_confidence_weight = 0.0
@@ -1705,6 +1719,83 @@ def train_oracle_epoch(
                     legal_mask
                 ],
                 "BC legal log probabilities",
+            )
+
+
+            # =================================================
+            # DKL anchor: RL || BC
+            # =================================================
+            #
+            # The anchor is computed between the current RL
+            # policy and the frozen BC policy, both restricted
+            # to legal moves.
+            #
+            # DKL(RL || BC)
+            #
+            # The lambda schedule is epoch-dependent and is
+            # imported directly from train_rl_league_colab.
+            # =================================================
+
+            rl_probs = torch.exp(
+                rl_log_probs
+            )
+
+
+            dkl_per_sample = (
+                rl_probs
+                *
+                (
+                    rl_log_probs
+                    -
+                    safe_bc_log_probs
+                )
+            ).sum(
+                dim=1
+            )
+
+
+            assert_finite_tensor(
+                dkl_per_sample,
+                "DKL per sample",
+            )
+
+
+            dkl_loss = (
+                dkl_per_sample.mean()
+            )
+
+
+            assert_finite_tensor(
+                dkl_loss,
+                "DKL(RL || BC)",
+            )
+
+
+            dkl_lambda = get_dkl_lambda(
+                epoch
+            )
+
+
+            if not torch.isfinite(
+                dkl_lambda
+            ):
+
+                raise RuntimeError(
+                    f"Non-finite DKL lambda: "
+                    f"{dkl_lambda}"
+                )
+
+
+            dkl_anchor_loss = (
+                dkl_lambda
+                *
+                dkl_loss
+            )
+
+
+            assert_finite_tensor(
+                dkl_anchor_loss,
+                "DKL anchor loss",
             )
 
 
@@ -2512,6 +2603,10 @@ def train_oracle_epoch(
                 ORACLE_VALUE_COEF
                 *
                 oracle_value_loss
+
+                +
+
+                dkl_anchor_loss
             )
 
 
@@ -2557,6 +2652,21 @@ def train_oracle_epoch(
                 print(
                     f"OracleValue  : "
                     f"{oracle_value_loss.item()}"
+                )
+
+                print(
+                    f"DKL(RL||BC)  : "
+                    f"{dkl_loss.item()}"
+                )
+
+                print(
+                    f"DKL lambda    : "
+                    f"{float(dkl_lambda)}"
+                )
+
+                print(
+                    f"DKL anchor    : "
+                    f"{dkl_anchor_loss.item()}"
                 )
 
                 print(
@@ -2645,6 +2755,21 @@ def train_oracle_epoch(
             )
 
 
+            total_dkl += (
+                dkl_loss.item()
+            )
+
+
+            total_dkl_loss += (
+                dkl_anchor_loss.item()
+            )
+
+
+            total_dkl_lambda += (
+                float(dkl_lambda)
+            )
+
+
             progress.update(1)
 
 
@@ -2704,6 +2829,27 @@ def train_oracle_epoch(
     )
 
 
+    avg_dkl = (
+        total_dkl
+        /
+        total_updates
+    )
+
+
+    avg_dkl_loss = (
+        total_dkl_loss
+        /
+        total_updates
+    )
+
+
+    avg_dkl_lambda = (
+        total_dkl_lambda
+        /
+        total_updates
+    )
+
+
     # ========================================================
     # Final safety
     # ========================================================
@@ -2733,6 +2879,15 @@ def train_oracle_epoch(
 
         "avg_entropy":
             avg_entropy,
+
+        "avg_dkl":
+            avg_dkl,
+
+        "avg_dkl_loss":
+            avg_dkl_loss,
+
+        "avg_dkl_lambda":
+            avg_dkl_lambda,
 
     }.items():
 
@@ -2786,6 +2941,12 @@ def train_oracle_epoch(
 
     print(
         "======================================"
+    )
+
+
+    print(
+        f"Epoch: "
+        f"{epoch}"
     )
 
 
@@ -2871,6 +3032,24 @@ def train_oracle_epoch(
 
 
     print(
+        f"DKL(RL || BC): "
+        f"{avg_dkl:.6e}"
+    )
+
+
+    print(
+        f"DKL lambda: "
+        f"{avg_dkl_lambda:.6e}"
+    )
+
+
+    print(
+        f"DKL anchor loss: "
+        f"{avg_dkl_loss:.6e}"
+    )
+
+
+    print(
         "======================================"
     )
 
@@ -2882,6 +3061,8 @@ def train_oracle_epoch(
         avg_oracle_policy,
         avg_oracle_value,
         avg_kl,
+        avg_dkl,
+        avg_dkl_loss,
     )
 
 
@@ -3103,7 +3284,7 @@ def main():
     stats = UncertaintyStats()
 
 
-    best_rl_loss = None
+    best_training_loss = None
 
 
     # ========================================================
@@ -3158,7 +3339,7 @@ def main():
     future_end = (
         START_EPOCH
         +
-        RL_EPOCHS
+        AL_EPOCHS
         -
         1
     )
@@ -3253,7 +3434,7 @@ def main():
 
         for epoch in range(
             START_EPOCH,
-            START_EPOCH + RL_EPOCHS,
+            START_EPOCH + AL_EPOCHS,
         ):
 
             print(
@@ -3499,12 +3680,15 @@ def main():
                 oracle_policy_loss,
                 oracle_value_loss,
                 approx_kl,
+                dkl_loss,
+                dkl_anchor_loss,
             ) = train_oracle_epoch(
                 model=model,
                 optimizer=optimizer,
                 buffer=buffer,
                 bc_model=bc_model,
                 oracle_buffer=oracle_buffer,
+                epoch=epoch,
             )
 
 
@@ -3514,7 +3698,9 @@ def main():
                 f"| Critic={critic_loss:.4f} "
                 f"| OraclePolicy={oracle_policy_loss:.4f} "
                 f"| OracleValue={oracle_value_loss:.4f} "
-                f"| KL={approx_kl:.6f}",
+                f"| KL={approx_kl:.6f} "
+                f"| DKL(RL||BC)={dkl_loss:.6e} "
+                f"| DKL Anchor={dkl_anchor_loss:.6e}",
                 flush=True,
             )
 
@@ -3601,11 +3787,11 @@ def main():
             # =================================================
 
             if (
-                best_rl_loss is None
-                or rl_loss < best_rl_loss
+                best_training_loss is None
+                or rl_loss < best_training_loss
             ):
 
-                best_rl_loss = (
+                best_training_loss = (
                     rl_loss
                 )
 

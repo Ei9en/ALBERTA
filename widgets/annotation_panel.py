@@ -119,7 +119,7 @@ class AnnotationPanel(QWidget):
 
         # Reward-only is the default for the current pass.
         self.reward_mode.setChecked(True)
-        self.oracle_mode.setChecked(False)
+        self.oracle_mode.setChecked(True)
 
         self.reward_mode.toggled.connect(
             self.update_mode_state
