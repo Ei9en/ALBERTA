@@ -5,7 +5,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import json
 
-from src.actions_space import ACTION_TO_INDEX, INDEX_TO_ACTION
+from src.actions_space import ACTION_TO_INDEX
 
 #INPUT = "data/processed/positions.jsonl"
 #OUTPUT = "data/processed/positions_bc.jsonl"

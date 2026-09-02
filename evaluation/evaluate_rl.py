@@ -20,18 +20,18 @@ DEVICE = "cpu"
 RL1_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
-    / "oracle_epoch"
-    / "oracle_epoch_30.pt"
+    / "rl_epoch"
+    / "rl_epoch_25.pt"
 )
 
 RL2_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
-    / "oracle_epoch"
-    / "oracle_epoch_31.pt"
+    / "rl_epoch"
+    / "al_epoch_20.pt"
 )
 
-GAMES = 1000
+GAMES = 100
 TEMPERATURE = 2
 
 

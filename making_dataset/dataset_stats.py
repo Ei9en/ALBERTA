@@ -3,7 +3,7 @@ import sys
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from dataset.fast_reader import iter_headers
+from tools.fast_reader import iter_headers
 
 RAW_DIR = Path("data/raw")
 MIN_ELO = 2300

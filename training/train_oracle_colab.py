@@ -1736,62 +1736,98 @@ def train_oracle_epoch(
             # imported directly from train_rl_league_colab.
             # =================================================
 
-            rl_probs = torch.exp(
-                rl_log_probs
+            # ------------------------------------------------------------
+            # DKL(RL || BC)
+            # ------------------------------------------------------------
+
+            # Sanitize masked / invalid values BEFORE any arithmetic.
+            safe_rl_log_probs = torch.where(
+                legal_mask,
+                torch.nan_to_num(
+                    rl_log_probs,
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                ),
+                torch.zeros_like(rl_log_probs),
             )
 
+            safe_bc_log_probs = torch.where(
+                legal_mask,
+                torch.nan_to_num(
+                    safe_bc_log_probs,
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                ),
+                torch.zeros_like(safe_bc_log_probs),
+            )
 
-            dkl_per_sample = (
+            # Convert only sanitized values.
+            rl_probs = torch.exp(
+                safe_rl_log_probs
+            )
+
+            # KL contribution per action.
+            kl_per_action = (
                 rl_probs
                 *
                 (
-                    rl_log_probs
+                    safe_rl_log_probs
                     -
                     safe_bc_log_probs
                 )
-            ).sum(
-                dim=1
             )
 
+            # Ignore masked actions completely.
+            kl_per_action = torch.where(
+                legal_mask,
+                kl_per_action,
+                torch.zeros_like(kl_per_action),
+            )
+
+            dkl_per_sample = (
+                kl_per_action
+                .sum(dim=1)
+            )
+
+            # Final safety guard.
+            dkl_per_sample = torch.nan_to_num(
+                dkl_per_sample,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
 
             assert_finite_tensor(
                 dkl_per_sample,
                 "DKL per sample",
             )
 
-
             dkl_loss = (
                 dkl_per_sample.mean()
             )
-
 
             assert_finite_tensor(
                 dkl_loss,
                 "DKL(RL || BC)",
             )
 
-
             dkl_lambda = get_dkl_lambda(
                 epoch
             )
 
-
-            if not torch.isfinite(
-                dkl_lambda
-            ):
-
+            if not torch.isfinite(dkl_lambda):
                 raise RuntimeError(
                     f"Non-finite DKL lambda: "
                     f"{dkl_lambda}"
                 )
 
-
             dkl_anchor_loss = (
                 dkl_lambda
                 *
-                dkl_loss
+                dkl_loss.pow(2)
             )
-
 
             assert_finite_tensor(
                 dkl_anchor_loss,
