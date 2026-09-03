@@ -2,6 +2,12 @@
 # Train_RL.py
 # ============================================================
 
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
 import pickle
 import time
 import chess
@@ -41,7 +47,7 @@ PROJECT_ROOT = Path(
 # Temperature
 # ============================================================
 
-TEMPERATURE_SELFPLAY = 2
+TEMPERATURE_SELFPLAY = 1
 
 
 # ============================================================
@@ -100,57 +106,57 @@ GAE_LAMBDA = 0.95
 
 PPO_CLIP = 0.2
 
-ENTROPY_COEF = 0.01
+ENTROPY_COEF = 0.05
 
 
 # ============================================================
 # DKL regularization
 # ============================================================
 
-DKL_COEF_MAX = 0.1 # F_0 = 5e-3 => lambda=0.25, then reducing lambda = 0.1 for epoch 21+
+RL_TOTAL_EPOCHS = 60
+DKL_FIT_EPOCH_STRIDE = 10.0
 
-DKL_DECAY = 0.2636
+DKL_INF = 1.8681333083457523
+DKL_DECAY_PER_FIT_UNIT = 0.2635650124178356
 
-DKL_EXP_MAX = 25.042
+# Alpha = fraction de réduction du drift naturel.
+# alpha=0.50 => KL cible = 50% de KL_naturel.
+
+DKL_ALPHA = 0.50
+LAMBDA_DKL = 0.048
+
 
 
 def get_dkl_lambda(epoch):
-    """
-    Lambda(e) =
-        0.25 *
-        (1 - exp(-0.2636 * e))
-        /
-        (1 - exp(-25.042))
-    """
 
-    numerator = (
-        1.0
-        -
-        torch.exp(
-            torch.tensor(
-                -DKL_DECAY * epoch,
-                dtype=torch.float32,
-                device=DEVICE,
-            )
-        )
-    )
+    natural_dkl = get_natural_dkl(epoch)
 
-    denominator = (
-        1.0
-        -
-        torch.exp(
-            torch.tensor(
-                -DKL_EXP_MAX,
-                dtype=torch.float32,
-                device=DEVICE,
-            )
-        )
+    reference_dkl = get_natural_dkl(
+        RL_TOTAL_EPOCHS/2
     )
 
     return (
-        DKL_COEF_MAX
-        * numerator
-        / denominator
+        LAMBDA_DKL
+        * reference_dkl
+        / natural_dkl
+    )
+    
+
+
+def get_natural_dkl(epoch):
+    e = torch.as_tensor(
+        epoch,
+        dtype=torch.float32,
+        device=DEVICE,
+    )
+
+    fit_time = e / DKL_FIT_EPOCH_STRIDE
+
+    return DKL_INF * (
+        -torch.expm1(
+            -DKL_DECAY_PER_FIT_UNIT
+            * fit_time
+        )
     )
 
 
@@ -1189,6 +1195,7 @@ def train_epoch(
             0.0,
             0.0,
             0.0,
+            0.0,
         )
 
     TRAIN_STEPS = (
@@ -1236,9 +1243,8 @@ def train_epoch(
 
     total_dkl_loss = 0.0
 
-    lambda_dkl = get_dkl_lambda(
-        epoch
-    )
+    lambda_dkl = get_dkl_lambda(epoch)
+
 
     total_updates = (
         TRAIN_STEPS
@@ -1452,58 +1458,59 @@ def train_epoch(
             )
 
             # =================================================
-            # DKL(RL || BC)
-            #
-            # DKL = sum_a P_RL(a)
-            #             log(P_RL(a) / P_BC(a))
-            #
-            # Le calcul est fait sur les coups légaux.
+            # DKL(RL || BC), calcul pur par position
             # =================================================
 
-            rl_probs_for_dkl = torch.exp(
-                rl_log_probs
+            safe_rl_log_probs = rl_log_probs.masked_fill(
+            ~legal_mask,
+            0.0,
             )
 
-            safe_bc_log_probs = (
-                bc_log_probs.masked_fill(
-                    ~legal_mask,
-                    0.0,
-                )
+            safe_bc_log_probs = bc_log_probs.masked_fill(
+                ~legal_mask,
+                0.0,
             )
 
-            safe_rl_log_probs = (
-                rl_log_probs.masked_fill(
-                    ~legal_mask,
-                    0.0,
-                )
-            )
+            rl_probs_for_dkl = torch.exp(rl_log_probs)
 
             dkl_per_position = (
                 rl_probs_for_dkl
-                *
-                (
+                * (
                     safe_rl_log_probs
-                    -
-                    safe_bc_log_probs
+                    - safe_bc_log_probs
                 )
-            ).sum(
-                dim=1
+            ).sum(dim=1)
+
+            delta_dkl = dkl_per_position.mean()
+
+            # =================================================
+            # Budget de divergence relatif au PPO sans DKL
+            # =================================================
+
+            natural_dkl = get_natural_dkl(epoch)
+
+            target_dkl = (
+                (1.0 - DKL_ALPHA)
+                * natural_dkl
             )
 
-            delta_dkl = (
-                dkl_per_position.mean()
+            dkl_error = (
+                delta_dkl
+                - target_dkl
             )
 
             # =================================================
-            # Nouvelle loss DKL
-            #
-            # L_DKL = lambda(e) * DKL^2
+            # Rappel unilatéral vers BC au-delà du budget
             # =================================================
+
+            excess_dkl = torch.relu(
+                dkl_error
+            )
 
             dkl_loss = (
-                lambda_dkl
-                *
-                delta_dkl.pow(2)
+                0.5
+                * lambda_dkl
+                * excess_dkl.pow(2)
             )
 
             # =================================================
@@ -1542,13 +1549,6 @@ def train_epoch(
             # =================================================
             # BC prior
             # =================================================
-
-            safe_bc_log_probs = (
-                bc_log_probs.masked_fill(
-                    ~legal_mask,
-                    0.0,
-                )
-            )
 
             combined_log_probs = (
                 rl_log_probs
@@ -1686,10 +1686,14 @@ def train_epoch(
             # Critic
             # =================================================
 
-            critic_loss = F.mse_loss(
-                values,
-                returns,
-            )
+            values_old = torch.tensor(
+                [s["value"] for s in batch],
+                device=DEVICE,
+                dtype=torch.float32,
+            ).unsqueeze(1)
+
+            values_clipped = values_old + (values - values_old).clamp(-PPO_CLIP, PPO_CLIP)
+            critic_loss = F.mse_loss(values_clipped, returns)
 
             # =================================================
             # Critic diagnostics
@@ -1751,15 +1755,10 @@ def train_epoch(
             # =================================================
 
             loss = (
-                actor_loss
-                +
-                VALUE_COEF
-                * critic_loss
-                -
-                ENTROPY_COEF
-                * entropy
-                +
-                dkl_loss
+                actor_loss                          # PPO policy
+                + VALUE_COEF * critic_loss          # Value (avec clipping optionnel)
+                - ENTROPY_COEF * entropy            # Exploration bonus
+                + dkl_loss                          # DKL(RL || BC)², modulée par lambda(epoch)/2
             )
 
             # =================================================
@@ -2142,6 +2141,7 @@ def train_epoch(
         avg_critic,
         avg_kl,
         avg_dkl,
+        avg_dkl_loss,
     )
 
 
@@ -2233,7 +2233,7 @@ def main():
         load_model()
     )
 
-    bc_model = load_bc_agent(5)
+    bc_model = load_bc_agent(7)
 
     bc_model_selfplay = copy.deepcopy(
         bc_model
@@ -2580,6 +2580,7 @@ def main():
                 critic_loss,
                 approx_kl,
                 dkl,
+                dkl_loss
             ) = train_epoch(
                 model,
                 optimizer,
@@ -2594,6 +2595,7 @@ def main():
                 f"| Critic={critic_loss:.4f} "
                 f"| KL={approx_kl:.6f} "
                 f"| DKL(RL||BC)={dkl:.6f}",
+                f"| DKL loss={dkl_loss:.6e}",
                 flush=True,
             )
 
@@ -2827,7 +2829,7 @@ def main():
 
             print(
                 f"DKL loss: "
-                f"{get_dkl_lambda(epoch).item() * dkl ** 2:.6e}",
+                f"{dkl_loss:.6e}",
                 flush=True,
             )
 
