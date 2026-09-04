@@ -31,8 +31,8 @@ RL1_CHECKPOINT = (
 RL2_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
-    / "rl_epoch"
-    / "rl_epoch_20.pt"
+    / "oracle_epoch"
+    / "al_epoch_20.pt"
 )
 
 GAMES = 100

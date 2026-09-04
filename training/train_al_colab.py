@@ -79,7 +79,7 @@ ORACLE_BATCH_SIZE = 4096
 # Oracle loss coefficients
 # ============================================================
 
-ORACLE_POLICY_COEF = 0.10
+ORACLE_POLICY_COEF = 0.001
 
 ORACLE_VALUE_COEF = 0.10
 
@@ -951,6 +951,16 @@ def main():
         capacity=300000
     )
 
+    # ========================================================
+    # IMPORTANT:
+    # Keep ONE UncertaintyStats instance for the
+    # entire AL11 -> AL20 experiment.
+    #
+    # If this were created inside the epoch loop,
+    # stats.save() would overwrite the JSON with only
+    # the current epoch's positions.
+    # ========================================================
+
     stats = rl.UncertaintyStats()
 
     best_loss = None
@@ -1103,8 +1113,6 @@ def main():
             # =================================================
             # Self-play
             # =================================================
-
-            stats = rl.UncertaintyStats()
 
             games = rl.collect_games_parallel(
                 pool,
@@ -1323,6 +1331,10 @@ def main():
 
             # =================================================
             # Uncertainty stats
+            #
+            # IMPORTANT:
+            # stats is persistent across all epochs.
+            # save() therefore writes the cumulative dataset.
             # =================================================
 
             stats_path = (
