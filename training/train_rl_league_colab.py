@@ -47,7 +47,7 @@ PROJECT_ROOT = Path(
 # Temperature
 # ============================================================
 
-TEMPERATURE_SELFPLAY = 1
+TEMPERATURE_SELFPLAY = 2
 
 
 # ============================================================
@@ -106,7 +106,7 @@ GAE_LAMBDA = 0.95
 
 PPO_CLIP = 0.2
 
-ENTROPY_COEF = 0.05
+ENTROPY_COEF = 0.01
 
 
 # ============================================================
@@ -1164,6 +1164,7 @@ def train_epoch(
     buffer,
     bc_model,
     epoch,
+    extra_loss_fn=None,
 ):
 
     model.train()
@@ -1243,8 +1244,17 @@ def train_epoch(
 
     total_dkl_loss = 0.0
 
-    lambda_dkl = get_dkl_lambda(epoch)
+    # ========================================================
+    # NEW: Extra loss diagnostics
+    # ========================================================
 
+    total_extra_loss = 0.0
+
+    total_extra_policy_loss = 0.0
+
+    total_extra_value_loss = 0.0
+
+    lambda_dkl = get_dkl_lambda(epoch)
 
     total_updates = (
         TRAIN_STEPS
@@ -1462,8 +1472,8 @@ def train_epoch(
             # =================================================
 
             safe_rl_log_probs = rl_log_probs.masked_fill(
-            ~legal_mask,
-            0.0,
+                ~legal_mask,
+                0.0,
             )
 
             safe_bc_log_probs = bc_log_probs.masked_fill(
@@ -1471,7 +1481,9 @@ def train_epoch(
                 0.0,
             )
 
-            rl_probs_for_dkl = torch.exp(rl_log_probs)
+            rl_probs_for_dkl = torch.exp(
+                rl_log_probs
+            )
 
             dkl_per_position = (
                 rl_probs_for_dkl
@@ -1687,13 +1699,29 @@ def train_epoch(
             # =================================================
 
             values_old = torch.tensor(
-                [s["value"] for s in batch],
+                [
+                    s["value"]
+                    for s in batch
+                ],
                 device=DEVICE,
                 dtype=torch.float32,
             ).unsqueeze(1)
 
-            values_clipped = values_old + (values - values_old).clamp(-PPO_CLIP, PPO_CLIP)
-            critic_loss = F.mse_loss(values_clipped, returns)
+            values_clipped = (
+                values_old
+                + (
+                    values
+                    - values_old
+                ).clamp(
+                    -PPO_CLIP,
+                    PPO_CLIP,
+                )
+            )
+
+            critic_loss = F.mse_loss(
+                values_clipped,
+                returns,
+            )
 
             # =================================================
             # Critic diagnostics
@@ -1745,20 +1773,90 @@ def train_epoch(
             )
 
             # =================================================
+            # NEW: Optional extra loss
+            #
+            # Pour le RL normal:
+            #     extra_loss_fn = None
+            #
+            # Donc extra_loss = 0 et la loss RL
+            # reste strictement inchangée.
+            # =================================================
+
+            if extra_loss_fn is not None:
+
+                extra = extra_loss_fn(
+                    model
+                )
+
+                extra_loss = extra[
+                    "loss"
+                ]
+
+                extra_policy_loss = (
+                    extra.get(
+                        "policy_loss",
+                        torch.zeros(
+                            (),
+                            device=DEVICE,
+                        ),
+                    )
+                )
+
+                extra_value_loss = (
+                    extra.get(
+                        "value_loss",
+                        torch.zeros(
+                            (),
+                            device=DEVICE,
+                        ),
+                    )
+                )
+
+            else:
+
+                extra_loss = torch.zeros(
+                    (),
+                    device=DEVICE,
+                )
+
+                extra_policy_loss = (
+                    torch.zeros(
+                        (),
+                        device=DEVICE,
+                    )
+                )
+
+                extra_value_loss = (
+                    torch.zeros(
+                        (),
+                        device=DEVICE,
+                    )
+                )
+
+            # =================================================
             # Total loss
+            #
+            # RL:
             #
             # L =
             #     L_actor
             #     + VALUE_COEF * L_critic
             #     - ENTROPY_COEF * H
             #     + L_DKL
+            #
+            # AL:
+            #
+            # L =
+            #     L_RL
+            #     + L_extra
             # =================================================
 
             loss = (
-                actor_loss                          # PPO policy
-                + VALUE_COEF * critic_loss          # Value (avec clipping optionnel)
-                - ENTROPY_COEF * entropy            # Exploration bonus
-                + dkl_loss                          # DKL(RL || BC)², modulée par lambda(epoch)/2
+                actor_loss
+                + VALUE_COEF * critic_loss
+                - ENTROPY_COEF * entropy
+                + dkl_loss
+                + extra_loss
             )
 
             # =================================================
@@ -1834,13 +1932,21 @@ def train_epoch(
 
             total_loss += loss.item()
 
-            total_actor += actor_loss.item()
+            total_actor += (
+                actor_loss.item()
+            )
 
-            total_critic += critic_loss.item()
+            total_critic += (
+                critic_loss.item()
+            )
 
-            total_kl += approx_kl.item()
+            total_kl += (
+                approx_kl.item()
+            )
 
-            total_entropy += entropy.item()
+            total_entropy += (
+                entropy.item()
+            )
 
             total_clip_fraction += (
                 clip_fraction.item()
@@ -1902,6 +2008,22 @@ def train_epoch(
                 dkl_loss.item()
             )
 
+            # =================================================
+            # NEW: Extra loss diagnostics
+            # =================================================
+
+            total_extra_loss += (
+                extra_loss.item()
+            )
+
+            total_extra_policy_loss += (
+                extra_policy_loss.item()
+            )
+
+            total_extra_value_loss += (
+                extra_value_loss.item()
+            )
+
             progress.update(1)
 
     progress.close()
@@ -1951,7 +2073,7 @@ def train_epoch(
     )
 
     # ========================================================
-    # NEW: Average DKL gradient norm
+    # Average DKL gradient norm
     # ========================================================
 
     avg_dkl_grad_norm = (
@@ -2001,6 +2123,25 @@ def train_epoch(
 
     avg_dkl_loss = (
         total_dkl_loss
+        / total_updates
+    )
+
+    # ========================================================
+    # NEW: Extra loss averages
+    # ========================================================
+
+    avg_extra_loss = (
+        total_extra_loss
+        / total_updates
+    )
+
+    avg_extra_policy_loss = (
+        total_extra_policy_loss
+        / total_updates
+    )
+
+    avg_extra_value_loss = (
+        total_extra_value_loss
         / total_updates
     )
 
@@ -2130,6 +2271,27 @@ def train_epoch(
         f"DKL loss:              "
         f"{avg_dkl_loss:.6e}"
     )
+
+    if extra_loss_fn is not None:
+
+        print(
+            "--------------------------------------"
+        )
+
+        print(
+            f"Extra loss:            "
+            f"{avg_extra_loss:.6e}"
+        )
+
+        print(
+            f"Extra policy loss:     "
+            f"{avg_extra_policy_loss:.6e}"
+        )
+
+        print(
+            f"Extra value loss:      "
+            f"{avg_extra_value_loss:.6e}"
+        )
 
     print(
         "======================================"

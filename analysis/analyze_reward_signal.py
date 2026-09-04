@@ -12,12 +12,13 @@ import pandas as pd
 # Configuration
 # ============================================================
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 INPUT_FILE = (
     PROJECT_ROOT
     / "data"
-    / "uncertainty_stats_71-100.json"
+    / "selfplay_jsons"
+    / "uncertainty_stats_1-60.json"
 )
 
 SIGNALS = [
@@ -46,13 +47,22 @@ def safe_float(value):
         return np.nan
 
 
-def result_to_reward(result):
+def result_to_reward(result, side_to_move):
+    """
+    Convert the game result into reward from the perspective
+    of the player to move.
 
-    if result == "1-0":
-        return 1.0
+    White to move:
+        1-0 -> +1
+        0-1 -> -1
 
-    if result == "0-1":
-        return -1.0
+    Black to move:
+        0-1 -> +1
+        1-0 -> -1
+
+    Draw:
+        0
+    """
 
     if result in (
         "1/2-1/2",
@@ -61,6 +71,22 @@ def result_to_reward(result):
         "Draw",
     ):
         return 0.0
+
+    if side_to_move == "w":
+
+        if result == "1-0":
+            return 1.0
+
+        if result == "0-1":
+            return -1.0
+
+    elif side_to_move == "b":
+
+        if result == "0-1":
+            return 1.0
+
+        if result == "1-0":
+            return -1.0
 
     return np.nan
 
@@ -187,18 +213,9 @@ def build_dataframe(data):
         U = safe_float(record.get("U"))
         HU = safe_float(record.get("HU"))
 
-        reward = result_to_reward(result)
-
-        if not math.isfinite(reward):
-            invalid_reward += 1
-            continue
-
-        if not all(
-            math.isfinite(x)
-            for x in (H, U, HU)
-        ):
-            invalid_signal += 1
-            continue
+        # ----------------------------------------------------
+        # FEN / side to move
+        # ----------------------------------------------------
 
         if not isinstance(fen, str):
             invalid_fen += 1
@@ -211,6 +228,34 @@ def build_dataframe(data):
             continue
 
         side_to_move = fen_parts[1]
+
+        if side_to_move not in ("w", "b"):
+            invalid_fen += 1
+            continue
+
+        # ----------------------------------------------------
+        # Reward from side-to-move perspective
+        # ----------------------------------------------------
+
+        reward = result_to_reward(
+            result,
+            side_to_move,
+        )
+
+        if not math.isfinite(reward):
+            invalid_reward += 1
+            continue
+
+        # ----------------------------------------------------
+        # Signals
+        # ----------------------------------------------------
+
+        if not all(
+            math.isfinite(x)
+            for x in (H, U, HU)
+        ):
+            invalid_signal += 1
+            continue
 
         rows.append(
             {
@@ -232,7 +277,7 @@ def build_dataframe(data):
     print("-" * 70)
 
     print(
-        f"Valid observations:       {len(df):,}"
+        f"Valid observations:        {len(df):,}"
     )
 
     print(
@@ -240,15 +285,18 @@ def build_dataframe(data):
     )
 
     print(
-        f"Invalid signals skipped:   {invalid_signal:,}"
+        f"Invalid signals skipped:  {invalid_signal:,}"
     )
 
     print(
-        f"Invalid FENs skipped:       {invalid_fen:,}"
+        f"Invalid FENs skipped:      {invalid_fen:,}"
     )
 
+    if len(df) == 0:
+        return df
+
     print(
-        f"Unique FENs:               {df['fen'].nunique():,}"
+        f"Unique FENs:              {df['fen'].nunique():,}"
     )
 
     return df
@@ -516,6 +564,7 @@ def analyze_top_selection(df):
         0.10,
         0.05,
         0.01,
+        0.005,
     ]
 
     for signal in SIGNALS:
@@ -700,58 +749,84 @@ def analyze_hu_redundancy(df):
 
 
 # ============================================================
-# Winner color
+# Side-to-move bias
 # ============================================================
 
-def analyze_winner_color(df):
+def analyze_side_to_move(df):
 
     print()
-    print("WINNER COLOR ANALYSIS")
+    print("SIDE-TO-MOVE ANALYSIS")
     print("-" * 70)
 
-    total = len(df)
-
-    white_wins = int(
-        (df["reward"] == 1).sum()
-    )
-
-    draws = int(
-        (df["reward"] == 0).sum()
-    )
-
-    black_wins = int(
-        (df["reward"] == -1).sum()
-    )
-
-    for count, label in [
-        (white_wins, "White win"),
-        (draws, "Draw"),
-        (black_wins, "Black win"),
+    for side, label in [
+        ("w", "White to move"),
+        ("b", "Black to move"),
     ]:
 
-        pct = 100.0 * count / total
+        subset = df[
+            df["side_to_move"] == side
+        ]
 
-        print(
-            f"{label:<10} | "
-            f"N={count:>8,} | "
-            f"{pct:6.2f}%"
-        )
+        if len(subset) == 0:
+            continue
 
-    decisive = white_wins + black_wins
+        wins = (
+            subset["reward"] == 1
+        ).sum()
 
-    if decisive > 0:
+        draws = (
+            subset["reward"] == 0
+        ).sum()
+
+        losses = (
+            subset["reward"] == -1
+        ).sum()
 
         print()
-        print("DECISIVE GAMES")
+        print(label)
 
         print(
-            f"White | "
-            f"{100.0 * white_wins / decisive:6.2f}%"
+            f"  N       : {len(subset):,}"
         )
 
         print(
-            f"Black | "
-            f"{100.0 * black_wins / decisive:6.2f}%"
+            f"  Win     : "
+            f"{100.0 * wins / len(subset):6.2f}%"
+        )
+
+        print(
+            f"  Draw    : "
+            f"{100.0 * draws / len(subset):6.2f}%"
+        )
+
+        print(
+            f"  Loss    : "
+            f"{100.0 * losses / len(subset):6.2f}%"
+        )
+
+        print(
+            f"  E[R]    : "
+            f"{subset['reward'].mean():+.6f}"
+        )
+
+    print()
+    print("SIGNAL MEANS BY SIDE")
+
+    for signal in SIGNALS:
+
+        white = df[
+            df["side_to_move"] == "w"
+        ][signal]
+
+        black = df[
+            df["side_to_move"] == "b"
+        ][signal]
+
+        print(
+            f"{signal:<4} | "
+            f"White={white.mean():.8f} | "
+            f"Black={black.mean():.8f} | "
+            f"Δ={white.mean() - black.mean():+.8f}"
         )
 
 
@@ -845,7 +920,7 @@ def main():
 
     analyze_hu_redundancy(df)
 
-    analyze_winner_color(df)
+    analyze_side_to_move(df)
 
     analyze_repeated_positions(df)
 
@@ -854,12 +929,16 @@ def main():
     print("FINAL PRE-AL ANALYSIS COMPLETE")
     print("=" * 70)
     print()
+
     print(
-        f"Analyzed observations: {len(df):,}"
+        f"Analyzed observations: "
+        f"{len(df):,}"
     )
+
     print(
         f"Input: {INPUT_FILE}"
     )
+
     print()
 
 

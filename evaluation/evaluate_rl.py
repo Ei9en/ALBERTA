@@ -1,4 +1,8 @@
+import sys
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 
@@ -13,22 +17,22 @@ from src.actions_space import ACTIONS
 # CONSTANTS
 # ============================================================
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+
 
 DEVICE = "cpu"
 
 RL1_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
-    / "rl_epoch"
-    / "rl_epoch_25.pt"
+    / "rl_baseline"
+    / "rl_epoch_20.pt"
 )
 
 RL2_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
     / "rl_epoch"
-    / "al_epoch_20.pt"
+    / "rl_epoch_20.pt"
 )
 
 GAMES = 100

@@ -28,7 +28,7 @@ class AtomicRandom(ExampleEngine):
         super().__init__(*args, **kwargs)
 
         self.bot = RLBot(
-            temperature=1,
+            temperature=2,
         )
 
 

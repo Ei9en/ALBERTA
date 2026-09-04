@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-DATA_DIR = Path("data")
+DATA_DIR = Path("data/selfplay_jsons")
 
 FILES = [
     DATA_DIR / "uncertainty_stats_1-10.json",
@@ -10,11 +10,9 @@ FILES = [
     DATA_DIR / "uncertainty_stats_31-40.json",
     DATA_DIR / "uncertainty_stats_41-50.json",
     DATA_DIR / "uncertainty_stats_51-60.json",
-    DATA_DIR / "uncertainty_stats_61-70.json",
-    DATA_DIR / "uncertainty_stats_71-100.json",
 ]
 
-OUTPUT = DATA_DIR / "uncertainty_stats_1-100.json"
+OUTPUT = DATA_DIR / "uncertainty_stats_1-60.json"
 
 merged = []
 

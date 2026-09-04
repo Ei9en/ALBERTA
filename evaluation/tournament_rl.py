@@ -54,9 +54,9 @@ ORACLE_CHECKPOINT_DIR = (
 # False -> RL only
 INCLUDE_ORACLE = True
 
-GAMES_PER_MATCH = 100
+GAMES_PER_MATCH = 50
 
-TEMPERATURE = 2.0
+TEMPERATURE = 1
 
 
 # ============================================================

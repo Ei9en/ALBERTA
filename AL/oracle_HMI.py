@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
 import sys
+
+AL_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = AL_ROOT.parent
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from PyQt6.QtWidgets import (
     QApplication,
@@ -27,7 +34,7 @@ class OracleHMI(QMainWindow):
 
     def __init__(
         self,
-        queue_path="data/oracle_queue_1-10.jsonl",
+        queue_path="checkpoints/queue/oracle_queue_1-10_random.jsonl",
     ):
 
         super().__init__()

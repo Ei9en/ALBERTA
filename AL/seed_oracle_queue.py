@@ -16,18 +16,21 @@ from distribution_I import W_H, W_U, W_HU
 # Paths
 # ============================================================
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+AL_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = AL_ROOT.parent
 
 DATA_FILE = (
     PROJECT_ROOT
     / "data"
+    / "selfplay_jsons"
     / "uncertainty_stats_1-10.json"
 )
 
 QUEUE_FILE = (
     PROJECT_ROOT
-    / "data"
-    / "oracle_queue_1-10.jsonl"
+    / "checkpoints"
+    / "queue"
+    / "oracle_queue_1-10_random.jsonl"
 )
 
 
@@ -283,6 +286,23 @@ def build_candidate_order(
             "Middle I (around median, ±0.01%)"
         )
 
+    # --------------------------------------------------------
+    # RANDOM
+    # Purely uniform random selection
+    #
+    # I is completely ignored.
+    # --------------------------------------------------------
+
+    elif mode == "random":
+
+        order = np.random.permutation(
+            n
+        )
+
+        description = (
+            "Uniform random selection (I ignored)"
+        )
+
     else:
 
         raise ValueError(
@@ -373,7 +393,10 @@ def select_positions(
     rejected_duplicates = 0
 
     # --------------------------------------------------------
-    # Examine candidates in I priority order.
+    # Examine candidates in priority order.
+    #
+    # For random mode, candidate_order is a uniform random
+    # permutation, so eligible positions are sampled uniformly.
     #
     # Legal move count is calculated ONLY when the position
     # is reached as a candidate.
@@ -464,7 +487,8 @@ def main():
 
     parser = argparse.ArgumentParser(
         description=
-        "Seed ALBERTA oracle queue using active learning score."
+        "Seed ALBERTA oracle queue using active learning score "
+        "or uniform random sampling."
     )
 
     parser.add_argument(
@@ -472,14 +496,16 @@ def main():
         choices=[
             "high",
             "low",
-            "middle"
+            "middle",
+            "random"
         ],
         default="high",
         help=
         "Selection mode: "
         "high = highest I, "
         "low = lowest I, "
-        "middle = around median."
+        "middle = around median, "
+        "random = uniform random selection."
     )
 
     args = parser.parse_args()
