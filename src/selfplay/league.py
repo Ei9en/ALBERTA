@@ -29,8 +29,8 @@ class League:
                 agent_name
                 for agent_name in self.agents
                 if agent_name not in [
-                    "bc_epoch_4",
-                    "bc_epoch_5",
+                    "bc_epoch_6",
+                    "bc_epoch_7",
                 ]
             ]
 

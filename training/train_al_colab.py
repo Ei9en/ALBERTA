@@ -905,39 +905,8 @@ def build_rl_buffer(
 
 def main():
 
-    print()
-    print(
-        "============================================================"
-    )
-
-    print(
-        "ALBERTA — RL + ORACLE"
-    )
-
-    print(
-        "============================================================"
-    )
-
-    print(
-        f"Starting checkpoint: RL{START_EPOCH}"
-    )
-
-    print(
-        f"Training epochs:     "
-        f"{AL_START_EPOCH} -> {AL_END_EPOCH}"
-    )
-
-    print(
-        f"Oracle queue:        "
-        f"{ORACLE_QUEUE_PATH}"
-    )
-
-    print(
-        "============================================================"
-    )
-
     # ========================================================
-    # Load RL starting point
+    # Load RL10 + optimizer + BC7 + league
     # ========================================================
 
     (
@@ -948,6 +917,17 @@ def main():
     ) = load_rl_start()
 
     # ========================================================
+    # BC model for self-play workers
+    # ========================================================
+
+    bc_model_selfplay = copy.deepcopy(
+        bc_model
+    ).to("cpu")
+
+    bc_model_selfplay.eval()
+    bc_model_selfplay.share_memory()
+
+    # ========================================================
     # Load Oracle annotations
     # ========================================================
 
@@ -955,15 +935,41 @@ def main():
         ORACLE_QUEUE_PATH
     )
 
-    oracle_buffer = (
-        build_oracle_buffer(
-            annotations
-        )
+    oracle_buffer = build_oracle_buffer(
+        annotations
     )
+
+    oracle_loss_fn = make_oracle_loss_fn(
+        oracle_buffer
+    )
+
+    # ========================================================
+    # Replay buffer
+    # ========================================================
+
+    buffer = rl.ReplayBuffer(
+        capacity=300000
+    )
+
+    stats = rl.UncertaintyStats()
+
+    best_loss = None
+
+    # ========================================================
+    # Parallel self-play
+    # ========================================================
+
+    NUM_WORKERS = 12
+    SELFPLAY_BATCH_SIZE = 256
 
     # ========================================================
     # Shared current model
     # ========================================================
+
+    print(
+        "\nPreparing shared CPU models...",
+        flush=True,
+    )
 
     shared_current_model = (
         rl._prepare_shared_model(
@@ -977,40 +983,19 @@ def main():
 
     shared_league_models = {}
 
-    for name, agent in (
-        league.agents.items()
-    ):
+    for (
+        name,
+        league_model,
+    ) in league.agents.items():
 
-        shared_league_models[
-            name
-        ] = rl._prepare_shared_model(
-            agent
+        shared_league_models[name] = (
+            rl._prepare_shared_model(
+                league_model
+            )
         )
 
     # ========================================================
-    # Manager registry
-    # ========================================================
-
-    manager = mp.Manager()
-
-    league_registry = manager.list(
-        league.names()
-    )
-
-    # ========================================================
-    # Shared BC model
-    # ========================================================
-
-    shared_bc_model = copy.deepcopy(
-        bc_model
-    ).to("cpu")
-
-    shared_bc_model.eval()
-
-    shared_bc_model.share_memory()
-
-    # ========================================================
-    # Preallocate future league snapshot slots
+    # Preallocate future league slots
     # ========================================================
 
     for epoch in range(
@@ -1018,35 +1003,77 @@ def main():
         AL_END_EPOCH + 1,
     ):
 
-        snapshot_name = (
+        name = (
             f"league_epoch_{epoch:03d}"
         )
 
-        shared_league_models[
-            snapshot_name
-        ] = rl._prepare_shared_model(
-            model
+        if name in shared_league_models:
+
+            continue
+
+        placeholder = (
+            copy.deepcopy(
+                model
+            ).to("cpu")
+        )
+
+        placeholder.eval()
+
+        placeholder.share_memory()
+
+        shared_league_models[name] = (
+            placeholder
+        )
+
+    print(
+        f"Shared models ready: "
+        f"{len(shared_league_models)} league slots",
+        flush=True,
+    )
+
+    # ========================================================
+    # Multiprocessing
+    # ========================================================
+
+    ctx = mp.get_context(
+        "spawn"
+    )
+
+    manager = ctx.Manager()
+
+    league_registry = manager.list(
+        league.names()
+    )
+
+    print(
+        "\nInitial league registry:",
+        flush=True,
+    )
+
+    for name in league_registry:
+
+        print(
+            f"  - {name}",
+            flush=True,
         )
 
     # ========================================================
-    # Worker pool
+    # Pool
     # ========================================================
 
-    pool = mp.Pool(
-        processes=12,
+    with ctx.Pool(
+        processes=NUM_WORKERS,
         initializer=rl._init_selfplay_worker,
         initargs=(
             shared_current_model,
             shared_league_models,
             league_registry,
-            shared_bc_model,
+            bc_model_selfplay,
         ),
-    )
-
-    try:
+    ) as pool:
 
         # ====================================================
-        # AL / Oracle training
+        # RL + Oracle loop
         # ====================================================
 
         for epoch in range(
@@ -1054,18 +1081,24 @@ def main():
             AL_END_EPOCH + 1,
         ):
 
-            print()
             print(
-                "============================================================"
+                "\n============================================================",
+                flush=True,
             )
 
             print(
-                f"RL + ORACLE — EPOCH {epoch}"
+                f"===== RL + ORACLE — Epoch {epoch} =====",
+                flush=True,
             )
 
             print(
-                "============================================================"
+                "============================================================",
+                flush=True,
             )
+
+            wins = 0
+            losses = 0
+            draws = 0
 
             # =================================================
             # Self-play
@@ -1073,60 +1106,243 @@ def main():
 
             stats = rl.UncertaintyStats()
 
-            completed_games = (
-                rl.collect_games_parallel(
-                    pool,
-                    shared_current_model,
-                    shared_league_models,
-                    model,
-                    league,
-                    rl.GAMES_PER_EPOCH,
-                    stats,
-                    num_workers=12,
-                    batch_size=256,
-                )
+            games = rl.collect_games_parallel(
+                pool,
+                shared_current_model,
+                shared_league_models,
+                model,
+                league,
+                rl.GAMES_PER_EPOCH,
+                stats,
+                num_workers=NUM_WORKERS,
+                batch_size=SELFPLAY_BATCH_SIZE,
             )
 
             # =================================================
-            # RL replay buffer
+            # Construction replay buffer
             # =================================================
 
-            rl_buffer = build_rl_buffer(
-                completed_games
+            for game in games:
+
+                trajectory = (
+                    game["trajectory"]
+                )
+
+                result = (
+                    game["result"]
+                )
+
+                current_white = (
+                    game["current_white"]
+                )
+
+                # =============================================
+                # Résultat
+                # =============================================
+
+                if result == "1-0":
+
+                    if current_white:
+
+                        wins += 1
+
+                    else:
+
+                        losses += 1
+
+                elif result == "0-1":
+
+                    if current_white:
+
+                        losses += 1
+
+                    else:
+
+                        wins += 1
+
+                else:
+
+                    draws += 1
+
+                # =============================================
+                # Rewards
+                # =============================================
+
+                rewards = [
+                    0.0
+                ] * len(trajectory)
+
+                if trajectory:
+
+                    if result == "1-0":
+
+                        terminal_reward = (
+                            1.0
+                            if current_white
+                            else -1.0
+                        )
+
+                    elif result == "0-1":
+
+                        terminal_reward = (
+                            -1.0
+                            if current_white
+                            else 1.0
+                        )
+
+                    else:
+
+                        terminal_reward = 0.0
+
+                    rewards[-1] = (
+                        terminal_reward
+                    )
+
+                # =============================================
+                # GAE
+                # =============================================
+
+                advantages, returns = (
+                    rl.compute_gae(
+                        trajectory,
+                        rewards,
+                        gamma=rl.GAMMA,
+                        gae_lambda=rl.GAE_LAMBDA,
+                    )
+                )
+
+                # =============================================
+                # Replay
+                # =============================================
+
+                for (
+                    step,
+                    advantage,
+                    ret,
+                ) in zip(
+                    trajectory,
+                    advantages,
+                    returns,
+                ):
+
+                    buffer.add(
+                        step["fen"],
+                        step["action"],
+                        step["legal_moves"],
+                        ret,
+                        step["value"],
+                        step["old_log_prob"],
+                        advantage,
+                        step["ply"],
+                        game.get(
+                            "result"
+                        ),
+                    )
+
+            # =================================================
+            # Stats
+            # =================================================
+
+            total_games = (
+                wins
+                + losses
+                + draws
+            )
+
+            score_rate = (
+                wins
+                + 0.5 * draws
+            ) / total_games
+
+            print(
+                f"Replay buffer size: "
+                f"{len(buffer)}",
+                flush=True,
             )
 
             print(
-                f"RL replay buffer: "
-                f"{len(rl_buffer)} positions"
-            )
-
-            # =================================================
-            # Oracle loss
-            # =================================================
-
-            oracle_loss_fn = (
-                make_oracle_loss_fn(
-                    oracle_buffer
-                )
+                f"Results: "
+                f"W={wins} "
+                f"L={losses} "
+                f"D={draws} "
+                f"Score={score_rate:.1%}",
+                flush=True,
             )
 
             # =================================================
             # PPO + Oracle
             # =================================================
 
-            metrics = rl.train_epoch(
+            (
+                loss,
+                actor_loss,
+                critic_loss,
+                approx_kl,
+                dkl,
+                dkl_loss,
+            ) = rl.train_epoch(
                 model,
                 optimizer,
-                rl_buffer,
+                buffer,
                 bc_model,
                 epoch,
                 extra_loss_fn=oracle_loss_fn,
             )
 
-            loss = metrics[0]
+            print(
+                f"Loss={loss:.4f} "
+                f"| Actor={actor_loss:.4f} "
+                f"| Critic={critic_loss:.4f} "
+                f"| KL={approx_kl:.6f} "
+                f"| DKL(RL||BC)={dkl:.6f} "
+                f"| DKL loss={dkl_loss:.6e}",
+                flush=True,
+            )
 
             # =================================================
-            # Save checkpoint
+            # Replay buffer sauvegarde
+            # =================================================
+
+            if epoch % 5 == 0:
+
+                rl.save_replay_buffer(
+                    buffer,
+                    epoch,
+                )
+
+            # =================================================
+            # On-policy
+            # =================================================
+
+            buffer.clear()
+
+            print(
+                "Replay buffer cleared after PPO update.",
+                flush=True,
+            )
+
+            # =================================================
+            # Uncertainty stats
+            # =================================================
+
+            stats_path = (
+                PROJECT_ROOT
+                / "checkpoints"
+                / "uncertainty_stats_random_oracle.json"
+            )
+
+            stats.save(
+                stats_path
+            )
+
+            print(
+                f"Uncertainty JSON updated: "
+                f"{len(stats.data)} positions",
+                flush=True,
+            )
+
+            # =================================================
+            # AL checkpoint
             # =================================================
 
             AL_CHECKPOINT_DIR = (
@@ -1163,13 +1379,13 @@ def main():
             )
 
             print(
-                "AL checkpoint saved:",
-                checkpoint_path,
+                f"AL checkpoint saved: "
+                f"{checkpoint_path}",
                 flush=True,
             )
 
             # =================================================
-            # Save league snapshot
+            # AL league snapshot
             # =================================================
 
             AL_LEAGUE_DIR = (
@@ -1183,9 +1399,26 @@ def main():
                 exist_ok=True,
             )
 
-            league_path = (
+            snapshot = (
+                copy.deepcopy(
+                    model
+                ).to(DEVICE)
+            )
+
+            snapshot.eval()
+
+            agent_name = (
+                f"league_epoch_{epoch:03d}"
+            )
+
+            league.add_agent(
+                agent_name,
+                snapshot,
+            )
+
+            snapshot_path = (
                 AL_LEAGUE_DIR
-                / f"league_epoch_{epoch:03d}.pt"
+                / f"{agent_name}.pt"
             )
 
             torch.save(
@@ -1194,90 +1427,131 @@ def main():
                         epoch,
 
                     "model_state_dict":
-                        model.state_dict(),
+                        snapshot.state_dict(),
                 },
-                league_path,
+                snapshot_path,
             )
 
             print(
-                "AL league snapshot saved:",
-                league_path,
+                f"AL league snapshot saved: "
+                f"{snapshot_path}",
                 flush=True,
             )
 
             # =================================================
-            # Add snapshot to local league
+            # Shared snapshot
             # =================================================
 
-            snapshot = copy.deepcopy(
-                model
-            ).to(DEVICE)
+            if agent_name not in (
+                shared_league_models
+            ):
 
-            snapshot.eval()
+                raise RuntimeError(
+                    f"Missing shared slot "
+                    f"for {agent_name}"
+                )
 
-            snapshot_name = (
-                f"league_epoch_{epoch:03d}"
+            shared_snapshot = (
+                shared_league_models[
+                    agent_name
+                ]
             )
 
-            league.add_agent(
-                snapshot_name,
-                snapshot,
-            )
+            for (
+                key,
+                value,
+            ) in snapshot.state_dict().items():
+
+                shared_snapshot.state_dict()[
+                    key
+                ].copy_(
+                    value.detach().cpu()
+                )
+
+            shared_snapshot.eval()
 
             # =================================================
-            # Update shared snapshot slot
-            # =================================================
-
-            shared_league_models[
-                snapshot_name
-            ].load_state_dict(
-                model.state_dict()
-            )
-
-            # =================================================
-            # Synchronize registry
+            # Registry
             # =================================================
 
             league_registry[:] = (
                 league.names()
             )
 
+            print(
+                "Updated league registry:",
+                list(league_registry),
+                flush=True,
+            )
+
             # =================================================
-            # Synchronize current model
+            # Shared current model
             # =================================================
 
-            shared_current_model.load_state_dict(
-                model.state_dict()
+            for (
+                key,
+                value,
+            ) in model.state_dict().items():
+
+                shared_current_model.state_dict()[
+                    key
+                ].copy_(
+                    value.detach().cpu()
+                )
+
+            # =================================================
+            # Summary
+            # =================================================
+
+            print(
+                f"\n===== Epoch {epoch} summary =====",
+                flush=True,
             )
 
             print(
-                f"League size: {len(league)}"
+                f"Self-play: "
+                f"{wins}W / "
+                f"{losses}L / "
+                f"{draws}D "
+                f"({score_rate:.1%})",
+                flush=True,
             )
 
-            # =================================================
-            # Cleanup
-            # =================================================
+            print(
+                f"DKL(RL || BC): "
+                f"{dkl:.6e}",
+                flush=True,
+            )
 
-            del rl_buffer
+            print(
+                f"DKL lambda: "
+                f"{rl.get_dkl_lambda(epoch).item():.6e}",
+                flush=True,
+            )
 
-    finally:
+            print(
+                f"DKL loss: "
+                f"{dkl_loss:.6e}",
+                flush=True,
+            )
 
-        pool.close()
-        pool.join()
+            print(
+                f"League size: "
+                f"{len(league)}",
+                flush=True,
+            )
 
-        manager.shutdown()
+            print(
+                f"Oracle annotations: "
+                f"{len(oracle_buffer)}",
+                flush=True,
+            )
 
-    print()
+    manager.shutdown()
+
     print(
-        "============================================================"
-    )
-
-    print(
-        "RL + ORACLE TRAINING FINISHED"
-    )
-
-    print(
-        "============================================================"
+        "\nRL + ORACLE training finished.",
+        flush=True,
     )
 
 
