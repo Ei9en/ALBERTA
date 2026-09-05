@@ -21,7 +21,7 @@ DEFAULT_CHECKPOINT = (
     Path("/Users/tom/Desktop/Atomic")
     / "checkpoints"
     / "rl_epoch"
-    / "rl_epoch_10.pt"
+    / "rl_epoch_30.pt"
 )
 
 

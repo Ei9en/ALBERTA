@@ -51,7 +51,7 @@ DEVICE = (
 START_EPOCH = 10
 
 AL_START_EPOCH = 11
-AL_END_EPOCH = 20
+AL_END_EPOCH = 30
 
 
 # ============================================================
@@ -79,7 +79,7 @@ ORACLE_BATCH_SIZE = 4096
 # Oracle loss coefficients
 # ============================================================
 
-ORACLE_POLICY_COEF = 0.001
+ORACLE_POLICY_COEF = 0.05
 
 ORACLE_VALUE_COEF = 0.10
 
