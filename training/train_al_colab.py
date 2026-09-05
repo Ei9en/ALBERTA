@@ -76,6 +76,23 @@ ORACLE_BATCH_SIZE = 4096
 
 
 # ============================================================
+# Oracle injection frequency
+#
+# Oracle is injected once every N PPO minibatch updates.
+#
+# N = 1:
+#     Oracle on every PPO update.
+#
+# N = 5:
+#     Oracle on 1 PPO update out of 5.
+#
+# The remaining PPO updates are pure RL.
+# ============================================================
+
+ORACLE_INJECTION_FREQUENCY = 5
+
+
+# ============================================================
 # Oracle loss coefficients
 # ============================================================
 
@@ -624,7 +641,50 @@ def make_oracle_loss_fn(
     oracle_buffer,
 ):
 
+    update_counter = {
+        "value": 0
+    }
+
     def oracle_loss_fn(model):
+
+        update_counter["value"] += 1
+
+        # ----------------------------------------------------
+        # Oracle injection schedule
+        #
+        # Inject on:
+        #
+        #     1, 6, 11, 16, ...
+        #
+        # when frequency = 5.
+        #
+        # All other PPO updates receive zero Oracle loss.
+        # ----------------------------------------------------
+
+        if (
+            (
+                update_counter["value"] - 1
+            )
+            %
+            ORACLE_INJECTION_FREQUENCY
+            != 0
+        ):
+
+            zero = torch.zeros(
+                (),
+                device=DEVICE,
+            )
+
+            return {
+                "loss":
+                    zero,
+
+                "policy_loss":
+                    zero,
+
+                "value_loss":
+                    zero,
+            }
 
         return compute_oracle_loss(
             model,
@@ -944,6 +1004,42 @@ def main():
     )
 
     # ========================================================
+    # Oracle injection configuration
+    # ========================================================
+
+    print()
+    print(
+        "======================================"
+    )
+
+    print(
+        "ORACLE INJECTION"
+    )
+
+    print(
+        "======================================"
+    )
+
+    print(
+        f"Injection frequency: "
+        f"1 / {ORACLE_INJECTION_FREQUENCY} PPO updates"
+    )
+
+    print(
+        f"Oracle policy coefficient: "
+        f"{ORACLE_POLICY_COEF:.4f}"
+    )
+
+    print(
+        f"Oracle value coefficient:  "
+        f"{ORACLE_VALUE_COEF:.4f}"
+    )
+
+    print(
+        "======================================"
+    )
+
+    # ========================================================
     # Replay buffer
     # ========================================================
 
@@ -954,7 +1050,7 @@ def main():
     # ========================================================
     # IMPORTANT:
     # Keep ONE UncertaintyStats instance for the
-    # entire AL11 -> AL20 experiment.
+    # entire AL11 -> AL30 experiment.
     #
     # If this were created inside the epoch loop,
     # stats.save() would overwrite the JSON with only
@@ -1340,7 +1436,7 @@ def main():
             stats_path = (
                 PROJECT_ROOT
                 / "checkpoints"
-                / "uncertainty_stats_random_oracle.json"
+                / "uncertainty_stats_random_oracle_1in5.json"
             )
 
             stats.save(
@@ -1360,7 +1456,7 @@ def main():
             AL_CHECKPOINT_DIR = (
                 PROJECT_ROOT
                 / "checkpoints"
-                / "al_epoch"
+                / "al_epoch_1in5"
             )
 
             AL_CHECKPOINT_DIR.mkdir(
@@ -1403,7 +1499,7 @@ def main():
             AL_LEAGUE_DIR = (
                 PROJECT_ROOT
                 / "checkpoints"
-                / "league_al"
+                / "league_al_1in5"
             )
 
             AL_LEAGUE_DIR.mkdir(
@@ -1436,10 +1532,10 @@ def main():
             torch.save(
                 {
                     "epoch":
-                        epoch,
+                    epoch,
 
                     "model_state_dict":
-                        snapshot.state_dict(),
+                    snapshot.state_dict(),
                 },
                 snapshot_path,
             )
@@ -1544,6 +1640,12 @@ def main():
             print(
                 f"DKL loss: "
                 f"{dkl_loss:.6e}",
+                flush=True,
+            )
+
+            print(
+                f"Oracle injection: "
+                f"1 / {ORACLE_INJECTION_FREQUENCY} PPO updates",
                 flush=True,
             )
 

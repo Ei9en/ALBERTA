@@ -1220,7 +1220,7 @@ def train_epoch(
     total_critic_grad_norm = 0.0
 
     # ========================================================
-    # NEW: DKL gradient diagnostic
+    # DKL gradient diagnostic
     # ========================================================
 
     total_dkl_grad_norm = 0.0
@@ -1245,7 +1245,7 @@ def train_epoch(
     total_dkl_loss = 0.0
 
     # ========================================================
-    # NEW: Extra loss diagnostics
+    # Extra loss diagnostics
     # ========================================================
 
     total_extra_loss = 0.0
@@ -1253,6 +1253,14 @@ def train_epoch(
     total_extra_policy_loss = 0.0
 
     total_extra_value_loss = 0.0
+
+    # ========================================================
+    # PPO / Oracle gradient cosine
+    # ========================================================
+
+    total_grad_cosine = 0.0
+
+    valid_grad_cosines = 0
 
     lambda_dkl = get_dkl_lambda(epoch)
 
@@ -1468,17 +1476,21 @@ def train_epoch(
             )
 
             # =================================================
-            # DKL(RL || BC), calcul pur par position
+            # DKL(RL || BC)
             # =================================================
 
-            safe_rl_log_probs = rl_log_probs.masked_fill(
-                ~legal_mask,
-                0.0,
+            safe_rl_log_probs = (
+                rl_log_probs.masked_fill(
+                    ~legal_mask,
+                    0.0,
+                )
             )
 
-            safe_bc_log_probs = bc_log_probs.masked_fill(
-                ~legal_mask,
-                0.0,
+            safe_bc_log_probs = (
+                bc_log_probs.masked_fill(
+                    ~legal_mask,
+                    0.0,
+                )
             )
 
             rl_probs_for_dkl = torch.exp(
@@ -1491,15 +1503,21 @@ def train_epoch(
                     safe_rl_log_probs
                     - safe_bc_log_probs
                 )
-            ).sum(dim=1)
+            ).sum(
+                dim=1
+            )
 
-            delta_dkl = dkl_per_position.mean()
+            delta_dkl = (
+                dkl_per_position.mean()
+            )
 
             # =================================================
-            # Budget de divergence relatif au PPO sans DKL
+            # Budget de divergence
             # =================================================
 
-            natural_dkl = get_natural_dkl(epoch)
+            natural_dkl = get_natural_dkl(
+                epoch
+            )
 
             target_dkl = (
                 (1.0 - DKL_ALPHA)
@@ -1512,7 +1530,7 @@ def train_epoch(
             )
 
             # =================================================
-            # Rappel unilatéral vers BC au-delà du budget
+            # Rappel unilatéral vers BC
             # =================================================
 
             excess_dkl = torch.relu(
@@ -1526,14 +1544,7 @@ def train_epoch(
             )
 
             # =================================================
-            # NEW: Gradient de L_DKL
-            #
-            # || ∇θ L_DKL ||_2
-            #
-            # θ = paramètres de la policy RL
-            #
-            # On conserve le graphe pour permettre ensuite
-            # le backward() de la loss totale.
+            # Gradient de L_DKL
             # =================================================
 
             dkl_gradients = torch.autograd.grad(
@@ -1773,13 +1784,7 @@ def train_epoch(
             )
 
             # =================================================
-            # NEW: Optional extra loss
-            #
-            # Pour le RL normal:
-            #     extra_loss_fn = None
-            #
-            # Donc extra_loss = 0 et la loss RL
-            # reste strictement inchangée.
+            # Extra loss
             # =================================================
 
             if extra_loss_fn is not None:
@@ -1834,28 +1839,22 @@ def train_epoch(
                 )
 
             # =================================================
-            # Total loss
-            #
-            # RL:
-            #
-            # L =
-            #     L_actor
-            #     + VALUE_COEF * L_critic
-            #     - ENTROPY_COEF * H
-            #     + L_DKL
-            #
-            # AL:
-            #
-            # L =
-            #     L_RL
-            #     + L_extra
+            # PPO loss WITHOUT Oracle
             # =================================================
 
-            loss = (
+            ppo_loss = (
                 actor_loss
                 + VALUE_COEF * critic_loss
                 - ENTROPY_COEF * entropy
                 + dkl_loss
+            )
+
+            # =================================================
+            # Total loss
+            # =================================================
+
+            loss = (
+                ppo_loss
                 + extra_loss
             )
 
@@ -1912,6 +1911,117 @@ def train_epoch(
             )
 
             # =================================================
+            # PPO / Oracle gradient cosine
+            #
+            # Pure diagnostic.
+            #
+            # RL only:
+            #     no Oracle gradient exists
+            #     -> cosine = NaN / N/A
+            #
+            # Oracle:
+            #     cos(g_PPO, g_Oracle)
+            # =================================================
+
+            if extra_loss_fn is not None:
+
+                ppo_gradients = torch.autograd.grad(
+                    ppo_loss,
+                    model.parameters(),
+                    retain_graph=True,
+                    allow_unused=True,
+                )
+
+                oracle_gradients = torch.autograd.grad(
+                    extra_loss,
+                    model.parameters(),
+                    retain_graph=True,
+                    allow_unused=True,
+                )
+
+                ppo_flat = []
+                oracle_flat = []
+
+                for ppo_grad, oracle_grad in zip(
+                    ppo_gradients,
+                    oracle_gradients,
+                ):
+
+                    if (
+                        ppo_grad is None
+                        and oracle_grad is None
+                    ):
+                        continue
+
+                    if ppo_grad is None:
+
+                        ppo_grad = torch.zeros_like(
+                            oracle_grad
+                        )
+
+                    if oracle_grad is None:
+
+                        oracle_grad = torch.zeros_like(
+                            ppo_grad
+                        )
+
+                    ppo_flat.append(
+                        ppo_grad.detach().reshape(-1)
+                    )
+
+                    oracle_flat.append(
+                        oracle_grad.detach().reshape(-1)
+                    )
+
+                if (
+                    len(ppo_flat) > 0
+                    and len(oracle_flat) > 0
+                ):
+
+                    ppo_vector = torch.cat(
+                        ppo_flat
+                    )
+
+                    oracle_vector = torch.cat(
+                        oracle_flat
+                    )
+
+                    ppo_norm = (
+                        torch.linalg.vector_norm(
+                            ppo_vector
+                        )
+                    )
+
+                    oracle_norm = (
+                        torch.linalg.vector_norm(
+                            oracle_vector
+                        )
+                    )
+
+                    if (
+                        ppo_norm.item() > 1e-12
+                        and oracle_norm.item() > 1e-12
+                    ):
+
+                        grad_cosine = (
+                            torch.dot(
+                                ppo_vector,
+                                oracle_vector,
+                            )
+                            /
+                            (
+                                ppo_norm
+                                * oracle_norm
+                            )
+                        ).item()
+
+                        total_grad_cosine += (
+                            grad_cosine
+                        )
+
+                        valid_grad_cosines += 1
+
+            # =================================================
             # Backward
             # =================================================
 
@@ -1930,7 +2040,9 @@ def train_epoch(
             # Accumulate
             # =================================================
 
-            total_loss += loss.item()
+            total_loss += (
+                loss.item()
+            )
 
             total_actor += (
                 actor_loss.item()
@@ -1961,7 +2073,7 @@ def train_epoch(
             )
 
             # =================================================
-            # NEW: DKL gradient accumulation
+            # DKL gradient accumulation
             # =================================================
 
             total_dkl_grad_norm += (
@@ -2009,7 +2121,7 @@ def train_epoch(
             )
 
             # =================================================
-            # NEW: Extra loss diagnostics
+            # Extra loss diagnostics
             # =================================================
 
             total_extra_loss += (
@@ -2127,7 +2239,7 @@ def train_epoch(
     )
 
     # ========================================================
-    # NEW: Extra loss averages
+    # Extra loss averages
     # ========================================================
 
     avg_extra_loss = (
@@ -2144,6 +2256,21 @@ def train_epoch(
         total_extra_value_loss
         / total_updates
     )
+
+    # ========================================================
+    # PPO / Oracle cosine average
+    # ========================================================
+
+    if valid_grad_cosines > 0:
+
+        avg_grad_cosine = (
+            total_grad_cosine
+            / valid_grad_cosines
+        )
+
+    else:
+
+        avg_grad_cosine = float("nan")
 
     # ========================================================
     # Diagnostics
@@ -2252,6 +2379,24 @@ def train_epoch(
         f"Entropy:               "
         f"{avg_entropy:.6f}"
     )
+
+    # ========================================================
+    # PPO / Oracle gradient diagnostic
+    # ========================================================
+
+    if extra_loss_fn is not None:
+
+        print(
+            f"PPO/Oracle grad cosine: "
+            f"{avg_grad_cosine:+.6f}"
+        )
+
+    else:
+
+        print(
+            "PPO/Oracle grad cosine: "
+            "N/A (no Oracle loss)"
+        )
 
     print(
         "--------------------------------------"
