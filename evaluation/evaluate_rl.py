@@ -35,7 +35,7 @@ RL2_CHECKPOINT = (
     / "al_epoch_20.pt"
 )
 
-GAMES = 100
+GAMES = 1000
 TEMPERATURE = 2
 
 
