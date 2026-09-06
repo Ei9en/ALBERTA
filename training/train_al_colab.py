@@ -25,7 +25,6 @@ import train_rl_league_colab as rl
 from src.encoding import encode_boards
 from src.actions_space import ACTIONS
 from src.actions_space import ACTION_TO_INDEX
-from src.encoding import encode_boards
 from src.models.resnet import ChessResNet
 from src.models.actor_critic import ActorCritic
 from src.rl.oracle_replay_buffer import OracleReplayBuffer
@@ -91,7 +90,7 @@ ORACLE_BATCH_SIZE = 4096
 # The remaining PPO updates are pure RL.
 # ============================================================
 
-ORACLE_INJECTION_FREQUENCY = 5
+ORACLE_INJECTION_FREQUENCY = 1
 
 
 # ============================================================
@@ -100,7 +99,7 @@ ORACLE_INJECTION_FREQUENCY = 5
 
 ORACLE_POLICY_COEF = 0.05
 
-ORACLE_VALUE_COEF = 0.10
+ORACLE_VALUE_COEF = 0.5
 
 
 # ============================================================
@@ -117,11 +116,18 @@ CONFIDENCE_WEIGHTS = {
 # ============================================================
 # Oracle criticality
 # ============================================================
+#
+# Criticality represents the importance of selecting the
+# correct action.
+#
+# It is therefore used as a supervision weight rather than
+# as a temperature defining an artificial target distribution.
+# ============================================================
 
-CRITICALITY_TEMPERATURES = {
-    "critical": 0.25,
+CRITICALITY_WEIGHTS = {
+    "critical": 1.00,
     "non_critical": 0.50,
-    "outcome_independent": 1.00,
+    "outcome_independent": 0.25,
 }
 
 
@@ -213,7 +219,7 @@ def load_oracle_queue(path):
                 )
 
             if criticality not in (
-                CRITICALITY_TEMPERATURES
+                CRITICALITY_WEIGHTS
             ):
 
                 raise ValueError(
@@ -337,64 +343,13 @@ def build_oracle_buffer(
 
 
 # ============================================================
-# Oracle policy target
-# ============================================================
-
-def build_oracle_target(
-    legal_ids,
-    oracle_action,
-    temperature,
-    device,
-):
-
-    logits = torch.zeros(
-        len(ACTIONS),
-        device=device,
-    )
-
-    logits[
-        oracle_action
-    ] = 1.0
-
-    logits = (
-        logits
-        / temperature
-    )
-
-    legal_mask = torch.zeros(
-        len(ACTIONS),
-        dtype=torch.bool,
-        device=device,
-    )
-
-    legal_mask[
-        legal_ids
-    ] = True
-
-    logits = logits.masked_fill(
-        ~legal_mask,
-        float("-inf"),
-    )
-
-    target_probs = F.softmax(
-        logits,
-        dim=0,
-    )
-
-    return (
-        target_probs,
-        legal_mask,
-    )
-
-
-# ============================================================
 # Oracle loss
 # ============================================================
 
 def compute_oracle_loss(
     model,
     oracle_batch,
-    device,
+    device=DEVICE,
     policy_coef=ORACLE_POLICY_COEF,
     value_coef=ORACLE_VALUE_COEF,
 ):
@@ -420,15 +375,17 @@ def compute_oracle_loss(
     Policy supervision
     ------------------
 
-    We directly maximize the probability of the annotated
-    oracle move:
+    The Oracle annotation specifies an action, not a probability
+    distribution over legal actions.
+
+    Therefore the policy loss directly maximizes the probability
+    of the annotated Oracle move:
 
         L_policy = -log pi(a* | s)
 
-    The annotation does not provide a probability distribution
-    over all legal actions, so we do not invent one.
+    No artificial target distribution or temperature is introduced.
 
-    Confidence and criticality are used as supervision weights:
+    Confidence and criticality determine the supervision weight:
 
         w = w_confidence * w_criticality
 
@@ -439,21 +396,39 @@ def compute_oracle_loss(
 
         L_value = MSE(V(s), R_oracle)
 
-    This component can be disabled with value_coef = 0.
+    The value component can be disabled with:
+
+        value_coef = 0
     """
 
     if not oracle_batch:
-        return (
-            torch.tensor(
-                0.0,
-                device=device,
-                requires_grad=True,
-            ),
-            0.0,
-            0.0,
+
+        zero = sum(
+            (
+                parameter.sum()
+                * 0.0
+            )
+            for parameter
+            in model.parameters()
         )
 
-    boards = []
+        return {
+            "loss":
+                zero,
+
+            "policy_loss":
+                zero,
+
+            "value_loss":
+                zero,
+        }
+
+    # ========================================================
+    # Prepare Oracle data
+    # ========================================================
+
+    board_objects = []
+
     oracle_actions = []
     weights = []
     oracle_rewards = []
@@ -461,31 +436,25 @@ def compute_oracle_loss(
     for record in oracle_batch:
 
         # ----------------------------------------------------
-        # Board
+        # Atomic board
         # ----------------------------------------------------
 
-        board = chess.Board(
+        board = chess.variant.AtomicBoard(
             record["fen"]
         )
 
-        boards.append(
-            encode_board(
-                board
-            )
+        board_objects.append(
+            board
         )
 
         # ----------------------------------------------------
         # Oracle action
         # ----------------------------------------------------
 
-        oracle_move = chess.Move.from_uci(
-            record["oracle_move"]
-        )
-
         oracle_actions.append(
-            ACTION_TO_INDEX(
-                oracle_move
-            )
+            ACTION_TO_INDEX[
+                record["oracle_move"]
+            ]
         )
 
         # ----------------------------------------------------
@@ -497,17 +466,10 @@ def compute_oracle_loss(
             "medium",
         )
 
-        confidence_weights = {
-            "low": 0.50,
-            "medium": 0.75,
-            "high": 1.00,
-        }
-
         confidence_weight = (
-            confidence_weights.get(
-                confidence,
-                0.75,
-            )
+            CONFIDENCE_WEIGHTS[
+                confidence
+            ]
         )
 
         # ----------------------------------------------------
@@ -519,17 +481,10 @@ def compute_oracle_loss(
             "non_critical",
         )
 
-        criticality_weights = {
-            "critical": 1.00,
-            "non_critical": 0.50,
-            "outcome_independent": 0.25,
-        }
-
         criticality_weight = (
-            criticality_weights.get(
-                criticality,
-                0.50,
-            )
+            CRITICALITY_WEIGHTS[
+                criticality
+            ]
         )
 
         # ----------------------------------------------------
@@ -542,7 +497,7 @@ def compute_oracle_loss(
         )
 
         # ----------------------------------------------------
-        # Oracle value
+        # Oracle reward
         # ----------------------------------------------------
 
         oracle_rewards.append(
@@ -552,14 +507,16 @@ def compute_oracle_loss(
         )
 
     # ========================================================
-    # Tensor construction
+    # Encode boards
     # ========================================================
 
-    boards = torch.tensor(
-        np.asarray(boards),
-        dtype=torch.float32,
-        device=device,
-    )
+    boards = encode_boards(
+        board_objects
+    ).to(device)
+
+    # ========================================================
+    # Tensor construction
+    # ========================================================
 
     oracle_actions = torch.tensor(
         oracle_actions,
@@ -593,38 +550,48 @@ def compute_oracle_loss(
 
     masked_logits = logits.clone()
 
-    for i, record in enumerate(
-        oracle_batch
+    for i, board in enumerate(
+        board_objects
     ):
-
-        board = chess.Board(
-            record["fen"]
-        )
 
         legal_indices = []
 
         for move in board.legal_moves:
 
-            legal_indices.append(
-                ACTION_TO_INDEX(
-                    move
+            move_uci = move.uci()
+
+            if move_uci not in ACTION_TO_INDEX:
+
+                raise ValueError(
+                    f"Legal Atomic move "
+                    f"{move_uci} is not present "
+                    f"in ACTION_TO_INDEX."
                 )
+
+            legal_indices.append(
+                ACTION_TO_INDEX[
+                    move_uci
+                ]
             )
 
-        illegal_mask = torch.ones(
-            masked_logits.shape[1],
+        legal_mask = torch.zeros(
+            logits.shape[1],
             dtype=torch.bool,
             device=device,
         )
 
-        illegal_mask[
+        legal_mask[
             legal_indices
-        ] = False
+        ] = True
 
         masked_logits[
-            i,
-            illegal_mask
-        ] = -1e9
+            i
+        ] = masked_logits[
+            i
+        ].masked_fill(
+            ~legal_mask,
+            float("-inf"),
+        )
 
     # ========================================================
     # Policy loss
@@ -697,15 +664,16 @@ def compute_oracle_loss(
         * value_loss
     )
 
-    return (
-        oracle_loss,
-        float(
-            policy_loss.detach().item()
-        ),
-        float(
-            value_loss.detach().item()
-        ),
-    )
+    return {
+        "loss":
+            oracle_loss,
+
+        "policy_loss":
+            policy_loss,
+
+        "value_loss":
+            value_loss,
+    }
 
 
 # ============================================================
@@ -784,9 +752,21 @@ def make_oracle_loss_fn(
 
         state["injections"] += 1
 
+        effective_batch_size = min(
+            ORACLE_BATCH_SIZE,
+            len(oracle_buffer),
+        )
+
+        oracle_batch = oracle_buffer.sample(
+            effective_batch_size
+        )
+
         return compute_oracle_loss(
             model,
-            oracle_buffer,
+            oracle_batch,
+            device=DEVICE,
+            policy_coef=ORACLE_POLICY_COEF,
+            value_coef=ORACLE_VALUE_COEF,
         )
 
     # --------------------------------------------------------

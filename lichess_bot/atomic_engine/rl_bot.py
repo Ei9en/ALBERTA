@@ -21,7 +21,7 @@ DEFAULT_CHECKPOINT = (
     Path("/Users/tom/Desktop/Atomic")
     / "checkpoints"
     / "oracle_epoch"
-    / "al_epoch_20.pt"
+    / "al_epoch_30.pt"
 )
 
 
