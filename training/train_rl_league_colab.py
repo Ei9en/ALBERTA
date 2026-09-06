@@ -123,7 +123,7 @@ DKL_DECAY_PER_FIT_UNIT = 0.2635650124178356
 # alpha=0.50 => KL cible = 50% de KL_naturel.
 
 DKL_ALPHA = 0.50
-LAMBDA_DKL = 0.048
+LAMBDA_DKL = 0.12 # old value before AL(I) is 0.048 for 10% of the actor loss, instead of 25% now
 
 
 

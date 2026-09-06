@@ -28,9 +28,13 @@ class OracleQuery:
     # Active learning score
     score: float
 
-    # Optional metadata
+    # Min-max normalized active learning score
+    I_norm: Optional[float] = None
+
+    # Selection threshold
     threshold: Optional[float] = None
 
+    # Metadata
     model: str = "historical_json"
     epoch: int = -1
 
@@ -129,23 +133,96 @@ class OracleQueue:
         data: dict,
     ) -> OracleQuery:
 
+        data = dict(data)
+
         # ----------------------------------------------------
         # Backward compatibility:
         # old queue used "I" instead of "score"
         # ----------------------------------------------------
 
-        if "I" in data and "score" not in data:
+        if (
+            "I" in data
+            and "score" not in data
+        ):
 
-            data["score"] = data.pop("I")
+            data["score"] = data.pop(
+                "I"
+            )
+
+        elif "I" in data:
+
+            data.pop(
+                "I"
+            )
 
         # ----------------------------------------------------
         # Backward compatibility:
-        # old entries have no reward field
+        # old queue may not have I_norm
+        # ----------------------------------------------------
+
+        if "I_norm" not in data:
+
+            data["I_norm"] = None
+
+        # ----------------------------------------------------
+        # Backward compatibility:
+        # old entries may not have threshold
+        # ----------------------------------------------------
+
+        if "threshold" not in data:
+
+            data["threshold"] = None
+
+        # ----------------------------------------------------
+        # Backward compatibility:
+        # old entries may not have reward
         # ----------------------------------------------------
 
         if "reward" not in data:
 
             data["reward"] = None
+
+        # ----------------------------------------------------
+        # Backward compatibility:
+        # previous buggy version used "oracle_criticality"
+        #
+        # The canonical field is "oracle_situation".
+        # ----------------------------------------------------
+
+        if (
+            "oracle_criticality" in data
+            and "oracle_situation" not in data
+        ):
+
+            data["oracle_situation"] = data.pop(
+                "oracle_criticality"
+            )
+
+        elif "oracle_criticality" in data:
+
+            data.pop(
+                "oracle_criticality"
+            )
+
+        # ----------------------------------------------------
+        # Oracle fields
+        # ----------------------------------------------------
+
+        if "oracle_move" not in data:
+
+            data["oracle_move"] = None
+
+        if "oracle_confidence" not in data:
+
+            data["oracle_confidence"] = None
+
+        if "oracle_situation" not in data:
+
+            data["oracle_situation"] = None
+
+        if "answered_at" not in data:
+
+            data["answered_at"] = None
 
         return OracleQuery(
             **data
@@ -241,7 +318,8 @@ class OracleQueue:
         U: float,
         HU: float,
         score: float,
-        threshold: float,
+        I_norm: Optional[float],
+        threshold: Optional[float],
         model: str,
         epoch: int,
         game_id: int,
@@ -259,6 +337,7 @@ class OracleQueue:
             HU=HU,
 
             score=score,
+            I_norm=I_norm,
             threshold=threshold,
 
             model=model,
@@ -304,11 +383,16 @@ class OracleQueue:
 
         return None
 
+    # ========================================================
+    # Pending
+    # ========================================================
+
     def pending(
         self,
         reward_mode: bool = False,
         oracle_mode: bool = False,
     ):
+
         """
         Return queries that still require annotation.
 
@@ -316,7 +400,7 @@ class OracleQueue:
             Include queries whose reward is missing.
 
         oracle_mode:
-            Include queries whose classical Oracle annotation
+            Include queries whose Oracle annotation
             is incomplete.
 
         If both modes are enabled, a query is returned if either
@@ -332,6 +416,7 @@ class OracleQueue:
         for q in queries:
 
             if q.status == "discarded":
+
                 continue
 
             reward_missing = (
@@ -363,9 +448,6 @@ class OracleQueue:
         reward_mode: bool = False,
         oracle_mode: bool = False,
     ):
-        """
-        Return the next query requiring annotation.
-        """
 
         pending = self.pending(
             reward_mode=reward_mode,
@@ -373,6 +455,7 @@ class OracleQueue:
         )
 
         if not pending:
+
             return None
 
         return pending[0]
@@ -389,12 +472,23 @@ class OracleQueue:
         confidence: Optional[str] = None,
         situation: Optional[str] = None,
     ):
+        """
+        Add a reward annotation and/or an Oracle annotation.
+
+        Oracle annotation requires:
+
+            oracle_move
+            confidence
+            situation
+        """
 
         # ====================================================
         # Determine annotation type
         # ====================================================
 
-        reward_given = reward is not None
+        reward_given = (
+            reward is not None
+        )
 
         oracle_given = (
             oracle_move is not None
@@ -402,7 +496,10 @@ class OracleQueue:
             or situation is not None
         )
 
-        if not reward_given and not oracle_given:
+        if (
+            not reward_given
+            and not oracle_given
+        ):
 
             raise ValueError(
                 "No annotation provided."
@@ -418,7 +515,8 @@ class OracleQueue:
 
                 raise ValueError(
                     f"Invalid reward: {reward}. "
-                    f"Expected one of {sorted(self.VALID_REWARDS)}."
+                    f"Expected one of "
+                    f"{sorted(self.VALID_REWARDS)}."
                 )
 
         # ====================================================
@@ -442,19 +540,23 @@ class OracleQueue:
             if situation is None:
 
                 raise ValueError(
-                    "Oracle situation is required."
+                    "Decision situation annotation is required."
                 )
 
             if confidence not in self.VALID_CONFIDENCE:
 
                 raise ValueError(
-                    f"Invalid confidence: {confidence}"
+                    f"Invalid confidence: {confidence}. "
+                    f"Expected one of "
+                    f"{sorted(self.VALID_CONFIDENCE)}."
                 )
 
             if situation not in self.VALID_SITUATION:
 
                 raise ValueError(
-                    f"Invalid situation: {situation}"
+                    f"Invalid situation: {situation}. "
+                    f"Expected one of "
+                    f"{sorted(self.VALID_SITUATION)}."
                 )
 
         # ====================================================
@@ -476,17 +578,20 @@ class OracleQueue:
                 )
 
             # ------------------------------------------------
-            # Prevent accidental duplicate reward
+            # Prevent duplicate reward
             # ------------------------------------------------
 
-            if reward_given and q.reward is not None:
+            if (
+                reward_given
+                and q.reward is not None
+            ):
 
                 raise ValueError(
                     "Reward already annotated."
                 )
 
             # ------------------------------------------------
-            # Prevent accidental duplicate Oracle annotation
+            # Prevent duplicate Oracle annotation
             # ------------------------------------------------
 
             if oracle_given:
@@ -520,30 +625,12 @@ class OracleQueue:
                 q.oracle_situation = situation
 
             # ------------------------------------------------
-            # Determine whether the query is now complete
+            # Update status
             # ------------------------------------------------
 
-            oracle_complete = (
-                q.oracle_move is not None
-                and q.oracle_confidence is not None
-                and q.oracle_situation is not None
-            )
+            q.status = "answered"
 
-            reward_complete = (
-                q.reward is not None
-            )
-
-            # A query is fully answered when at least the
-            # requested annotation has been provided.
-            #
-            # For backward compatibility, status remains
-            # "answered" once an annotation has been made.
-
-            if reward_given or oracle_given:
-
-                q.status = "answered"
-
-                q.answered_at = self._timestamp()
+            q.answered_at = self._timestamp()
 
             self._write_all(
                 queries
@@ -617,7 +704,11 @@ class OracleQueue:
             ),
 
             "oracle_annotated": sum(
-                q.oracle_move is not None
+                (
+                    q.oracle_move is not None
+                    and q.oracle_confidence is not None
+                    and q.oracle_situation is not None
+                )
                 for q in queries
             ),
 

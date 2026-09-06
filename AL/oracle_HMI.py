@@ -34,7 +34,7 @@ class OracleHMI(QMainWindow):
 
     def __init__(
         self,
-        queue_path="checkpoints/queue/oracle_queue_1-10_random.jsonl",
+        queue_path="checkpoints/queue/oracle_queue_1-10_AL.jsonl",
     ):
 
         super().__init__()
@@ -214,16 +214,16 @@ class OracleHMI(QMainWindow):
         # Manually injected positions have I = None.
         # ----------------------------------------------------
 
-        if self.current_query.score is None:
+        if self.current_query.I_norm is None:
 
             uncertainty_text = (
-                "Manual corner injection"
+                "N/A"
             )
 
         else:
 
             uncertainty = (
-                self.current_query.score * 100
+                self.current_query.I_norm * 100
             )
 
             uncertainty_text = (

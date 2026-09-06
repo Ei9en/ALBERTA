@@ -1,104 +1,204 @@
-import json
+#!/usr/bin/env python3
+
+"""
+ALBERTA - Active Learning Score I
+=================================
+
+Analyse et distribution du score d'Active Learning I.
+
+Pipeline
+--------
+
+    H raw
+        |
+        v
+    side-aware percentile normalization
+        |
+        v
+    H_norm
+        |
+        v
+    standardization
+        |
+        v
+    H*
+
+    U raw
+        |
+        v
+    F(U) = log1p(U / TAU)
+        |
+        v
+    side-aware percentile normalization
+        |
+        v
+    F(U)_norm
+        |
+        v
+    standardization
+        |
+        v
+    F(U)*
+
+    H_norm * F(U)_norm
+        |
+        v
+    standardization
+        |
+        v
+    (H*F(U))*
+
+    H*, F(U)*, (H*F(U))*
+        |
+        v
+    OLS coefficients
+        |
+        v
+    I
+        |
+        v
+    min-max normalization
+        |
+        v
+    I_norm in [0, 1]
+
+Les coefficients RAW_W_H, RAW_W_U et RAW_W_HU sont les
+coefficients OLS bruts estimés dans AL_weights.py.
+
+Ils NE sont PAS normalisés entre eux.
+
+Le score est donc :
+
+    I =
+        RAW_W_H  * H*
+        + RAW_W_U  * F(U)*
+        + RAW_W_HU * (H*F(U))*
+
+Les coefficients conservent leur signe et leur amplitude
+statistique originale.
+
+Une seconde normalisation min-max est appliquée uniquement
+au score final :
+
+    I_norm = (I - I_min) / (I_max - I_min)
+
+Ainsi :
+
+    I_norm = 0 -> score minimal
+    I_norm = 1 -> score maximal
+
+Le seuil correspondant au budget AL est également affiché
+en pourcentage de l'étendue [I_min, I_max].
+
+IMPORTANT
+---------
+
+Le budget reste défini en nombre de positions / fraction
+du dataset.
+
+Le pourcentage de l'étendue de I est une information
+supplémentaire et ne remplace PAS le budget.
+
+Output
+------
+
+    data/I_distribution.png
+
+Usage
+-----
+
+    python AL/distribution_I.py
+"""
+
+from __future__ import annotations
+
+import sys
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
 
 # ============================================================
-# Paths
+# Project path
 # ============================================================
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-DATA_FILE = (
-    PROJECT_ROOT
-    / "data"
-    / "uncertainty_stats_1-10.json"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(PROJECT_ROOT),
+    )
+
+
+# ============================================================
+# Raw OLS coefficients
+# ============================================================
+
+from data.uncertainty_analysis.active_learning_weights import (
+    RAW_W_H,
+    RAW_W_U,
+    RAW_W_HU,
+    TAU,
 )
 
 
 # ============================================================
-# Weights
+# Configuration
 # ============================================================
 
-W_H = 0.33
-W_U = 0.33
-W_HU = 0.33
+DATA_FILE = (
+    PROJECT_ROOT
+    / "data"
+    / "selfplay_jsons"
+    / "uncertainty_stats_1-10.json"
+)
+
+OUTPUT_FILE = (
+    PROJECT_ROOT
+    / "data"
+    / "I_distribution.png"
+)
+
+AL_BUDGET = 0.0002
 
 
 # ============================================================
-# Percentile-rank normalization
+# Utilities
 # ============================================================
 
 def percentile_rank(values):
     """
-    Convert values to empirical percentile ranks in [0, 1].
+    Percentile rank in [0, 1].
 
-    Ties receive the same mid-rank.
-
-    This function is used independently for White-to-move and
-    Black-to-move positions.
+    Ties receive their average rank.
     """
 
-    values = np.asarray(
-        values,
-        dtype=np.float64,
+    series = pd.Series(
+        values
     )
 
-    n = len(values)
-
-    if n < 2:
-        raise ValueError(
-            "At least two values are required."
+    return (
+        series.rank(
+            method="average",
+            pct=True,
         )
-
-    order = np.argsort(
-        values,
-        kind="stable",
+        .to_numpy(
+            dtype=float
+        )
     )
 
-    sorted_values = values[order]
-
-    ranks = np.empty(
-        n,
-        dtype=np.float64,
-    )
-
-    start = 0
-
-    while start < n:
-
-        end = start + 1
-
-        while (
-            end < n
-            and sorted_values[end] == sorted_values[start]
-        ):
-            end += 1
-
-        rank = (
-            (start + end - 1)
-            / 2.0
-        )
-
-        percentile = (
-            rank
-            / (n - 1)
-        )
-
-        ranks[order[start:end]] = percentile
-
-        start = end
-
-    return ranks
-
-
-# ============================================================
-# Extract side to move
-# ============================================================
 
 def extract_side_to_move(fens):
+    """
+    Extract side-to-move from full FEN.
+
+    Returns:
+        'w' for White
+        'b' for Black
+    """
 
     sides = []
 
@@ -108,240 +208,160 @@ def extract_side_to_move(fens):
 
             side = fen.split()[1]
 
-            if side not in ("w", "b"):
+            if side not in {
+                "w",
+                "b",
+            }:
+
                 raise ValueError
 
-            sides.append(side)
-
-        except (
-            IndexError,
-            ValueError,
-        ):
+        except Exception:
 
             raise ValueError(
-                f"Invalid FEN: {fen}"
+                f"Invalid FEN side-to-move: {fen}"
             )
 
-    return np.array(
-        sides,
-        dtype="<U1",
+        sides.append(
+            side
+        )
+
+    return np.asarray(
+        sides
     )
 
-
-# ============================================================
-# Normalize one signal side-aware
-# ============================================================
 
 def normalize_side_aware(
     values,
-    white_mask,
-    black_mask,
+    sides,
 ):
     """
-    Empirical percentile-rank normalization performed
+    Percentile-rank normalization performed
     independently for White-to-move and Black-to-move.
-    """
 
-    normalized = np.empty_like(
-        values,
-        dtype=np.float64,
-    )
-
-    normalized[white_mask] = percentile_rank(
-        values[white_mask]
-    )
-
-    normalized[black_mask] = percentile_rank(
-        values[black_mask]
-    )
-
-    return normalized
-
-
-# ============================================================
-# Min-max normalization
-# ============================================================
-
-def min_max_normalize(values):
-    """
-    Normalize values to [0, 1]:
-
-        x_norm = (x - xmin) / (xmax - xmin)
-
-    This is a strictly increasing affine transformation as long
-    as xmax > xmin, therefore it preserves the ranking of all
-    distinct values.
+    Output range:
+        [0, 1]
     """
 
     values = np.asarray(
         values,
-        dtype=np.float64,
+        dtype=float,
     )
 
-    xmin = np.min(values)
-    xmax = np.max(values)
+    sides = np.asarray(
+        sides
+    )
 
-    if not np.isfinite(xmin) or not np.isfinite(xmax):
-        raise RuntimeError(
-            "ERROR: non-finite I_min or I_max."
+    result = np.empty(
+        len(values),
+        dtype=float,
+    )
+
+    for side in [
+        "w",
+        "b",
+    ]:
+
+        mask = (
+            sides == side
         )
 
-    if xmax <= xmin:
-        raise RuntimeError(
-            "ERROR: I_max must be strictly greater than I_min."
-        )
+        if not np.any(mask):
+            continue
 
-    normalized = (
-        values - xmin
-    ) / (
-        xmax - xmin
-    )
-
-    # Numerical safety.
-    #
-    # The theoretical range is exactly [0, 1], but floating-point
-    # arithmetic can produce values such as 1.0000000000000002.
-    # Clipping does not alter the ranking.
-    normalized = np.clip(
-        normalized,
-        0.0,
-        1.0,
-    )
-
-    return normalized, xmin, xmax
-
-
-# ============================================================
-# Ranking verification
-# ============================================================
-
-def verify_ranking_preserved(
-    original,
-    normalized,
-):
-    """
-    Verify that min-max normalization preserves ordering.
-
-    We do NOT compare argsort arrays directly because:
-      - ties can have arbitrary stable ordering;
-      - floating-point roundoff can affect exact equality.
-
-    Instead, we verify the monotonic relationship:
-
-        x_i < x_j  =>  f(x_i) <= f(x_j)
-
-    and:
-
-        x_i == x_j  =>  f(x_i) == f(x_j)
-
-    For the present affine transformation, this should always
-    hold up to floating-point tolerance.
-
-    The implementation checks the ordering through sorting.
-    """
-
-    original = np.asarray(
-        original,
-        dtype=np.float64,
-    )
-
-    normalized = np.asarray(
-        normalized,
-        dtype=np.float64,
-    )
-
-    if len(original) != len(normalized):
-        return False
-
-    order = np.argsort(
-        original,
-        kind="stable",
-    )
-
-    sorted_original = original[order]
-    sorted_normalized = normalized[order]
-
-    # --------------------------------------------------------
-    # Differences between consecutive original values.
-    # --------------------------------------------------------
-
-    original_diff = np.diff(
-        sorted_original
-    )
-
-    normalized_diff = np.diff(
-        sorted_normalized
-    )
-
-    # --------------------------------------------------------
-    # Where the original values are strictly increasing,
-    # normalized values must never decrease.
-    #
-    # We use a tolerance scaled to the numerical precision
-    # of the normalized interval.
-    # --------------------------------------------------------
-
-    strict_mask = (
-        original_diff
-        > 0.0
-    )
-
-    if np.any(strict_mask):
-
-        if np.any(
-            normalized_diff[strict_mask]
-            < -1e-14
-        ):
-            return False
-
-    # --------------------------------------------------------
-    # Where original values are exactly equal, the affine
-    # transformation must give exactly equal results.
-    # --------------------------------------------------------
-
-    equal_mask = (
-        original_diff
-        == 0.0
-    )
-
-    if np.any(equal_mask):
-
-        if np.any(
-            np.abs(
-                normalized_diff[equal_mask]
+        result[mask] = (
+            percentile_rank(
+                values[mask]
             )
-            > 1e-14
-        ):
-            return False
+        )
 
-    return True
+    return result
 
 
-# ============================================================
-# Main
-# ============================================================
+def z_score(values):
+    """
+    Standard score.
+    """
 
-def main():
-
-    print("=" * 70)
-    print(
-        "ALBERTA - ACTIVE LEARNING SCORE ANALYSIS"
+    values = np.asarray(
+        values,
+        dtype=float,
     )
-    print("=" * 70)
 
-    # ========================================================
-    # Load data
-    # ========================================================
+    mean = np.mean(
+        values
+    )
+
+    std = np.std(
+        values
+    )
+
+    if std == 0:
+
+        raise ValueError(
+            "Cannot standardize a constant array."
+        )
+
+    return (
+        values - mean
+    ) / std
+
+
+def minmax_normalize(values):
+    """
+    Min-max normalization to [0, 1].
+
+        x_norm = (x - min) / (max - min)
+    """
+
+    values = np.asarray(
+        values,
+        dtype=float,
+    )
+
+    minimum = np.min(
+        values
+    )
+
+    maximum = np.max(
+        values
+    )
+
+    span = (
+        maximum - minimum
+    )
+
+    if span <= 0:
+
+        raise ValueError(
+            "Cannot min-max normalize a constant score."
+        )
+
+    return (
+        values - minimum
+    ) / span
+
+
+# ============================================================
+# Load data
+# ============================================================
+
+def load_data():
+
+    print()
+    print("=" * 70)
+    print("LOADING UNCERTAINTY STATISTICS")
+    print("=" * 70)
 
     print()
     print(
-        "Loading uncertainty statistics"
-    )
-    print("-" * 70)
-
-    print(
         f"File: {DATA_FILE}"
     )
+
+    if not DATA_FILE.exists():
+
+        raise FileNotFoundError(
+            f"Input file not found: {DATA_FILE}"
+        )
 
     with open(
         DATA_FILE,
@@ -349,491 +369,694 @@ def main():
         encoding="utf-8",
     ) as f:
 
-        data = json.load(f)
-
-    print(
-        f"Raw records: {len(data):,}"
-    )
-
-    # ========================================================
-    # Extract signals
-    # ========================================================
-
-    fens = np.array(
-        [
-            record["fen"]
-            for record in data
-        ],
-        dtype=object,
-    )
-
-    H = np.array(
-        [
-            record["H"]
-            for record in data
-        ],
-        dtype=np.float64,
-    )
-
-    U = np.array(
-        [
-            record["U"]
-            for record in data
-        ],
-        dtype=np.float64,
-    )
-
-    HU = np.array(
-        [
-            record["HU"]
-            for record in data
-        ],
-        dtype=np.float64,
-    )
-
-    # ========================================================
-    # Validate raw data
-    # ========================================================
-
-    if not (
-        np.all(np.isfinite(H))
-        and np.all(np.isfinite(U))
-        and np.all(np.isfinite(HU))
-    ):
-
-        raise RuntimeError(
-            "ERROR: H, U or HU contains non-finite values."
+        raw = pd.read_json(
+            f
         )
 
-    sides = extract_side_to_move(
-        fens
-    )
-
-    white_mask = (
-        sides == "w"
-    )
-
-    black_mask = (
-        sides == "b"
-    )
-
-    # ========================================================
-    # Side statistics
-    # ========================================================
-
-    print()
     print(
-        "SIDE TO MOVE"
-    )
-    print("-" * 70)
-
-    print(
-        f"White : "
-        f"{np.sum(white_mask):,}"
+        f"Raw records: "
+        f"{len(raw):,}"
     )
 
-    print(
-        f"Black : "
-        f"{np.sum(black_mask):,}"
-    )
-
-    # ========================================================
-    # Raw signal statistics
-    # ========================================================
-
-    print()
-    print(
-        "RAW SIGNALS"
-    )
-    print("-" * 70)
-
-    for name, values in [
-        ("H", H),
-        ("U", U),
-        ("HU", HU),
-    ]:
-
-        print()
-        print(name)
-
-        print(
-            f"White mean   : "
-            f"{np.mean(values[white_mask]):.9f}"
-        )
-
-        print(
-            f"Black mean   : "
-            f"{np.mean(values[black_mask]):.9f}"
-        )
-
-        print(
-            f"White median : "
-            f"{np.median(values[white_mask]):.9f}"
-        )
-
-        print(
-            f"Black median : "
-            f"{np.median(values[black_mask]):.9f}"
-        )
-
-        print(
-            f"White max    : "
-            f"{np.max(values[white_mask]):.9f}"
-        )
-
-        print(
-            f"Black max    : "
-            f"{np.max(values[black_mask]):.9f}"
-        )
-
-    # ========================================================
-    # Side-aware percentile normalization
-    # ========================================================
-
-    print()
-    print(
-        "SIDE-AWARE PERCENTILE NORMALIZATION"
-    )
-    print("-" * 70)
-
-    H_norm = normalize_side_aware(
-        H,
-        white_mask,
-        black_mask,
-    )
-
-    U_norm = normalize_side_aware(
-        U,
-        white_mask,
-        black_mask,
-    )
-
-    HU_norm = normalize_side_aware(
-        HU,
-        white_mask,
-        black_mask,
-    )
-
-    print(
-        "Normalization completed."
-    )
-
-    # ========================================================
-    # Normalized signal diagnostics
-    # ========================================================
-
-    print()
-    print(
-        "NORMALIZED SIGNALS"
-    )
-    print("-" * 70)
-
-    for name, values in [
-        ("H", H_norm),
-        ("U", U_norm),
-        ("HU", HU_norm),
-    ]:
-
-        print(
-            f"{name:<3} "
-            f"mean={np.mean(values):.6f} | "
-            f"median={np.median(values):.6f} | "
-            f"p90={np.percentile(values, 90):.6f} | "
-            f"p99={np.percentile(values, 99):.6f} | "
-            f"max={np.max(values):.6f}"
-        )
-
-    # ========================================================
-    # Colour balance after normalization
-    # ========================================================
-
-    print()
-    print(
-        "COLOUR BALANCE AFTER NORMALIZATION"
-    )
-    print("-" * 70)
-
-    for name, values in [
-        ("H", H_norm),
-        ("U", U_norm),
-        ("HU", HU_norm),
-    ]:
-
-        white_mean = np.mean(
-            values[white_mask]
-        )
-
-        black_mean = np.mean(
-            values[black_mask]
-        )
-
-        white_median = np.median(
-            values[white_mask]
-        )
-
-        black_median = np.median(
-            values[black_mask]
-        )
-
-        print()
-        print(name)
-
-        print(
-            f"White mean   : "
-            f"{white_mean:.6f}"
-        )
-
-        print(
-            f"Black mean   : "
-            f"{black_mean:.6f}"
-        )
-
-        print(
-            f"White median : "
-            f"{white_median:.6f}"
-        )
-
-        print(
-            f"Black median : "
-            f"{black_median:.6f}"
-        )
-
-        if black_mean > 0:
-
-            print(
-                f"Mean ratio W/B : "
-                f"{white_mean / black_mean:.3f}x"
-            )
-
-    # ========================================================
-    # Raw active-learning score
-    # ========================================================
-    #
-    # No W_0 anymore.
-    #
-    # I_raw = W_H * H_norm
-    #       + W_U * U_norm
-    #       + W_HU * HU_norm
-    #
-    # Note that W_H is negative.
-    # ========================================================
-
-    I_raw = (
-        W_H * H_norm
-        +
-        W_U * U_norm
-        +
-        W_HU * HU_norm
-    )
-
-    if not np.all(
-        np.isfinite(I_raw)
-    ):
-
-        raise RuntimeError(
-            "ERROR: raw I contains non-finite values."
-        )
-
-    # ========================================================
-    # Raw I range
-    # ========================================================
-
-    I_min = np.min(
-        I_raw
-    )
-
-    I_max = np.max(
-        I_raw
-    )
-
-    print()
-    print(
-        "RAW I RANGE"
-    )
-    print("-" * 70)
-
-    print(
-        f"I_min : "
-        f"{I_min:.12f}"
-    )
-
-    print(
-        f"I_max : "
-        f"{I_max:.12f}"
-    )
-
-    # ========================================================
-    # Min-max normalization
-    # ========================================================
-    #
-    # I_norm = (I_raw - I_min)
-    #          / (I_max - I_min)
-    #
-    # This changes the numerical scale but NOT the ranking.
-    # ========================================================
-
-    I, I_min_check, I_max_check = min_max_normalize(
-        I_raw
-    )
-
-    # ========================================================
-    # Ranking preservation
-    # ========================================================
-
-    ranking_preserved = verify_ranking_preserved(
-        I_raw,
-        I,
-    )
-
-    print()
-    print(
-        "MIN-MAX NORMALIZATION"
-    )
-    print("-" * 70)
-
-    print(
-        f"I_min : "
-        f"{I_min_check:.12f}"
-    )
-
-    print(
-        f"I_max : "
-        f"{I_max_check:.12f}"
-    )
-
-    print(
-        f"Normalized min : "
-        f"{np.min(I):.12f}"
-    )
-
-    print(
-        f"Normalized max : "
-        f"{np.max(I):.12f}"
-    )
-
-    print(
-        f"Ranking preserved : "
-        f"{ranking_preserved}"
-    )
-
-    if not ranking_preserved:
-
-        raise RuntimeError(
-            "ERROR: min-max normalization failed the "
-            "monotonicity check."
-        )
-
-    # ========================================================
-    # Score sanity check
-    # ========================================================
-
-    if (
-        np.min(I) < 0.0
-        or np.max(I) > 1.0
-    ):
-
-        raise RuntimeError(
-            "ERROR: normalized I is outside [0, 1]."
-        )
-
-    # ========================================================
-    # Saturation diagnostic
-    # ========================================================
-
-    exact_one = np.sum(
-        I == 1.0
-    )
-
-    near_one = np.sum(
-        I >= 0.999
-    )
-
-    print()
-    print(
-        "SATURATION DIAGNOSTIC"
-    )
-    print("-" * 70)
-
-    print(
-        f"I == 1.000000 : "
-        f"{exact_one:,}"
-    )
-
-    print(
-        f"I >= 0.999000 : "
-        f"{near_one:,}"
-    )
-
-    # ========================================================
-    # Weights
-    # ========================================================
-
-    print()
-    print(
-        "WEIGHTS"
-    )
-    print("-" * 70)
-
-    print(
-        f"H   : {W_H:.4f}"
-    )
-
-    print(
-        f"U   : {W_U:.4f}"
-    )
-
-    print(
-        f"HU  : {W_HU:.4f}"
-    )
-
-    print(
-        f"Sum : "
-        f"{W_H + W_U + W_HU:.4f}"
-    )
-
-    # ========================================================
-    # I distribution
-    # ========================================================
-
-    print()
-    print(
-        "I SCORE DISTRIBUTION"
-    )
-    print("-" * 70)
-
-    percentiles = [
-        0,
-        1,
-        5,
-        10,
-        25,
-        50,
-        75,
-        90,
-        95,
-        97.5,
-        99,
-        99.5,
-        99.9,
-        99.99,
-        100,
+    required = [
+        "fen",
+        "H",
+        "U",
+        "HU",
     ]
 
-    for percentile in percentiles:
+    missing = [
+        column
+        for column in required
+        if column not in raw.columns
+    ]
 
-        value = np.percentile(
-            I,
-            percentile,
+    if missing:
+
+        raise ValueError(
+            "Missing required columns: "
+            + ", ".join(missing)
         )
+
+    df = raw[
+        required
+    ].copy()
+
+    # --------------------------------------------------------
+    # Numeric conversion
+    # --------------------------------------------------------
+
+    for column in [
+        "H",
+        "U",
+        "HU",
+    ]:
+
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce",
+        )
+
+    # --------------------------------------------------------
+    # Validity
+    # --------------------------------------------------------
+
+    valid = (
+        df["fen"].notna()
+        &
+        df["H"].notna()
+        &
+        df["U"].notna()
+        &
+        df["HU"].notna()
+        &
+        np.isfinite(
+            df["H"]
+        )
+        &
+        np.isfinite(
+            df["U"]
+        )
+        &
+        np.isfinite(
+            df["HU"]
+        )
+    )
+
+    df = df[
+        valid
+    ].reset_index(
+        drop=True
+    )
+
+    print(
+        f"Valid records: "
+        f"{len(df):,}"
+    )
+
+    if len(df) == 0:
+
+        raise RuntimeError(
+            "No valid observations."
+        )
+
+    return df
+
+
+# ============================================================
+# Configuration validation
+# ============================================================
+
+def validate_configuration():
+
+    print()
+    print("=" * 70)
+    print("CONFIGURATION")
+    print("=" * 70)
+
+    print()
+    print(
+        f"TAU      : "
+        f"{TAU:.6f}"
+    )
+
+    print(
+        f"AL budget: "
+        f"{AL_BUDGET:.5%}"
+    )
+
+    print()
+
+    print(
+        "RAW OLS COEFFICIENTS"
+    )
+    print("-" * 70)
+
+    print(
+        f"RAW_W_H  : "
+        f"{RAW_W_H:+.9f}"
+    )
+
+    print(
+        f"RAW_W_U  : "
+        f"{RAW_W_U:+.9f}"
+    )
+
+    print(
+        f"RAW_W_HU : "
+        f"{RAW_W_HU:+.9f}"
+    )
+
+    print()
+
+    print(
+        "Coefficients are used at their original "
+        "OLS scale; no coefficient normalization is applied."
+    )
+
+    if TAU <= 0:
+
+        raise ValueError(
+            "TAU must be strictly positive."
+        )
+
+    if not (
+        0 < AL_BUDGET <= 1
+    ):
+
+        raise ValueError(
+            "AL_BUDGET must be in (0, 1]."
+        )
+
+
+# ============================================================
+# Build score
+# ============================================================
+
+def build_score(df):
+
+    print()
+    print("=" * 70)
+    print("BUILDING ACTIVE LEARNING SCORE")
+    print("=" * 70)
+
+    H = df[
+        "H"
+    ].to_numpy(
+        dtype=float
+    )
+
+    U = df[
+        "U"
+    ].to_numpy(
+        dtype=float
+    )
+
+    sides = (
+        extract_side_to_move(
+            df["fen"]
+        )
+    )
+
+    # --------------------------------------------------------
+    # 1. Raw H -> side-aware normalization
+    # --------------------------------------------------------
+
+    H_norm = (
+        normalize_side_aware(
+            H,
+            sides,
+        )
+    )
+
+    # --------------------------------------------------------
+    # 2. Raw U -> logarithmic transform
+    # --------------------------------------------------------
+
+    F_U_raw = np.log1p(
+        U / TAU
+    )
+
+    # --------------------------------------------------------
+    # 3. F(U) -> side-aware normalization
+    # --------------------------------------------------------
+
+    F_U_norm = (
+        normalize_side_aware(
+            F_U_raw,
+            sides,
+        )
+    )
+
+    # --------------------------------------------------------
+    # 4. Interaction
+    # --------------------------------------------------------
+
+    H_F_U = (
+        H_norm
+        * F_U_norm
+    )
+
+    # --------------------------------------------------------
+    # 5. Standardization
+    # --------------------------------------------------------
+
+    H_star = z_score(
+        H_norm
+    )
+
+    F_U_star = z_score(
+        F_U_norm
+    )
+
+    H_F_U_star = z_score(
+        H_F_U
+    )
+
+    # --------------------------------------------------------
+    # 6. Active Learning score
+    # --------------------------------------------------------
+
+    I = (
+        RAW_W_H
+        * H_star
+        +
+        RAW_W_U
+        * F_U_star
+        +
+        RAW_W_HU
+        * H_F_U_star
+    )
+
+    # --------------------------------------------------------
+    # 7. Final min-max normalization
+    # --------------------------------------------------------
+
+    I_norm = minmax_normalize(
+        I
+    )
+
+    # --------------------------------------------------------
+    # Diagnostics
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "SIDE-AWARE NORMALIZATION"
+    )
+    print("-" * 70)
+
+    print(
+        "H and F(U) normalized independently "
+        "for White-to-move and Black-to-move."
+    )
+
+    # --------------------------------------------------------
+    # I distribution by side
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "I DISTRIBUTION BY SIDE-TO-MOVE"
+    )
+    print("-" * 70)
+
+    for side, name in [
+        ("w", "White"),
+        ("b", "Black"),
+    ]:
+
+        values = I[
+            sides == side
+        ]
+
+        print()
+        print(name)
+
+        for q in [
+            0.50,
+            0.90,
+            0.95,
+            0.99,
+            0.995,
+            0.999,
+            1.00,
+        ]:
+
+            print(
+                f"P{q * 100:g} : "
+                f"{np.quantile(values, q):+.9f}"
+            )
+
+    # --------------------------------------------------------
+    # Normalized I distribution by side
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "I_NORM DISTRIBUTION BY SIDE-TO-MOVE"
+    )
+    print("-" * 70)
+
+    for side, name in [
+        ("w", "White"),
+        ("b", "Black"),
+    ]:
+
+        values = I_norm[
+            sides == side
+        ]
+
+        print()
+        print(name)
+
+        for q in [
+            0.50,
+            0.90,
+            0.95,
+            0.99,
+            0.995,
+            0.999,
+            1.00,
+        ]:
+
+            print(
+                f"P{q * 100:g} : "
+                f"{np.quantile(values, q):.9f}"
+            )
+
+    # --------------------------------------------------------
+    # Predictor components
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "PREDICTOR COMPONENTS BY SIDE-TO-MOVE"
+    )
+    print("-" * 70)
+
+    components = [
+        (
+            "H*",
+            H_star,
+        ),
+        (
+            "F(U)*",
+            F_U_star,
+        ),
+        (
+            "(H*F(U))*",
+            H_F_U_star,
+        ),
+    ]
+
+    for label, values in components:
+
+        print()
+        print(label)
+
+        for side, name in [
+            ("w", "White"),
+            ("b", "Black"),
+        ]:
+
+            subset = values[
+                sides == side
+            ]
+
+            print(
+                f"  {name:<6}: "
+                f"mean={np.mean(subset):+.9f} | "
+                f"std={np.std(subset):.9f} | "
+                f"P50={np.quantile(subset, .50):+.9f} | "
+                f"P90={np.quantile(subset, .90):+.9f} | "
+                f"P99={np.quantile(subset, .99):+.9f} | "
+                f"P99.9={np.quantile(subset, .999):+.9f} | "
+                f"Max={np.max(subset):+.9f}"
+            )
+
+    # --------------------------------------------------------
+    # Predictor diagnostics
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "PREDICTORS"
+    )
+    print("-" * 70)
+
+    print(
+        f"H*       : "
+        f"mean={np.mean(H_star):+.6f} "
+        f"std={np.std(H_star):.6f}"
+    )
+
+    print(
+        f"F(U)*    : "
+        f"mean={np.mean(F_U_star):+.6f} "
+        f"std={np.std(F_U_star):.6f}"
+    )
+
+    print(
+        f"(HF(U))* : "
+        f"mean={np.mean(H_F_U_star):+.6f} "
+        f"std={np.std(H_F_U_star):.6f}"
+    )
+
+    # --------------------------------------------------------
+    # Transformation diagnostics
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "TRANSFORMATION"
+    )
+    print("-" * 70)
+
+    print(
+        f"TAU      : "
+        f"{TAU:.6f}"
+    )
+
+    print(
+        f"U raw    : "
+        f"[{np.min(U):.6f}, "
+        f"{np.max(U):.6f}]"
+    )
+
+    print(
+        f"F(U) raw : "
+        f"[{np.min(F_U_raw):.6f}, "
+        f"{np.max(F_U_raw):.6f}]"
+    )
+
+    print(
+        f"F(U) norm: "
+        f"[{np.min(F_U_norm):.6f}, "
+        f"{np.max(F_U_norm):.6f}]"
+    )
+
+    # --------------------------------------------------------
+    # Standardization diagnostics
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "STANDARDIZATION PARAMETERS"
+    )
+    print("-" * 70)
+
+    print(
+        f"H_norm mean/std       : "
+        f"{np.mean(H_norm):.9f} / "
+        f"{np.std(H_norm):.9f}"
+    )
+
+    print(
+        f"F(U) norm mean/std    : "
+        f"{np.mean(F_U_norm):.9f} / "
+        f"{np.std(F_U_norm):.9f}"
+    )
+
+    print(
+        f"H*F(U) mean/std      : "
+        f"{np.mean(H_F_U):.9f} / "
+        f"{np.std(H_F_U):.9f}"
+    )
+
+    return (
+        I,
+        I_norm,
+        sides,
+        H_norm,
+        F_U_norm,
+        F_U_raw,
+        H_star,
+        F_U_star,
+        H_F_U_star,
+    )
+
+
+# ============================================================
+# Budget / threshold
+# ============================================================
+
+def compute_budget_threshold(
+    I,
+    I_norm,
+):
+
+    n = len(I)
+
+    target = max(
+        1,
+        int(
+            np.ceil(
+                n * AL_BUDGET
+            )
+        ),
+    )
+
+    # --------------------------------------------------------
+    # Sort descending
+    # --------------------------------------------------------
+
+    order = np.argsort(
+        I
+    )[::-1]
+
+    selected_indices = (
+        order[:target]
+    )
+
+    threshold = float(
+        I[
+            selected_indices[-1]
+        ]
+    )
+
+    threshold_norm = float(
+        I_norm[
+            selected_indices[-1]
+        ]
+    )
+
+    selected_fraction = (
+        len(selected_indices)
+        / n
+    )
+
+    return (
+        target,
+        threshold,
+        threshold_norm,
+        selected_indices,
+        selected_fraction,
+    )
+
+
+# ============================================================
+# Diagnostics
+# ============================================================
+
+def print_diagnostics(
+    I,
+    I_norm,
+    sides,
+):
+
+    print()
+    print("=" * 70)
+    print("ACTIVE LEARNING SCORE I")
+    print("=" * 70)
+
+    # --------------------------------------------------------
+    # Raw OLS coefficients
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "RAW OLS COEFFICIENTS"
+    )
+    print("-" * 70)
+
+    print(
+        f"RAW_W_H  : "
+        f"{RAW_W_H:+.9f}"
+    )
+
+    print(
+        f"RAW_W_U  : "
+        f"{RAW_W_U:+.9f}"
+    )
+
+    print(
+        f"RAW_W_HU : "
+        f"{RAW_W_HU:+.9f}"
+    )
+
+    print()
+    print(
+        "No normalization is applied to the coefficients."
+    )
+
+    # --------------------------------------------------------
+    # Raw score
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "SCORE DISTRIBUTION"
+    )
+    print("-" * 70)
+
+    for q in [
+        0.00,
+        0.01,
+        0.05,
+        0.10,
+        0.25,
+        0.50,
+        0.75,
+        0.90,
+        0.95,
+        0.975,
+        0.99,
+        0.995,
+        0.999,
+        0.9999,
+        1.00,
+    ]:
 
         print(
-            f"P{percentile:<6} : "
-            f"{value:.9f}"
+            f"P{q * 100:<6g}: "
+            f"{np.quantile(I, q):+.9f}"
         )
 
-    # ========================================================
+    # --------------------------------------------------------
+    # Normalized score
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "NORMALIZED SCORE DISTRIBUTION"
+    )
+    print("-" * 70)
+
+    for q in [
+        0.00,
+        0.01,
+        0.05,
+        0.10,
+        0.25,
+        0.50,
+        0.75,
+        0.90,
+        0.95,
+        0.975,
+        0.99,
+        0.995,
+        0.999,
+        0.9999,
+        1.00,
+    ]:
+
+        print(
+            f"P{q * 100:<6g}: "
+            f"{np.quantile(I_norm, q):.9f}"
+        )
+
+    # --------------------------------------------------------
     # Summary
-    # ========================================================
+    # --------------------------------------------------------
+
+    I_min = float(
+        np.min(I)
+    )
+
+    I_max = float(
+        np.max(I)
+    )
 
     print()
     print(
@@ -848,7 +1071,7 @@ def main():
 
     print(
         f"Mean   : "
-        f"{np.mean(I):.9f}"
+        f"{np.mean(I):+.9f}"
     )
 
     print(
@@ -858,331 +1081,305 @@ def main():
 
     print(
         f"Median : "
-        f"{np.median(I):.9f}"
+        f"{np.median(I):+.9f}"
     )
 
     print(
         f"Min    : "
-        f"{np.min(I):.9f}"
+        f"{I_min:+.9f}"
     )
 
     print(
         f"Max    : "
-        f"{np.max(I):.9f}"
+        f"{I_max:+.9f}"
     )
 
-    # ========================================================
-    # Candidate thresholds
-    # ========================================================
+    # --------------------------------------------------------
+    # Min-max normalization
+    # --------------------------------------------------------
 
     print()
     print(
-        "ACTIVE LEARNING BUDGET THRESHOLDS"
+        "MIN-MAX NORMALIZATION"
     )
     print("-" * 70)
 
-    for budget in [
-        0.10,
-        0.05,
-        0.02,
-        0.01,
-        0.005,
-        0.0025,
-        0.001,
-    ]:
+    print(
+        "I_norm = (I - I_min) / (I_max - I_min)"
+    )
 
-        percentile = (
-            100.0
-            * (1.0 - budget)
-        )
+    print(
+        f"I_norm min : "
+        f"{np.min(I_norm):.9f}"
+    )
 
-        threshold = np.percentile(
-            I,
-            percentile,
-        )
+    print(
+        f"I_norm max : "
+        f"{np.max(I_norm):.9f}"
+    )
 
-        selected_mask = (
-            I >= threshold
-        )
+    # --------------------------------------------------------
+    # Budget
+    # --------------------------------------------------------
 
-        selected = np.sum(
-            selected_mask
-        )
-
-        fraction = (
-            selected
-            / len(I)
-        )
-
-        selected_white = np.sum(
-            selected_mask
-            & white_mask
-        )
-
-        selected_black = np.sum(
-            selected_mask
-            & black_mask
-        )
-
-        print(
-            f"Budget {100 * budget:>6.2f}% "
-            f"| Q{percentile:>6.2f} "
-            f"| threshold={threshold:.9f} "
-            f"| selected={selected:>7,} "
-            f"| actual={100 * fraction:.3f}% "
-            f"| W/B={selected_white}/{selected_black}"
-        )
-
-    # ========================================================
-    # Explicit 0.02% colour diagnostic
-    # ========================================================
-
-    threshold_9998 = np.percentile(
+    (
+        target,
+        threshold,
+        threshold_norm,
+        selected_indices,
+        selected_fraction,
+    ) = compute_budget_threshold(
         I,
-        99.98,
+        I_norm,
     )
 
-    selected_mask = (
-        I >= threshold_9998
+    threshold_percentage = (
+        threshold_norm
+        * 100.0
     )
 
-    selected_total = np.sum(
-        selected_mask
+    print()
+    print(
+        "ACTIVE LEARNING SELECTION"
+    )
+    print("-" * 70)
+
+    print(
+        f"Budget             : "
+        f"{AL_BUDGET:.5%}"
     )
 
-    selected_white = np.sum(
-        selected_mask
-        & white_mask
+    print(
+        f"Target positions   : "
+        f"{target:,}"
     )
 
-    selected_black = np.sum(
-        selected_mask
-        & black_mask
+    print(
+        f"Threshold I        : "
+        f"{threshold:+.9f}"
     )
 
-    global_white_fraction = np.mean(
-        white_mask
+    print(
+        f"Threshold I_norm   : "
+        f"{threshold_norm:.9f}"
+    )
+
+    print(
+        f"Threshold range    : "
+        f"{threshold_percentage:.4f}% "
+        f"of [I_min, I_max]"
+    )
+
+    print(
+        f"Selected positions : "
+        f"{len(selected_indices):,}"
+    )
+
+    print(
+        f"Actual fraction    : "
+        f"{selected_fraction:.6%}"
+    )
+
+    # --------------------------------------------------------
+    # Side composition
+    # --------------------------------------------------------
+
+    selected_sides = (
+        sides[
+            selected_indices
+        ]
+    )
+
+    total_white = int(
+        np.sum(
+            sides == "w"
+        )
+    )
+
+    total_black = int(
+        np.sum(
+            sides == "b"
+        )
+    )
+
+    selected_white = int(
+        np.sum(
+            selected_sides == "w"
+        )
+    )
+
+    selected_black = int(
+        np.sum(
+            selected_sides == "b"
+        )
+    )
+
+    white_fraction = (
+        total_white
+        / len(sides)
+    )
+
+    black_fraction = (
+        total_black
+        / len(sides)
     )
 
     selected_white_fraction = (
         selected_white
-        / selected_total
+        / len(selected_indices)
+    )
+
+    selected_black_fraction = (
+        selected_black
+        / len(selected_indices)
     )
 
     print()
-    print("=" * 70)
     print(
-        "0.02% SELECTION — COLOUR BALANCE"
+        "SIDE-TO-MOVE"
     )
-    print("=" * 70)
-
-    print(
-        f"Threshold : "
-        f"{threshold_9998:.9f}"
-    )
-
-    print(
-        f"Selected  : "
-        f"{selected_total:,}"
-    )
-
-    print()
-
-    print(
-        f"White : "
-        f"{selected_white:,} "
-        f"({100 * selected_white_fraction:.3f}%)"
-    )
-
-    print(
-        f"Black : "
-        f"{selected_black:,} "
-        f"({100 * (1 - selected_white_fraction):.3f}%)"
-    )
-
-    print()
+    print("-" * 70)
 
     print(
         f"Global White : "
-        f"{100 * global_white_fraction:.3f}%"
+        f"{total_white:,} "
+        f"({white_fraction:.3%})"
     )
 
     print(
         f"Global Black : "
-        f"{100 * (1 - global_white_fraction):.3f}%"
+        f"{total_black:,} "
+        f"({black_fraction:.3%})"
+    )
+
+    print()
+
+    print(
+        f"Selected White : "
+        f"{selected_white:,} "
+        f"({selected_white_fraction:.3%})"
+    )
+
+    print(
+        f"Selected Black : "
+        f"{selected_black:,} "
+        f"({selected_black_fraction:.3%})"
     )
 
     print()
 
     print(
         f"White enrichment : "
-        f"{selected_white_fraction / global_white_fraction:.3f}x"
+        f"{selected_white_fraction / white_fraction:.3f}x"
     )
 
+    print(
+        f"Black enrichment : "
+        f"{selected_black_fraction / black_fraction:.3f}x"
+    )
+
+    return selected_indices
+
+
+# ============================================================
+# Plot
+# ============================================================
+
+def plot_distribution(
+    I_norm,
+):
+
+    print()
+    print("=" * 70)
+    print("GENERATING DISTRIBUTION PLOT")
     print("=" * 70)
 
-    # ========================================================
-    # Histogram
-    # ========================================================
-
-    print()
-    print(
-        "I HISTOGRAM"
-    )
-    print("-" * 70)
-
-    counts, edges = np.histogram(
-        I,
-        bins=20,
-        range=(0.0, 1.0),
+    OUTPUT_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
-    max_count = np.max(
-        counts
+    plt.figure(
+        figsize=(10, 6)
     )
 
-    for i, count in enumerate(
-        counts
-    ):
-
-        left = edges[i]
-        right = edges[i + 1]
-
-        bar_length = int(
-            50
-            * count
-            / max_count
-        )
-
-        bar = "#" * bar_length
-
-        print(
-            f"{left:5.2f} - "
-            f"{right:5.2f} | "
-            f"{bar:<50} "
-            f"{count:>7,}"
-        )
-
-    # ========================================================
-    # PNG distribution plot
-    # ========================================================
-
-    print()
-    print(
-        "GENERATING DISTRIBUTION PLOT"
-    )
-    print("-" * 70)
-
-    histogram_counts, histogram_bins, _ = plt.hist(
-        I,
+    plt.hist(
+        I_norm,
         bins=100,
-        alpha=0.6,
-        label="Positions",
-    )
-
-    mean = np.mean(I)
-    std = np.std(I)
-
-    if std > 0:
-
-        x = np.linspace(
-            np.min(I),
-            np.max(I),
-            500,
-        )
-
-        gaussian = (
-            1.0
-            / (
-                std
-                * np.sqrt(2 * np.pi)
-            )
-            * np.exp(
-                -0.5
-                * (
-                    (x - mean)
-                    / std
-                ) ** 2
-            )
-        )
-
-        bin_width = (
-            histogram_bins[1]
-            - histogram_bins[0]
-        )
-
-        gaussian *= (
-            len(I)
-            * bin_width
-        )
-
-        plt.plot(
-            x,
-            gaussian,
-            linewidth=2,
-            label=(
-                f"Gaussienne "
-                f"(μ={mean:.3f}, "
-                f"σ={std:.3f})"
-            ),
-        )
-
-    plt.xlim(
-        0.0,
-        1.0,
-    )
-
-    plt.axvline(
-        threshold_9998,
-        linestyle="--",
-        linewidth=2,
-        label=(
-            f"P99.98 = "
-            f"{threshold_9998:.3f}"
-        ),
+        alpha=0.75,
     )
 
     plt.xlabel(
-        "Score I normalisé"
+        "Normalized active learning score I_norm"
     )
 
     plt.ylabel(
-        "Nombre de positions"
+        "Number of positions"
     )
 
     plt.title(
-        "ALBERTA - Distribution du score I"
+        "Distribution of normalized Active Learning score"
     )
 
-    plt.legend()
-
-    plt.grid(
-        alpha=0.2,
+    plt.xlim(
+        0,
+        1,
     )
 
     plt.tight_layout()
 
-    output_path = (
-        PROJECT_ROOT
-        / "data"
-        / "I_distribution_1-10.png"
-    )
-
     plt.savefig(
-        output_path,
+        OUTPUT_FILE,
         dpi=200,
     )
 
     plt.close()
 
     print(
-        f"Plot saved to: {output_path}"
+        f"Plot saved to: "
+        f"{OUTPUT_FILE}"
     )
 
 
 # ============================================================
-# Entry point
+# Main
 # ============================================================
+
+def main():
+
+    validate_configuration()
+
+    df = load_data()
+
+    (
+        I,
+        I_norm,
+        sides,
+        H_norm,
+        F_U_norm,
+        F_U_raw,
+        H_star,
+        F_U_star,
+        H_F_U_star,
+    ) = build_score(
+        df
+    )
+
+    print_diagnostics(
+        I,
+        I_norm,
+        sides,
+    )
+
+    plot_distribution(
+        I_norm,
+    )
+
+    print()
+    print("=" * 70)
+    print("ANALYSIS COMPLETE")
+    print("=" * 70)
+
 
 if __name__ == "__main__":
     main()

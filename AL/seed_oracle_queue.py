@@ -1,3 +1,4 @@
+import sys
 import json
 import uuid
 import argparse
@@ -9,15 +10,31 @@ import numpy as np
 import chess
 import chess.variant
 
-from distribution_I import W_H, W_U, W_HU
-
 
 # ============================================================
 # Paths
 # ============================================================
 
-AL_ROOT = Path(__file__).resolve().parent
-PROJECT_ROOT = AL_ROOT.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(PROJECT_ROOT),
+    )
+
+
+# ============================================================
+# Active Learning weights
+# ============================================================
+
+from data.uncertainty_analysis.active_learning_weights import (
+    TAU,
+    RAW_W_H,
+    RAW_W_U,
+    RAW_W_HU,
+)
+
 
 DATA_FILE = (
     PROJECT_ROOT
@@ -26,12 +43,18 @@ DATA_FILE = (
     / "uncertainty_stats_1-10.json"
 )
 
-QUEUE_FILE = (
+QUEUE_DIR = (
     PROJECT_ROOT
     / "checkpoints"
     / "queue"
-    / "oracle_queue_1-10_random.jsonl"
 )
+
+
+# ============================================================
+# Configuration
+# ============================================================
+
+AL_BUDGET = 0.0002
 
 
 # ============================================================
@@ -72,8 +95,7 @@ def percentile_rank(values):
 
         while (
             end < n
-            and
-            sorted_values[end]
+            and sorted_values[end]
             ==
             sorted_values[start]
         ):
@@ -108,7 +130,15 @@ def extract_side(fens):
 
     for fen in fens:
 
-        side = fen.split()[1]
+        parts = fen.split()
+
+        if len(parts) < 2:
+
+            raise ValueError(
+                f"Invalid FEN: {fen}"
+            )
+
+        side = parts[1]
 
         if side not in ("w", "b"):
 
@@ -189,6 +219,33 @@ def normalize_side_aware(
 
 
 # ============================================================
+# Min-max normalization
+# ============================================================
+
+def minmax_normalize(values):
+
+    values = np.asarray(
+        values,
+        dtype=np.float64
+    )
+
+    minimum = np.min(values)
+    maximum = np.max(values)
+
+    if maximum <= minimum:
+
+        raise ValueError(
+            "Cannot min-max normalize a constant score."
+        )
+
+    return (
+        values - minimum
+    ) / (
+        maximum - minimum
+    )
+
+
+# ============================================================
 # Build candidate order
 # ============================================================
 
@@ -207,7 +264,6 @@ def build_candidate_order(
 
     # --------------------------------------------------------
     # HIGH
-    # Highest I first
     # --------------------------------------------------------
 
     if mode == "high":
@@ -218,12 +274,11 @@ def build_candidate_order(
         )[::-1]
 
         description = (
-            "Highest I (top 0.02%)"
+            "Highest I"
         )
 
     # --------------------------------------------------------
     # LOW
-    # Lowest I first
     # --------------------------------------------------------
 
     elif mode == "low":
@@ -234,12 +289,11 @@ def build_candidate_order(
         )
 
         description = (
-            "Lowest I (bottom 0.02%)"
+            "Lowest I"
         )
 
     # --------------------------------------------------------
     # MIDDLE
-    # Start at median and expand outward
     # --------------------------------------------------------
 
     elif mode == "middle":
@@ -283,12 +337,11 @@ def build_candidate_order(
         )
 
         description = (
-            "Middle I (around median, ±0.01%)"
+            "Middle I (around median)"
         )
 
     # --------------------------------------------------------
     # RANDOM
-    # Purely uniform random selection
     #
     # I is completely ignored.
     # --------------------------------------------------------
@@ -313,19 +366,63 @@ def build_candidate_order(
 
 
 # ============================================================
+# Queue path
+# ============================================================
+
+def get_queue_file(mode):
+
+    if mode == "random":
+
+        filename = (
+            "oracle_queue_1-10_random.jsonl"
+        )
+
+    elif mode == "high":
+
+        filename = (
+            "oracle_queue_1-10_AL.jsonl"
+        )
+
+    elif mode == "low":
+
+        filename = (
+            "oracle_queue_1-10_low.jsonl"
+        )
+
+    elif mode == "middle":
+
+        filename = (
+            "oracle_queue_1-10_middle.jsonl"
+        )
+
+    else:
+
+        raise ValueError(
+            f"Unknown mode: {mode}"
+        )
+
+    return (
+        QUEUE_DIR
+        / filename
+    )
+
+
+# ============================================================
 # Load existing queue IDs
 # ============================================================
 
-def load_existing_ids():
+def load_existing_ids(
+    queue_file
+):
 
-    if not QUEUE_FILE.exists():
+    if not queue_file.exists():
 
         return set()
 
     existing_ids = set()
 
     with open(
-        QUEUE_FILE,
+        queue_file,
         "r",
         encoding="utf-8"
     ) as f:
@@ -365,17 +462,13 @@ def select_positions(
         )
 
     # --------------------------------------------------------
-    # IMPORTANT:
-    #
-    # Budget is 0.02% of the ORIGINAL dataset.
-    #
-    # ceil() guarantees that we reach the requested budget.
+    # Budget is 0.02% of the original dataset.
     # --------------------------------------------------------
 
     target_count = max(
         1,
         math.ceil(
-            n * 0.0002
+            n * AL_BUDGET
         )
     )
 
@@ -394,12 +487,6 @@ def select_positions(
 
     # --------------------------------------------------------
     # Examine candidates in priority order.
-    #
-    # For random mode, candidate_order is a uniform random
-    # permutation, so eligible positions are sampled uniformly.
-    #
-    # Legal move count is calculated ONLY when the position
-    # is reached as a candidate.
     # --------------------------------------------------------
 
     for idx in candidate_order:
@@ -408,14 +495,14 @@ def select_positions(
 
         record = data[idx]
 
-        # ----------------------------------------------------
-        # Check duplicate BEFORE expensive chess processing
-        # ----------------------------------------------------
-
         query_id = uuid.uuid5(
             uuid.NAMESPACE_DNS,
             record["fen"]
         ).hex
+
+        # ----------------------------------------------------
+        # Duplicate check
+        # ----------------------------------------------------
 
         if query_id in existing_ids:
 
@@ -424,7 +511,7 @@ def select_positions(
             continue
 
         # ----------------------------------------------------
-        # Check legal move count
+        # Legal move check
         # ----------------------------------------------------
 
         legal_count = count_legal_moves(
@@ -438,16 +525,13 @@ def select_positions(
             continue
 
         # ----------------------------------------------------
-        # Valid new annotation
+        # Valid candidate
         # ----------------------------------------------------
 
         selected.append(
             idx
         )
 
-        # IMPORTANT:
-        # Add immediately so the same FEN cannot be selected
-        # twice during this run.
         existing_ids.add(
             query_id
         )
@@ -464,7 +548,7 @@ def select_positions(
 
         raise RuntimeError(
             "Could not find enough new eligible positions "
-            "to reach the requested 0.02% annotation budget."
+            "to reach the requested annotation budget."
         )
 
     return (
@@ -487,8 +571,8 @@ def main():
 
     parser = argparse.ArgumentParser(
         description=
-        "Seed ALBERTA oracle queue using active learning score "
-        "or uniform random sampling."
+        "Seed ALBERTA oracle queue using the frozen "
+        "active-learning score or uniform random sampling."
     )
 
     parser.add_argument(
@@ -510,6 +594,10 @@ def main():
 
     args = parser.parse_args()
 
+    queue_file = get_queue_file(
+        args.mode
+    )
+
     print("=" * 70)
     print(
         "ALBERTA - SEED ORACLE QUEUE"
@@ -519,6 +607,52 @@ def main():
     print()
     print(
         f"Selection mode : {args.mode}"
+    )
+
+    print(
+        f"Queue file     : {queue_file}"
+    )
+
+    # --------------------------------------------------------
+    # Configuration
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "CONFIGURATION"
+    )
+    print("-" * 70)
+
+    print(
+        f"TAU            : {TAU:.6f}"
+    )
+
+    print(
+        f"AL budget      : "
+        f"{100 * AL_BUDGET:.5f}%"
+    )
+
+    print()
+    print(
+        "RAW OLS COEFFICIENTS"
+    )
+
+    print(
+        f"RAW_W_H        : {RAW_W_H:+.9f}"
+    )
+
+    print(
+        f"RAW_W_U        : {RAW_W_U:+.9f}"
+    )
+
+    print(
+        f"RAW_W_HU       : {RAW_W_HU:+.9f}"
+    )
+
+    print()
+    print(
+        "Coefficients are used at their original "
+        "OLS scale; no coefficient normalization."
     )
 
     # --------------------------------------------------------
@@ -541,6 +675,12 @@ def main():
     print(
         f"Positions loaded : {len(data):,}"
     )
+
+    if len(data) == 0:
+
+        raise RuntimeError(
+            "No positions found."
+        )
 
     # --------------------------------------------------------
     # Extract signals
@@ -583,6 +723,19 @@ def main():
     )
 
     # --------------------------------------------------------
+    # Log transform of U
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "Applying log transform to U..."
+    )
+
+    U_log = np.log1p(
+        U / TAU
+    )
+
+    # --------------------------------------------------------
     # Side-aware normalization
     # --------------------------------------------------------
 
@@ -596,37 +749,123 @@ def main():
         sides
     )
 
-    U_norm = normalize_side_aware(
-        U,
-        sides
-    )
-
-    HU_norm = normalize_side_aware(
-        HU,
+    U_log_norm = normalize_side_aware(
+        U_log,
         sides
     )
 
     # --------------------------------------------------------
-    # Compute I
+    # Interaction
+    # --------------------------------------------------------
+
+    HU_log_norm = (
+        H_norm
+        * U_log_norm
+    )
+
+    # --------------------------------------------------------
+    # Standardize predictors
+    #
+    # IMPORTANT:
+    #
+    # The OLS coefficients were estimated on standardized
+    # predictors, therefore we must reproduce exactly the same
+    # standardization here.
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "Standardizing predictors..."
+    )
+
+    H_mean = H_norm.mean()
+    H_std = H_norm.std()
+
+    U_log_mean = U_log_norm.mean()
+    U_log_std = U_log_norm.std()
+
+    HU_log_mean = HU_log_norm.mean()
+    HU_log_std = HU_log_norm.std()
+
+    if H_std <= 0:
+        raise ValueError(
+            "H normalized standard deviation is zero."
+        )
+
+    if U_log_std <= 0:
+        raise ValueError(
+            "U_log normalized standard deviation is zero."
+        )
+
+    if HU_log_std <= 0:
+        raise ValueError(
+            "H*U_log normalized standard deviation is zero."
+        )
+
+    H_star = (
+        H_norm - H_mean
+    ) / H_std
+
+    U_log_star = (
+        U_log_norm - U_log_mean
+    ) / U_log_std
+
+    HU_log_star = (
+        HU_log_norm - HU_log_mean
+    ) / HU_log_std
+
+    # --------------------------------------------------------
+    # Compute raw I
     # --------------------------------------------------------
 
     I = (
-        W_H * H_norm
+        RAW_W_H * H_star
         +
-        W_U * U_norm
+        RAW_W_U * U_log_star
         +
-        W_HU * HU_norm
+        RAW_W_HU * HU_log_star
+    )
+
+    # --------------------------------------------------------
+    # Final min-max normalization
+    #
+    # ONLY for the final score representation.
+    #
+    # This does not affect ranking.
+    # --------------------------------------------------------
+
+    I_norm = minmax_normalize(
+        I
+    )
+
+    print()
+    print(
+        "Active learning score computed."
     )
 
     print(
-        "Active learning score computed."
+        f"I min       : {I.min():+.9f}"
+    )
+
+    print(
+        f"I max       : {I.max():+.9f}"
+    )
+
+    print(
+        f"I_norm min  : {I_norm.min():.9f}"
+    )
+
+    print(
+        f"I_norm max  : {I_norm.max():.9f}"
     )
 
     # --------------------------------------------------------
     # Existing queue
     # --------------------------------------------------------
 
-    existing_ids = load_existing_ids()
+    existing_ids = load_existing_ids(
+        queue_file
+    )
 
     print()
     print(
@@ -657,6 +896,10 @@ def main():
     )
 
     selected_I = I[
+        selected_indices
+    ]
+
+    selected_I_norm = I_norm[
         selected_indices
     ]
 
@@ -696,38 +939,145 @@ def main():
     )
 
     print(
-        f"Budget               : "
+        f"Budget              : "
         f"{100 * len(selected_indices) / len(data):.5f}%"
     )
 
     print(
-        f"I min selected       : "
-        f"{selected_I.min():.9f}"
+        f"I min selected      : "
+        f"{selected_I.min():+.9f}"
     )
 
     print(
-        f"I max selected       : "
-        f"{selected_I.max():.9f}"
+        f"I max selected      : "
+        f"{selected_I.max():+.9f}"
     )
 
     print(
-        f"I mean selected      : "
-        f"{selected_I.mean():.9f}"
+        f"I mean selected     : "
+        f"{selected_I.mean():+.9f}"
     )
 
     print(
-        f"I median selected    : "
-        f"{np.median(selected_I):.9f}"
+        f"I median selected   : "
+        f"{np.median(selected_I):+.9f}"
+    )
+
+    print(
+        f"I_norm min selected : "
+        f"{selected_I_norm.min():.9f}"
+    )
+
+    print(
+        f"I_norm max selected : "
+        f"{selected_I_norm.max():.9f}"
+    )
+
+    # --------------------------------------------------------
+    # Side-to-move statistics
+    # --------------------------------------------------------
+
+    selected_sides = sides[
+        selected_indices
+    ]
+
+    global_white = np.sum(
+        sides == "w"
+    )
+
+    global_black = np.sum(
+        sides == "b"
+    )
+
+    selected_white = np.sum(
+        selected_sides == "w"
+    )
+
+    selected_black = np.sum(
+        selected_sides == "b"
+    )
+
+    print()
+    print(
+        "SIDE-TO-MOVE"
+    )
+    print("-" * 70)
+
+    print(
+        f"Global White      : "
+        f"{global_white:,} "
+        f"({100 * global_white / len(data):.3f}%)"
+    )
+
+    print(
+        f"Global Black      : "
+        f"{global_black:,} "
+        f"({100 * global_black / len(data):.3f}%)"
+    )
+
+    print(
+        f"Selected White    : "
+        f"{selected_white:,} "
+        f"({100 * selected_white / len(selected_indices):.3f}%)"
+    )
+
+    print(
+        f"Selected Black    : "
+        f"{selected_black:,} "
+        f"({100 * selected_black / len(selected_indices):.3f}%)"
+    )
+
+    white_enrichment = (
+        (
+            selected_white
+            /
+            len(selected_indices)
+        )
+        /
+        (
+            global_white
+            /
+            len(data)
+        )
+    )
+
+    black_enrichment = (
+        (
+            selected_black
+            /
+            len(selected_indices)
+        )
+        /
+        (
+            global_black
+            /
+            len(data)
+        )
+    )
+
+    print(
+        f"White enrichment : "
+        f"{white_enrichment:.3f}x"
+    )
+
+    print(
+        f"Black enrichment : "
+        f"{black_enrichment:.3f}x"
     )
 
     # --------------------------------------------------------
     # Append to queue
     # --------------------------------------------------------
 
+    QUEUE_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
     added = 0
 
     with open(
-        QUEUE_FILE,
+        queue_file,
         "a",
         encoding="utf-8"
     ) as f:
@@ -760,6 +1110,9 @@ def main():
 
                 "I":
                     float(I[idx]),
+
+                "I_norm":
+                    float(I_norm[idx]),
 
                 "status":
                     "pending",
@@ -818,7 +1171,7 @@ def main():
     )
 
     print(
-        f"File     : {QUEUE_FILE}"
+        f"File     : {queue_file}"
     )
 
 
