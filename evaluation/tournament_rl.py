@@ -36,14 +36,14 @@ DEVICE = "cpu"
 RL_CHECKPOINT_DIR = (
     PROJECT_ROOT
     / "checkpoints"
-    / "test"
+    / "oracle_epoch_rndm"
 
 )
 
 ORACLE_CHECKPOINT_DIR = (
     PROJECT_ROOT
     / "checkpoints"
-    / "oracle_epoch"
+    / "oracle_epoch_eq"
 )
 
 
@@ -55,7 +55,7 @@ ORACLE_CHECKPOINT_DIR = (
 # False -> RL only
 INCLUDE_ORACLE = True
 
-GAMES_PER_MATCH = 50
+GAMES_PER_MATCH = 100
 
 TEMPERATURE = 2
 
@@ -133,7 +133,7 @@ def get_checkpoints():
 
         paths = list(
             RL_CHECKPOINT_DIR.glob(
-                "rl_epoch_*.pt"
+                "al_epoch_rndm_*.pt"
             )
         )
 

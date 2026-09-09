@@ -967,108 +967,6 @@ def load_rl_start():
 
 
 # ============================================================
-# Replay buffer from self-play
-# ============================================================
-
-def build_rl_buffer(
-    completed_games,
-):
-
-    buffer = rl.ReplayBuffer()
-
-    for game in completed_games:
-
-        trajectory = game[
-            "trajectory"
-        ]
-
-        current_white = game[
-            "current_white"
-        ]
-
-        result = game[
-            "result"
-        ]
-
-        # ----------------------------------------------------
-        # Result from current agent perspective
-        # ----------------------------------------------------
-
-        if result == "1-0":
-
-            game_result = (
-                1.0
-                if current_white
-                else -1.0
-            )
-
-        elif result == "0-1":
-
-            game_result = (
-                -1.0
-                if current_white
-                else 1.0
-            )
-
-        else:
-
-            game_result = 0.0
-
-        # ----------------------------------------------------
-        # Sparse reward
-        # ----------------------------------------------------
-
-        rewards = [
-            0.0
-        ] * len(trajectory)
-
-        if trajectory:
-
-            rewards[-1] = game_result
-
-        # ----------------------------------------------------
-        # GAE
-        # ----------------------------------------------------
-
-        advantages, returns = (
-            rl.compute_gae(
-                trajectory,
-                rewards,
-                gamma=rl.GAMMA,
-                gae_lambda=rl.GAE_LAMBDA,
-            )
-        )
-
-        # ====================================================
-        # Add to replay buffer
-        # ====================================================
-
-        for (
-            step,
-            advantage,
-            ret,
-        ) in zip(
-            trajectory,
-            advantages,
-            returns,
-        ):
-
-            buffer.add(
-                step["fen"],
-                step["action"],
-                step["legal_moves"],
-                ret,
-                step["value"],
-                step["old_log_prob"],
-                advantage,
-                step["ply"],
-                game_result,
-            )
-
-    return buffer
-
-
-# ============================================================
 # Main
 # ============================================================
 
@@ -1172,8 +1070,6 @@ def main():
     # ========================================================
 
     stats = rl.UncertaintyStats()
-
-    best_loss = None
 
     # ========================================================
     # Parallel self-play

@@ -2,9 +2,6 @@
 
 import chess.variant
 
-from src.agents.actor_critic_agent import ActorCriticAgent
-
-
 class BatchedSelfPlayGame:
 
     def __init__(

@@ -34,7 +34,7 @@ class OracleHMI(QMainWindow):
 
     def __init__(
         self,
-        queue_path="checkpoints/queue/oracle_queue_1-10_AL.jsonl",
+        queue_path="checkpoints/queue/oracle_queue_1-10_pareto.jsonl",
     ):
 
         super().__init__()

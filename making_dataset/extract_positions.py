@@ -7,7 +7,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import chess.variant
 
-from dataset.fast_reader import iter_games
+from tools.fast_reader import iter_games
 
 
 RAW_DIR = Path("data/raw")

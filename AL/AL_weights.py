@@ -514,7 +514,8 @@ def build_regression_data(
         dtype=np.float64
     )
 
-    # Target is reward magnitude.
+    # Target is reward magnitude. test on both abs(R) and 1 - abs(R)
+    
     Y = np.abs(
         rewards
     )
