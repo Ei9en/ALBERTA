@@ -5,8 +5,13 @@
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+LOCAL_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+if str(LOCAL_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(LOCAL_PROJECT_ROOT),
+    )
 
 import copy
 import json
@@ -31,12 +36,17 @@ from src.rl.oracle_replay_buffer import OracleReplayBuffer
 
 
 # ============================================================
-# Constants
+# Project root
 # ============================================================
 
 PROJECT_ROOT = Path(
     "/content/drive/MyDrive/ALBERTA"
 )
+
+
+# ============================================================
+# Device
+# ============================================================
 
 DEVICE = (
     "cuda"
@@ -57,13 +67,15 @@ AL_END_EPOCH = 30
 
 # ============================================================
 # Oracle queue
+#
+# Pareto-selected 246 annotations.
 # ============================================================
 
 ORACLE_QUEUE_PATH = (
     PROJECT_ROOT
     / "checkpoints"
     / "queue"
-    / "oracle_queue_1-10_random.jsonl"
+    / "oracle_queue_1-10_pareto.jsonl"
 )
 
 
@@ -132,18 +144,49 @@ CRITICALITY_WEIGHTS = {
 
 
 # ============================================================
+# Experiment output paths
+#
+# Keep Pareto outputs completely separate from Random and
+# from previous 1-in-5 experiments.
+# ============================================================
+
+UNCERTAINTY_STATS_PATH = (
+    PROJECT_ROOT
+    / "checkpoints"
+    / "uncertainty_stats_pareto_oracle_1in1.json"
+)
+
+AL_CHECKPOINT_DIR = (
+    PROJECT_ROOT
+    / "checkpoints"
+    / "al_epoch_pareto_1in1"
+)
+
+AL_LEAGUE_DIR = (
+    PROJECT_ROOT
+    / "checkpoints"
+    / "league_al_pareto_1in1"
+)
+
+
+# ============================================================
 # Load Oracle queue
 # ============================================================
 
-def load_oracle_queue(path):
+def load_oracle_queue(
+    path,
+):
 
     if not path.exists():
 
         raise FileNotFoundError(
-            f"Oracle queue not found:\n{path}"
+            f"Oracle queue not found:\n"
+            f"{path}"
         )
 
     annotations = []
+
+    skipped_unanswered = 0
 
     with open(
         path,
@@ -161,41 +204,99 @@ def load_oracle_queue(path):
             if not line:
                 continue
 
-            record = json.loads(line)
+            try:
+
+                record = json.loads(
+                    line
+                )
+
+            except json.JSONDecodeError as exc:
+
+                raise ValueError(
+                    f"Invalid JSON at line "
+                    f"{line_number} in:\n"
+                    f"{path}"
+                ) from exc
 
             # ------------------------------------------------
-            # Ignore unanswered entries
+            # Only use explicitly answered Oracle records.
+            #
+            # Pending HMI records already contain oracle_move
+            # and reward keys, but their values are None.
+            # Therefore testing only key presence is not enough.
             # ------------------------------------------------
 
-            if (
-                "oracle_move" not in record
-                or "reward" not in record
-            ):
+            if record.get(
+                "status"
+            ) != "answered":
 
+                skipped_unanswered += 1
                 continue
 
-            fen = record["fen"]
-
-            oracle_move = record[
+            oracle_move = record.get(
                 "oracle_move"
-            ]
-
-            reward = float(
-                record["reward"]
             )
 
+            reward_raw = record.get(
+                "reward"
+            )
+
+            if (
+                oracle_move is None
+                or reward_raw is None
+            ):
+
+                skipped_unanswered += 1
+                continue
+
+            # ------------------------------------------------
+            # Required state
+            # ------------------------------------------------
+
+            fen = record.get(
+                "fen"
+            )
+
+            if not fen:
+
+                raise ValueError(
+                    f"Missing FEN at line "
+                    f"{line_number}."
+                )
+
+            reward = float(
+                reward_raw
+            )
+
+            # ------------------------------------------------
+            # HMI field names
+            #
+            # Current HMI schema:
+            #
+            #     oracle_confidence
+            #     oracle_situation
+            #
+            # Legacy fallbacks are retained for compatibility.
+            # ------------------------------------------------
+
             confidence = record.get(
-                "confidence",
-                "medium",
+                "oracle_confidence",
+                record.get(
+                    "confidence",
+                    "medium",
+                ),
             )
 
             criticality = record.get(
-                "criticality",
-                "non_critical",
+                "oracle_situation",
+                record.get(
+                    "criticality",
+                    "non_critical",
+                ),
             )
 
             # ------------------------------------------------
-            # Validation
+            # Validation: reward
             # ------------------------------------------------
 
             if reward not in (
@@ -206,8 +307,13 @@ def load_oracle_queue(path):
 
                 raise ValueError(
                     f"Invalid reward at line "
-                    f"{line_number}: {reward}"
+                    f"{line_number}: "
+                    f"{reward}"
                 )
+
+            # ------------------------------------------------
+            # Validation: confidence
+            # ------------------------------------------------
 
             if confidence not in (
                 CONFIDENCE_WEIGHTS
@@ -215,8 +321,13 @@ def load_oracle_queue(path):
 
                 raise ValueError(
                     f"Invalid confidence at line "
-                    f"{line_number}: {confidence}"
+                    f"{line_number}: "
+                    f"{confidence}"
                 )
+
+            # ------------------------------------------------
+            # Validation: criticality
+            # ------------------------------------------------
 
             if criticality not in (
                 CRITICALITY_WEIGHTS
@@ -224,8 +335,13 @@ def load_oracle_queue(path):
 
                 raise ValueError(
                     f"Invalid criticality at line "
-                    f"{line_number}: {criticality}"
+                    f"{line_number}: "
+                    f"{criticality}"
                 )
+
+            # ------------------------------------------------
+            # Validation: action vocabulary
+            # ------------------------------------------------
 
             if oracle_move not in (
                 ACTION_TO_INDEX
@@ -233,8 +349,46 @@ def load_oracle_queue(path):
 
                 raise ValueError(
                     f"Unknown oracle move at line "
-                    f"{line_number}: {oracle_move}"
+                    f"{line_number}: "
+                    f"{oracle_move}"
                 )
+
+            # ------------------------------------------------
+            # Validation: Oracle move must be legal in the
+            # actual Atomic position.
+            # ------------------------------------------------
+
+            try:
+
+                board = chess.variant.AtomicBoard(
+                    fen
+                )
+
+            except Exception as exc:
+
+                raise ValueError(
+                    f"Invalid Atomic FEN at line "
+                    f"{line_number}:\n"
+                    f"{fen}"
+                ) from exc
+
+            legal_moves = {
+                move.uci()
+                for move in board.legal_moves
+            }
+
+            if oracle_move not in legal_moves:
+
+                raise ValueError(
+                    f"Oracle move is illegal at line "
+                    f"{line_number}:\n"
+                    f"FEN:  {fen}\n"
+                    f"Move: {oracle_move}"
+                )
+
+            # ------------------------------------------------
+            # Final normalized record
+            # ------------------------------------------------
 
             annotations.append(
                 {
@@ -261,6 +415,40 @@ def load_oracle_queue(path):
             "No answered Oracle annotations found."
         )
 
+    # ========================================================
+    # Diagnostics
+    # ========================================================
+
+    reward_counts = {
+        -1.0: 0,
+        0.0: 0,
+        1.0: 0,
+    }
+
+    confidence_counts = {
+        key: 0
+        for key in CONFIDENCE_WEIGHTS
+    }
+
+    criticality_counts = {
+        key: 0
+        for key in CRITICALITY_WEIGHTS
+    }
+
+    for record in annotations:
+
+        reward_counts[
+            record["reward"]
+        ] += 1
+
+        confidence_counts[
+            record["confidence"]
+        ] += 1
+
+        criticality_counts[
+            record["criticality"]
+        ] += 1
+
     print()
     print(
         "======================================"
@@ -282,17 +470,9 @@ def load_oracle_queue(path):
         f"Annotations: {len(annotations)}"
     )
 
-    reward_counts = {
-        -1.0: 0,
-        0.0: 0,
-        1.0: 0,
-    }
-
-    for record in annotations:
-
-        reward_counts[
-            record["reward"]
-        ] += 1
+    print(
+        f"Skipped:     {skipped_unanswered}"
+    )
 
     print(
         f"Losses:      {reward_counts[-1.0]}"
@@ -304,6 +484,14 @@ def load_oracle_queue(path):
 
     print(
         f"Wins:        {reward_counts[1.0]}"
+    )
+
+    print(
+        f"Confidence:  {confidence_counts}"
+    )
+
+    print(
+        f"Criticality: {criticality_counts}"
     )
 
     print(
@@ -336,7 +524,8 @@ def build_oracle_buffer(
         )
 
     print(
-        f"Oracle buffer size: {len(buffer)}"
+        f"Oracle buffer size: "
+        f"{len(buffer)}"
     )
 
     return buffer
@@ -430,7 +619,9 @@ def compute_oracle_loss(
     board_objects = []
 
     oracle_actions = []
+
     weights = []
+
     oracle_rewards = []
 
     for record in oracle_batch:
@@ -493,7 +684,8 @@ def compute_oracle_loss(
 
         weights.append(
             confidence_weight
-            * criticality_weight
+            *
+            criticality_weight
         )
 
         # ----------------------------------------------------
@@ -512,7 +704,9 @@ def compute_oracle_loss(
 
     boards = encode_boards(
         board_objects
-    ).to(device)
+    ).to(
+        device
+    )
 
     # ========================================================
     # Tensor construction
@@ -619,7 +813,8 @@ def compute_oracle_loss(
     policy_loss = (
         (
             weights
-            * policy_losses
+            *
+            policy_losses
         ).sum()
         /
         weights.sum().clamp_min(
@@ -644,7 +839,8 @@ def compute_oracle_loss(
     value_loss = (
         (
             weights
-            * value_losses
+            *
+            value_losses
         ).sum()
         /
         weights.sum().clamp_min(
@@ -658,10 +854,14 @@ def compute_oracle_loss(
 
     oracle_loss = (
         policy_coef
-        * policy_loss
+        *
+        policy_loss
+
         +
+
         value_coef
-        * value_loss
+        *
+        value_loss
     )
 
     return {
@@ -693,7 +893,9 @@ def make_oracle_loss_fn(
         model
     ):
 
-        state["calls"] += 1
+        state[
+            "calls"
+        ] += 1
 
         # ----------------------------------------------------
         # Skip Oracle injection
@@ -710,9 +912,15 @@ def make_oracle_loss_fn(
         # ----------------------------------------------------
 
         if (
-            (state["calls"] - 1)
-            % ORACLE_INJECTION_FREQUENCY
-            != 0
+            (
+                state["calls"]
+                -
+                1
+            )
+            %
+            ORACLE_INJECTION_FREQUENCY
+            !=
+            0
         ):
 
             # IMPORTANT:
@@ -720,7 +928,7 @@ def make_oracle_loss_fn(
             # The zero must remain connected to the model
             # computation graph.
             #
-            # Otherwise train_epoch() will fail when it calls:
+            # Otherwise train_epoch() may fail when it calls:
             #
             #     torch.autograd.grad(extra_loss, ...)
             #
@@ -729,7 +937,8 @@ def make_oracle_loss_fn(
             zero = sum(
                 (
                     parameter.sum()
-                    * 0.0
+                    *
+                    0.0
                 )
                 for parameter
                 in model.parameters()
@@ -750,15 +959,21 @@ def make_oracle_loss_fn(
         # Actual Oracle injection
         # ----------------------------------------------------
 
-        state["injections"] += 1
+        state[
+            "injections"
+        ] += 1
 
         effective_batch_size = min(
             ORACLE_BATCH_SIZE,
-            len(oracle_buffer),
+            len(
+                oracle_buffer
+            ),
         )
 
-        oracle_batch = oracle_buffer.sample(
-            effective_batch_size
+        oracle_batch = (
+            oracle_buffer.sample(
+                effective_batch_size
+            )
         )
 
         return compute_oracle_loss(
@@ -775,8 +990,13 @@ def make_oracle_loss_fn(
 
     def reset_epoch_stats():
 
-        state["calls"] = 0
-        state["injections"] = 0
+        state[
+            "calls"
+        ] = 0
+
+        state[
+            "injections"
+        ] = 0
 
     # --------------------------------------------------------
     # Retrieve diagnostics
@@ -786,10 +1006,14 @@ def make_oracle_loss_fn(
 
         return {
             "calls":
-                state["calls"],
+                state[
+                    "calls"
+                ],
 
             "injections":
-                state["injections"],
+                state[
+                    "injections"
+                ],
         }
 
     oracle_loss_fn.reset_epoch_stats = (
@@ -837,18 +1061,23 @@ def load_rl_start():
     )
 
     print(
-        f"Checkpoint: {checkpoint_path}"
+        f"Checkpoint: "
+        f"{checkpoint_path}"
     )
 
     base_model = ChessResNet(
-        num_actions=len(ACTIONS),
+        num_actions=len(
+            ACTIONS
+        ),
         channels=32,
         blocks=4,
     )
 
     model = ActorCritic(
         base_model
-    ).to(DEVICE)
+    ).to(
+        DEVICE
+    )
 
     checkpoint = torch.load(
         checkpoint_path,
@@ -866,12 +1095,17 @@ def load_rl_start():
         lr=rl.LR,
     )
 
-    if "optimizer_state_dict" not in checkpoint:
+    if (
+        "optimizer_state_dict"
+        not in checkpoint
+    ):
 
         raise RuntimeError(
-            f"Checkpoint {checkpoint_path} does not contain "
-            "optimizer_state_dict. Cannot guarantee an identical "
-            "RL10 starting state."
+            f"Checkpoint {checkpoint_path} "
+            f"does not contain "
+            f"optimizer_state_dict. "
+            f"Cannot guarantee an identical "
+            f"RL10 starting state."
         )
 
     optimizer.load_state_dict(
@@ -885,11 +1119,31 @@ def load_rl_start():
         f"{checkpoint.get('epoch', '?')}."
     )
 
+    # --------------------------------------------------------
+    # Report actual optimizer learning rate after loading
+    # checkpoint state.
+    # --------------------------------------------------------
+
+    actual_lrs = [
+        group[
+            "lr"
+        ]
+        for group
+        in optimizer.param_groups
+    ]
+
+    print(
+        f"Optimizer LR: "
+        f"{actual_lrs}"
+    )
+
     # ========================================================
     # Load BC7
     # ========================================================
 
-    bc_model = rl.load_bc_agent(7)
+    bc_model = rl.load_bc_agent(
+        7
+    )
 
     # ========================================================
     # Load league up to RL10
@@ -899,14 +1153,18 @@ def load_rl_start():
         max_agents=rl.LEAGUE_MAX_AGENTS
     )
 
-    bc6 = rl.load_bc_agent(6)
+    bc6 = rl.load_bc_agent(
+        6
+    )
 
     league.add_agent(
         "bc_epoch_6",
         bc6,
     )
 
-    bc7 = rl.load_bc_agent(7)
+    bc7 = rl.load_bc_agent(
+        7
+    )
 
     league.add_agent(
         "bc_epoch_7",
@@ -924,25 +1182,30 @@ def load_rl_start():
         )
 
         if not path.exists():
+
             continue
 
-        checkpoint = torch.load(
+        league_checkpoint = torch.load(
             path,
             map_location=DEVICE,
         )
 
         snapshot_base = ChessResNet(
-            num_actions=len(ACTIONS),
+            num_actions=len(
+                ACTIONS
+            ),
             channels=32,
             blocks=4,
         )
 
         snapshot = ActorCritic(
             snapshot_base
-        ).to(DEVICE)
+        ).to(
+            DEVICE
+        )
 
         snapshot.load_state_dict(
-            checkpoint[
+            league_checkpoint[
                 "model_state_dict"
             ]
         )
@@ -955,7 +1218,8 @@ def load_rl_start():
         )
 
     print(
-        f"League loaded: {len(league)} agents"
+        f"League loaded: "
+        f"{len(league)} agents"
     )
 
     return (
@@ -971,6 +1235,54 @@ def load_rl_start():
 # ============================================================
 
 def main():
+
+    # ========================================================
+    # Experiment header
+    # ========================================================
+
+    print()
+    print(
+        "============================================================"
+    )
+
+    print(
+        "ALBERTA - PARETO ORACLE RL EXPERIMENT"
+    )
+
+    print(
+        "============================================================"
+    )
+
+    print(
+        f"Device: "
+        f"{DEVICE}"
+    )
+
+    print(
+        f"RL start epoch: "
+        f"{START_EPOCH}"
+    )
+
+    print(
+        f"AL epochs: "
+        f"{AL_START_EPOCH} "
+        f"-> "
+        f"{AL_END_EPOCH}"
+    )
+
+    print(
+        f"Oracle queue: "
+        f"{ORACLE_QUEUE_PATH}"
+    )
+
+    print(
+        f"Oracle acquisition: "
+        f"Pareto"
+    )
+
+    print(
+        "============================================================"
+    )
 
     # ========================================================
     # Load RL10 + optimizer + BC7 + league
@@ -989,9 +1301,12 @@ def main():
 
     bc_model_selfplay = copy.deepcopy(
         bc_model
-    ).to("cpu")
+    ).to(
+        "cpu"
+    )
 
     bc_model_selfplay.eval()
+
     bc_model_selfplay.share_memory()
 
     # ========================================================
@@ -1001,6 +1316,22 @@ def main():
     annotations = load_oracle_queue(
         ORACLE_QUEUE_PATH
     )
+
+    # --------------------------------------------------------
+    # The Pareto experiment is defined to use exactly 246
+    # final acquisition annotations.
+    # Fail loudly if the queue does not contain exactly that.
+    # --------------------------------------------------------
+
+    if len(
+        annotations
+    ) != 246:
+
+        raise RuntimeError(
+            f"Pareto experiment expects exactly "
+            f"246 answered annotations, "
+            f"but loaded {len(annotations)}."
+        )
 
     oracle_buffer = build_oracle_buffer(
         annotations
@@ -1029,7 +1360,9 @@ def main():
 
     print(
         f"Injection frequency: "
-        f"1 / {ORACLE_INJECTION_FREQUENCY} PPO updates"
+        f"1 / "
+        f"{ORACLE_INJECTION_FREQUENCY} "
+        f"PPO updates"
     )
 
     print(
@@ -1043,8 +1376,13 @@ def main():
     )
 
     print(
-        f"Oracle batch size: "
+        f"Configured Oracle batch size: "
         f"{ORACLE_BATCH_SIZE}"
+    )
+
+    print(
+        f"Effective Oracle batch size: "
+        f"{min(ORACLE_BATCH_SIZE, len(oracle_buffer))}"
     )
 
     print(
@@ -1060,13 +1398,8 @@ def main():
     )
 
     # ========================================================
-    # IMPORTANT:
-    # Keep ONE UncertaintyStats instance for the
-    # entire AL11 -> AL30 experiment.
-    #
-    # If this were created inside the epoch loop,
-    # stats.save() would overwrite the JSON with only
-    # the current epoch's positions.
+    # Keep ONE UncertaintyStats instance for the entire
+    # AL11 -> AL30 experiment.
     # ========================================================
 
     stats = rl.UncertaintyStats()
@@ -1076,6 +1409,7 @@ def main():
     # ========================================================
 
     NUM_WORKERS = 12
+
     SELFPLAY_BATCH_SIZE = 256
 
     # ========================================================
@@ -1104,7 +1438,9 @@ def main():
         league_model,
     ) in league.agents.items():
 
-        shared_league_models[name] = (
+        shared_league_models[
+            name
+        ] = (
             rl._prepare_shared_model(
                 league_model
             )
@@ -1123,27 +1459,33 @@ def main():
             f"league_epoch_{epoch:03d}"
         )
 
-        if name in shared_league_models:
+        if (
+            name
+            in shared_league_models
+        ):
 
             continue
 
         placeholder = (
             copy.deepcopy(
                 model
-            ).to("cpu")
+            ).to(
+                "cpu"
+            )
         )
 
         placeholder.eval()
 
         placeholder.share_memory()
 
-        shared_league_models[name] = (
-            placeholder
-        )
+        shared_league_models[
+            name
+        ] = placeholder
 
     print(
         f"Shared models ready: "
-        f"{len(shared_league_models)} league slots",
+        f"{len(shared_league_models)} "
+        f"league slots",
         flush=True,
     )
 
@@ -1203,7 +1545,8 @@ def main():
             )
 
             print(
-                f"===== RL + ORACLE — Epoch {epoch} =====",
+                f"===== RL + PARETO ORACLE "
+                f"— Epoch {epoch} =====",
                 flush=True,
             )
 
@@ -1213,7 +1556,9 @@ def main():
             )
 
             wins = 0
+
             losses = 0
+
             draws = 0
 
             # =================================================
@@ -1239,19 +1584,25 @@ def main():
             for game in games:
 
                 trajectory = (
-                    game["trajectory"]
+                    game[
+                        "trajectory"
+                    ]
                 )
 
                 result = (
-                    game["result"]
+                    game[
+                        "result"
+                    ]
                 )
 
                 current_white = (
-                    game["current_white"]
+                    game[
+                        "current_white"
+                    ]
                 )
 
                 # =============================================
-                # Résultat
+                # Result
                 # =============================================
 
                 if result == "1-0":
@@ -1284,7 +1635,9 @@ def main():
 
                 rewards = [
                     0.0
-                ] * len(trajectory)
+                ] * len(
+                    trajectory
+                )
 
                 if trajectory:
 
@@ -1306,11 +1659,13 @@ def main():
 
                     else:
 
-                        terminal_reward = 0.0
+                        terminal_reward = (
+                            0.0
+                        )
 
-                    rewards[-1] = (
-                        terminal_reward
-                    )
+                    rewards[
+                        -1
+                    ] = terminal_reward
 
                 # =============================================
                 # GAE
@@ -1340,14 +1695,26 @@ def main():
                 ):
 
                     buffer.add(
-                        step["fen"],
-                        step["action"],
-                        step["legal_moves"],
+                        step[
+                            "fen"
+                        ],
+                        step[
+                            "action"
+                        ],
+                        step[
+                            "legal_moves"
+                        ],
                         ret,
-                        step["value"],
-                        step["old_log_prob"],
+                        step[
+                            "value"
+                        ],
+                        step[
+                            "old_log_prob"
+                        ],
                         advantage,
-                        step["ply"],
+                        step[
+                            "ply"
+                        ],
                         game.get(
                             "result"
                         ),
@@ -1359,13 +1726,24 @@ def main():
 
             total_games = (
                 wins
-                + losses
-                + draws
+                +
+                losses
+                +
+                draws
             )
+
+            if total_games <= 0:
+
+                raise RuntimeError(
+                    "No self-play games were collected."
+                )
 
             score_rate = (
                 wins
-                + 0.5 * draws
+                +
+                0.5
+                *
+                draws
             ) / total_games
 
             print(
@@ -1416,7 +1794,8 @@ def main():
                 f"| Critic={critic_loss:.4f} "
                 f"| KL={approx_kl:.6f} "
                 f"| DKL(RL||BC)={dkl:.6f} "
-                f"| DKL loss={dkl_loss:.6e}",
+                f"| DKL loss="
+                f"{dkl_loss:.6e}",
                 flush=True,
             )
 
@@ -1429,10 +1808,16 @@ def main():
             )
 
             # =================================================
-            # Replay buffer sauvegarde
+            # Replay buffer save
             # =================================================
 
-            if epoch % 5 == 0:
+            if (
+                epoch
+                %
+                5
+                ==
+                0
+            ):
 
                 rl.save_replay_buffer(
                     buffer,
@@ -1446,26 +1831,17 @@ def main():
             buffer.clear()
 
             print(
-                "Replay buffer cleared after PPO update.",
+                "Replay buffer cleared after "
+                "PPO update.",
                 flush=True,
             )
 
             # =================================================
             # Uncertainty stats
-            #
-            # IMPORTANT:
-            # stats is persistent across all epochs.
-            # save() therefore writes the cumulative dataset.
             # =================================================
 
-            stats_path = (
-                PROJECT_ROOT
-                / "checkpoints"
-                / "uncertainty_stats_random_oracle_1in5.json"
-            )
-
             stats.save(
-                stats_path
+                UNCERTAINTY_STATS_PATH
             )
 
             print(
@@ -1478,12 +1854,6 @@ def main():
             # AL checkpoint
             # =================================================
 
-            AL_CHECKPOINT_DIR = (
-                PROJECT_ROOT
-                / "checkpoints"
-                / "al_epoch_1in5"
-            )
-
             AL_CHECKPOINT_DIR.mkdir(
                 parents=True,
                 exist_ok=True,
@@ -1491,7 +1861,8 @@ def main():
 
             checkpoint_path = (
                 AL_CHECKPOINT_DIR
-                / f"al_epoch_{epoch}.pt"
+                /
+                f"al_epoch_{epoch}.pt"
             )
 
             torch.save(
@@ -1507,6 +1878,14 @@ def main():
 
                     "loss":
                         loss,
+
+                    "oracle_acquisition":
+                        "pareto",
+
+                    "oracle_annotations":
+                        len(
+                            oracle_buffer
+                        ),
 
                     "oracle_injection_frequency":
                         ORACLE_INJECTION_FREQUENCY,
@@ -1530,12 +1909,6 @@ def main():
             # AL league snapshot
             # =================================================
 
-            AL_LEAGUE_DIR = (
-                PROJECT_ROOT
-                / "checkpoints"
-                / "league_al_1in5"
-            )
-
             AL_LEAGUE_DIR.mkdir(
                 parents=True,
                 exist_ok=True,
@@ -1544,7 +1917,9 @@ def main():
             snapshot = (
                 copy.deepcopy(
                     model
-                ).to(DEVICE)
+                ).to(
+                    DEVICE
+                )
             )
 
             snapshot.eval()
@@ -1560,16 +1935,20 @@ def main():
 
             snapshot_path = (
                 AL_LEAGUE_DIR
-                / f"{agent_name}.pt"
+                /
+                f"{agent_name}.pt"
             )
 
             torch.save(
                 {
                     "epoch":
-                    epoch,
+                        epoch,
 
                     "model_state_dict":
-                    snapshot.state_dict(),
+                        snapshot.state_dict(),
+
+                    "oracle_acquisition":
+                        "pareto",
                 },
                 snapshot_path,
             )
@@ -1584,8 +1963,9 @@ def main():
             # Shared snapshot
             # =================================================
 
-            if agent_name not in (
-                shared_league_models
+            if (
+                agent_name
+                not in shared_league_models
             ):
 
                 raise RuntimeError(
@@ -1599,15 +1979,21 @@ def main():
                 ]
             )
 
+            shared_state = (
+                shared_snapshot.state_dict()
+            )
+
             for (
                 key,
                 value,
             ) in snapshot.state_dict().items():
 
-                shared_snapshot.state_dict()[
+                shared_state[
                     key
                 ].copy_(
-                    value.detach().cpu()
+                    value
+                    .detach()
+                    .cpu()
                 )
 
             shared_snapshot.eval()
@@ -1622,7 +2008,9 @@ def main():
 
             print(
                 "Updated league registry:",
-                list(league_registry),
+                list(
+                    league_registry
+                ),
                 flush=True,
             )
 
@@ -1630,15 +2018,21 @@ def main():
             # Shared current model
             # =================================================
 
+            shared_current_state = (
+                shared_current_model.state_dict()
+            )
+
             for (
                 key,
                 value,
             ) in model.state_dict().items():
 
-                shared_current_model.state_dict()[
+                shared_current_state[
                     key
                 ].copy_(
-                    value.detach().cpu()
+                    value
+                    .detach()
+                    .cpu()
                 )
 
             # =================================================
@@ -1646,7 +2040,8 @@ def main():
             # =================================================
 
             print(
-                f"\n===== Epoch {epoch} summary =====",
+                f"\n===== Epoch "
+                f"{epoch} summary =====",
                 flush=True,
             )
 
@@ -1691,7 +2086,9 @@ def main():
 
             print(
                 f"Oracle injection: "
-                f"1 / {ORACLE_INJECTION_FREQUENCY} PPO updates",
+                f"1 / "
+                f"{ORACLE_INJECTION_FREQUENCY} "
+                f"PPO updates",
                 flush=True,
             )
 
@@ -1710,7 +2107,7 @@ def main():
     manager.shutdown()
 
     print(
-        "\nRL + ORACLE training finished.",
+        "\nRL + PARETO ORACLE training finished.",
         flush=True,
     )
 
