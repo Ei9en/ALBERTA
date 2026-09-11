@@ -4,30 +4,27 @@
 ALBERTA - Pareto Selection
 ==========================
 
+Dynamic learner-response acquisition.
+
 Pipeline
 --------
 
-1. Load the 200 measured Pareto probes:
+1. Load the measured probe responses:
 
-       (H, U, HU, score)
+       (H, U, HU)
             ->
        (Delta_KL, Delta_V)
 
-2. Cross-validate two surrogates:
+2. Cross-validate the response surrogate.
 
-       score only
-       versus
-       H + U + HU + score
+3. Fit the surrogate on all probe observations.
 
-3. Fit the rich surrogate on all probe observations.
-
-4. Recompute the exact ALBERTA score I on the complete
-   uncertainty pool.
+4. Load the current self-play uncertainty pool.
 
 5. Remove:
        - invalid / <= 1 legal move positions
        - duplicate FENs
-       - the 200 probe positions
+       - calibration probe positions
 
 6. Predict:
 
@@ -36,19 +33,31 @@ Pipeline
 
 7. Compute exact 2D Pareto layers.
 
-8. Select exactly BUDGET positions using:
+8. Select:
+
+       round(0.02% * raw_pool_size)
+
+   positions using:
 
        non-dominated sorting
        +
        crowding distance on the last front
 
-9. Write an HMI-compatible Oracle queue with EXACTLY the
-   standard schema. No Pareto-specific fields are added.
+9. Write an HMI-compatible Oracle queue.
 
-Output
+Method
 ------
 
-    checkpoints/queue/oracle_queue_1-10_pareto.jsonl
+    (H, U, HU)
+        ->
+    (Delta_KL_hat, Delta_V_hat)
+        ->
+    Pareto acquisition
+
+The historical scalar score I is NOT used.
+
+No OLS or uncertainty scalarization is involved in the
+Pareto acquisition stage.
 """
 
 from __future__ import annotations
@@ -74,7 +83,6 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import (
     KFold,
-    GroupKFold,
     cross_val_predict,
 )
 
@@ -93,46 +101,37 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 # ============================================================
-# ALBERTA score parameters
+# Default paths
+#
+# These can be overridden from the command line so the same
+# script can be reused at every dynamic AL generation.
 # ============================================================
 
-from data.uncertainty_analysis.active_learning_weights import (
-    RAW_W_H,
-    RAW_W_U,
-    RAW_W_HU,
-    TAU,
-)
-
-
-# ============================================================
-# Paths
-# ============================================================
-
-PROBE_RESPONSE_PATH = (
+DEFAULT_PROBE_RESPONSE_PATH = (
     PROJECT_ROOT
     / "pareto"
     / "pareto_local_responses.jsonl"
 )
 
-PROBE_QUEUE_PATH = (
+DEFAULT_PROBE_QUEUE_PATH = (
     PROJECT_ROOT
     / "checkpoints"
     / "queue"
     / "oracle_queue_1-10_pareto_probe.jsonl"
 )
 
-POOL_PATH = (
+DEFAULT_POOL_PATH = (
     PROJECT_ROOT
     / "data"
     / "selfplay_jsons"
     / "uncertainty_stats_1-10.json"
 )
 
-OUTPUT_QUEUE_PATH = (
+DEFAULT_OUTPUT_QUEUE_PATH = (
     PROJECT_ROOT
     / "checkpoints"
     / "queue"
-    / "oracle_queue_1-10_pareto.jsonl"
+    / "oracle_queue_dynamic_pareto.jsonl"
 )
 
 
@@ -140,7 +139,8 @@ OUTPUT_QUEUE_PATH = (
 # Experiment configuration
 # ============================================================
 
-BUDGET = 246
+# 0.02 %
+BUDGET_FRACTION = 0.0002
 
 RANDOM_STATE = 42
 
@@ -153,17 +153,16 @@ PREDICT_CHUNK_SIZE = 100000
 
 # ============================================================
 # Features
+#
+# No I.
+# No score.
+# No OLS-derived feature.
 # ============================================================
 
-SCORE_ONLY_FEATURES = [
-    "score",
-]
-
-RICH_FEATURES = [
+FEATURES = [
     "H",
     "U",
     "HU",
-    "score",
 ]
 
 
@@ -207,6 +206,8 @@ def load_json_records(
             "data",
             "records",
             "positions",
+            "stats",
+            "uncertainty_stats",
         ):
 
             if (
@@ -278,453 +279,15 @@ def load_jsonl(
 
 
 # ============================================================
-# Exact percentile rank
-#
-# Matches seed_oracle_queue.py:
-#
-#   average rank for ties
-#   divided by n - 1
-#
-# Output approximately / exactly in [0, 1].
-# ============================================================
-
-def percentile_rank(
-    values,
-):
-
-    values = np.asarray(
-        values,
-        dtype=np.float64,
-    )
-
-    n = len(
-        values
-    )
-
-    if n == 0:
-
-        return np.array(
-            [],
-            dtype=np.float64,
-        )
-
-    if n == 1:
-
-        return np.zeros(
-            1,
-            dtype=np.float64,
-        )
-
-    order = np.argsort(
-        values,
-        kind="stable",
-    )
-
-    sorted_values = values[
-        order
-    ]
-
-    # --------------------------------------------------------
-    # Find equal-value groups
-    # --------------------------------------------------------
-
-    change = np.empty(
-        n,
-        dtype=bool,
-    )
-
-    change[0] = True
-
-    change[1:] = (
-        sorted_values[1:]
-        !=
-        sorted_values[:-1]
-    )
-
-    starts = np.flatnonzero(
-        change
-    )
-
-    ends = np.concatenate(
-        (
-            starts[1:],
-            np.array(
-                [n],
-                dtype=np.int64,
-            ),
-        )
-    )
-
-    ranked_sorted = np.empty(
-        n,
-        dtype=np.float64,
-    )
-
-    for start, end in zip(
-        starts,
-        ends,
-    ):
-
-        average_rank = (
-            start
-            +
-            end
-            -
-            1
-        ) / 2.0
-
-        ranked_sorted[
-            start:end
-        ] = (
-            average_rank
-            /
-            (n - 1)
-        )
-
-    ranks = np.empty(
-        n,
-        dtype=np.float64,
-    )
-
-    ranks[
-        order
-    ] = ranked_sorted
-
-    return ranks
-
-
-# ============================================================
-# Side to move
-# ============================================================
-
-def extract_side(
-    fen,
-):
-
-    fields = fen.split()
-
-    if len(fields) < 2:
-
-        raise ValueError(
-            f"Invalid FEN:\n{fen}"
-        )
-
-    side = fields[1]
-
-    if side not in (
-        "w",
-        "b",
-    ):
-
-        raise ValueError(
-            f"Invalid side to move in FEN:\n"
-            f"{fen}"
-        )
-
-    return side
-
-
-# ============================================================
-# Side-aware percentile normalization
-# ============================================================
-
-def side_aware_percentile(
-    values,
-    sides,
-):
-
-    values = np.asarray(
-        values,
-        dtype=np.float64,
-    )
-
-    sides = np.asarray(
-        sides
-    )
-
-    result = np.empty(
-        len(values),
-        dtype=np.float64,
-    )
-
-    for side in (
-        "w",
-        "b",
-    ):
-
-        mask = (
-            sides
-            ==
-            side
-        )
-
-        if not np.any(
-            mask
-        ):
-
-            continue
-
-        result[
-            mask
-        ] = percentile_rank(
-            values[
-                mask
-            ]
-        )
-
-    return result
-
-
-# ============================================================
-# Min-max normalize
-# ============================================================
-
-def minmax_normalize(
-    values,
-):
-
-    values = np.asarray(
-        values,
-        dtype=np.float64,
-    )
-
-    minimum = np.min(
-        values
-    )
-
-    maximum = np.max(
-        values
-    )
-
-    if maximum <= minimum:
-
-        return np.zeros_like(
-            values
-        )
-
-    return (
-        values
-        -
-        minimum
-    ) / (
-        maximum
-        -
-        minimum
-    )
-
-
-# ============================================================
-# Compute exact ALBERTA score
-# ============================================================
-
-def compute_scores(
-    records,
-):
-
-    print(
-        "\nComputing exact ALBERTA I score...",
-        flush=True,
-    )
-
-    n = len(
-        records
-    )
-
-    H = np.empty(
-        n,
-        dtype=np.float64,
-    )
-
-    U = np.empty(
-        n,
-        dtype=np.float64,
-    )
-
-    HU = np.empty(
-        n,
-        dtype=np.float64,
-    )
-
-    sides = np.empty(
-        n,
-        dtype="<U1",
-    )
-
-    for i, record in enumerate(
-        records
-    ):
-
-        try:
-
-            H[i] = float(
-                record["H"]
-            )
-
-            U[i] = float(
-                record["U"]
-            )
-
-            HU[i] = float(
-                record["HU"]
-            )
-
-            sides[i] = extract_side(
-                record["fen"]
-            )
-
-        except (
-            KeyError,
-            TypeError,
-            ValueError,
-        ) as exc:
-
-            raise ValueError(
-                f"Invalid uncertainty record "
-                f"at index {i}"
-            ) from exc
-
-    # ========================================================
-    # H
-    # ========================================================
-
-    H_norm = side_aware_percentile(
-        H,
-        sides,
-    )
-
-    # ========================================================
-    # U
-    # ========================================================
-
-    U_log = np.log1p(
-        U
-        /
-        TAU
-    )
-
-    U_log_norm = (
-        side_aware_percentile(
-            U_log,
-            sides,
-        )
-    )
-
-    # ========================================================
-    # Interaction
-    # ========================================================
-
-    HU_log_norm = (
-        H_norm
-        *
-        U_log_norm
-    )
-
-    # ========================================================
-    # Global z-scores
-    #
-    # np.std default:
-    # ddof = 0
-    # ========================================================
-
-    H_std = np.std(
-        H_norm
-    )
-
-    U_std = np.std(
-        U_log_norm
-    )
-
-    HU_std = np.std(
-        HU_log_norm
-    )
-
-    if (
-        H_std == 0
-        or U_std == 0
-        or HU_std == 0
-    ):
-
-        raise RuntimeError(
-            "Zero variance encountered "
-            "while computing I."
-        )
-
-    H_star = (
-        H_norm
-        -
-        np.mean(
-            H_norm
-        )
-    ) / H_std
-
-    U_log_star = (
-        U_log_norm
-        -
-        np.mean(
-            U_log_norm
-        )
-    ) / U_std
-
-    HU_log_star = (
-        HU_log_norm
-        -
-        np.mean(
-            HU_log_norm
-        )
-    ) / HU_std
-
-    # ========================================================
-    # Raw score
-    # ========================================================
-
-    score = (
-        RAW_W_H
-        *
-        H_star
-
-        +
-
-        RAW_W_U
-        *
-        U_log_star
-
-        +
-
-        RAW_W_HU
-        *
-        HU_log_star
-    )
-
-    I_norm = minmax_normalize(
-        score
-    )
-
-    return {
-        "H":
-            H,
-
-        "U":
-            U,
-
-        "HU":
-            HU,
-
-        "score":
-            score,
-
-        "I_norm":
-            I_norm,
-    }
-
-
-# ============================================================
 # Probe dataset
 # ============================================================
 
-def load_probe_dataset():
+def load_probe_dataset(
+    path,
+):
 
     rows = load_jsonl(
-        PROBE_RESPONSE_PATH
+        path
     )
 
     required = {
@@ -733,7 +296,6 @@ def load_probe_dataset():
         "H",
         "U",
         "HU",
-        "score",
         "delta_kl",
         "delta_v",
     }
@@ -785,13 +347,29 @@ def load_probe_dataset():
 
         if (
             delta_kl < 0
-            or delta_v < 0
+            or
+            delta_v < 0
         ):
 
             raise ValueError(
                 f"Negative response "
                 f"at probe index {i}"
             )
+
+        for feature in FEATURES:
+
+            value = float(
+                row[feature]
+            )
+
+            if not np.isfinite(
+                value
+            ):
+
+                raise ValueError(
+                    f"Non-finite {feature} "
+                    f"at probe index {i}"
+                )
 
         cleaned.append(
             row
@@ -814,7 +392,6 @@ def load_probe_dataset():
 
 def make_feature_matrix(
     rows,
-    feature_names,
 ):
 
     return np.asarray(
@@ -824,85 +401,13 @@ def make_feature_matrix(
                     row[name]
                 )
                 for name
-                in feature_names
+                in FEATURES
             ]
             for row in rows
         ],
         dtype=np.float64,
     )
 
-
-# ============================================================
-# Reconstruct original I probe groups
-#
-# The Pareto probe was sampled as:
-#
-#     40 I bins x 5 random positions
-#
-# The HMI queue intentionally contains no Pareto-specific
-# metadata, so we reconstruct these groups by sorting the
-# probes by the raw score I and grouping consecutive probes.
-#
-# This is only used for cross-validation.
-# ============================================================
-
-def make_i_groups(
-    rows,
-    n_groups=40,
-):
-
-    n = len(
-        rows
-    )
-
-    if n < n_groups:
-
-        raise ValueError(
-            f"Cannot create {n_groups} I groups "
-            f"from only {n} probes."
-        )
-
-    scores = np.asarray(
-        [
-            float(
-                row["score"]
-            )
-            for row in rows
-        ],
-        dtype=np.float64,
-    )
-
-    order = np.argsort(
-        scores,
-        kind="stable",
-    )
-
-    groups = np.empty(
-        n,
-        dtype=np.int32,
-    )
-
-    # --------------------------------------------------------
-    # Split sorted probes into contiguous regions of I.
-    #
-    # With 200 probes / 40 groups this gives exactly
-    # 5 observations per group.
-    # --------------------------------------------------------
-
-    chunks = np.array_split(
-        order,
-        n_groups,
-    )
-
-    for group_id, indices in enumerate(
-        chunks
-    ):
-
-        groups[
-            indices
-        ] = group_id
-
-    return groups
 
 # ============================================================
 # Surrogate
@@ -993,28 +498,18 @@ def print_target_metrics(
 
 
 # ============================================================
-# Cross-validation
+# Random cross-validation
 #
-# mode:
-#
-#   "random"
-#       ordinary shuffled K-fold
-#
-#   "i_grouped"
-#       entire local regions of the I spectrum are held out
-#
+# We mainly care about ranking ability because Pareto
+# acquisition depends on relative response predictions.
 # ============================================================
 
-def cross_validate_model(
+def cross_validate_surrogate(
     rows,
-    feature_names,
-    label,
-    mode="random",
 ):
 
     X = make_feature_matrix(
-        rows,
-        feature_names,
+        rows
     )
 
     delta_kl = np.asarray(
@@ -1037,10 +532,6 @@ def cross_validate_model(
         dtype=np.float64,
     )
 
-    # --------------------------------------------------------
-    # Log targets
-    # --------------------------------------------------------
-
     Y_log = np.column_stack(
         (
             np.log1p(
@@ -1053,63 +544,19 @@ def cross_validate_model(
         )
     )
 
-    # --------------------------------------------------------
-    # CV strategy
-    # --------------------------------------------------------
+    cv = KFold(
+        n_splits=CV_FOLDS,
+        shuffle=True,
+        random_state=RANDOM_STATE,
+    )
 
-    if mode == "random":
-
-        cv = KFold(
-            n_splits=CV_FOLDS,
-            shuffle=True,
-            random_state=RANDOM_STATE,
-        )
-
-        predicted_log = cross_val_predict(
-            create_surrogate(),
-            X,
-            Y_log,
-            cv=cv,
-            n_jobs=1,
-        )
-
-        cv_description = (
-            "random shuffled K-fold"
-        )
-
-    elif mode == "i_grouped":
-
-        groups = make_i_groups(
-            rows,
-            n_groups=40,
-        )
-
-        cv = GroupKFold(
-            n_splits=CV_FOLDS,
-        )
-
-        predicted_log = cross_val_predict(
-            create_surrogate(),
-            X,
-            Y_log,
-            cv=cv,
-            groups=groups,
-            n_jobs=1,
-        )
-
-        cv_description = (
-            "grouped CV over local I regions"
-        )
-
-    else:
-
-        raise ValueError(
-            f"Unknown CV mode: {mode}"
-        )
-
-    # --------------------------------------------------------
-    # Back to original response space
-    # --------------------------------------------------------
+    predicted_log = cross_val_predict(
+        create_surrogate(),
+        X,
+        Y_log,
+        cv=cv,
+        n_jobs=1,
+    )
 
     predicted = np.expm1(
         predicted_log
@@ -1120,45 +567,33 @@ def cross_validate_model(
         0.0,
     )
 
-    # --------------------------------------------------------
-    # Report
-    # --------------------------------------------------------
-
     print()
     print(
         "-" * 70
     )
 
     print(
-        f"CROSS-VALIDATION: {label}"
+        "SURROGATE CROSS-VALIDATION"
     )
 
     print(
-        f"Strategy: {cv_description}"
-    )
-
-    print(
-        f"Features: {feature_names}"
+        f"Features: {FEATURES}"
     )
 
     print(
         "-" * 70
     )
 
-    kl_metrics = (
-        print_target_metrics(
-            "Delta KL",
-            delta_kl,
-            predicted[:, 0],
-        )
+    kl_metrics = print_target_metrics(
+        "Delta KL",
+        delta_kl,
+        predicted[:, 0],
     )
 
-    v_metrics = (
-        print_target_metrics(
-            "Delta V",
-            delta_v,
-            predicted[:, 1],
-        )
+    v_metrics = print_target_metrics(
+        "Delta V",
+        delta_v,
+        predicted[:, 1],
     )
 
     return {
@@ -1179,8 +614,7 @@ def fit_final_surrogate(
 ):
 
     X = make_feature_matrix(
-        rows,
-        RICH_FEATURES,
+        rows
     )
 
     Y = np.asarray(
@@ -1191,6 +625,7 @@ def fit_final_surrogate(
                         row["delta_kl"]
                     )
                 ),
+
                 math.log1p(
                     float(
                         row["delta_v"]
@@ -1213,13 +648,15 @@ def fit_final_surrogate(
 
 
 # ============================================================
-# Probe IDs to exclude from final selection
+# Probe IDs to exclude
 # ============================================================
 
-def load_probe_query_ids():
+def load_probe_query_ids(
+    path,
+):
 
     rows = load_jsonl(
-        PROBE_QUEUE_PATH
+        path
     )
 
     ids = set()
@@ -1249,10 +686,8 @@ def is_eligible_position(
 
     try:
 
-        board = (
-            chess.variant.AtomicBoard(
-                fen
-            )
+        board = chess.variant.AtomicBoard(
+            fen
         )
 
         return (
@@ -1267,12 +702,13 @@ def is_eligible_position(
 
 
 # ============================================================
-# Build final candidate pool
+# Build candidate pool
+#
+# H/U/HU are taken DIRECTLY from the current self-play JSON.
 # ============================================================
 
 def build_candidate_pool(
     records,
-    scores,
     excluded_ids,
 ):
 
@@ -1289,6 +725,7 @@ def build_candidate_pool(
     rejected_probe = 0
     rejected_duplicate = 0
     rejected_illegal = 0
+    rejected_invalid = 0
 
     matched_probe_ids = set()
 
@@ -1307,17 +744,52 @@ def build_candidate_pool(
                 flush=True,
             )
 
-        fen = record[
-            "fen"
-        ]
+        try:
+
+            fen = record[
+                "fen"
+            ]
+
+            H = float(
+                record["H"]
+            )
+
+            U = float(
+                record["U"]
+            )
+
+            HU = float(
+                record["HU"]
+            )
+
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+
+            rejected_invalid += 1
+            continue
+
+        if not (
+            np.isfinite(H)
+            and
+            np.isfinite(U)
+            and
+            np.isfinite(HU)
+        ):
+
+            rejected_invalid += 1
+            continue
 
         query_id = uuid.uuid5(
             uuid.NAMESPACE_DNS,
             fen,
         ).hex
 
+
         # ----------------------------------------------------
-        # Probe leakage exclusion
+        # Calibration leakage exclusion
         # ----------------------------------------------------
 
         if query_id in excluded_ids:
@@ -1329,6 +801,7 @@ def build_candidate_pool(
             )
 
             continue
+
 
         # ----------------------------------------------------
         # Duplicate FEN
@@ -1343,8 +816,9 @@ def build_candidate_pool(
             query_id
         )
 
+
         # ----------------------------------------------------
-        # Final Oracle eligibility
+        # Oracle eligibility
         # ----------------------------------------------------
 
         if not is_eligible_position(
@@ -1353,6 +827,7 @@ def build_candidate_pool(
 
             rejected_illegal += 1
             continue
+
 
         candidates.append(
             {
@@ -1366,33 +841,19 @@ def build_candidate_pool(
                     fen,
 
                 "H":
-                    float(
-                        scores["H"][i]
-                    ),
+                    H,
 
                 "U":
-                    float(
-                        scores["U"][i]
-                    ),
+                    U,
 
                 "HU":
-                    float(
-                        scores["HU"][i]
-                    ),
-
-                "score":
-                    float(
-                        scores["score"][i]
-                    ),
-
-                "I_norm":
-                    float(
-                        scores["I_norm"][i]
-                    ),
+                    HU,
             }
         )
 
+
     print()
+
     print(
         f"Eligible candidates : "
         f"{len(candidates):,}"
@@ -1414,28 +875,15 @@ def build_candidate_pool(
     )
 
     print(
+        f"Invalid records     : "
+        f"{rejected_invalid:,}"
+    )
+
+    print(
         f"Matched probe IDs   : "
         f"{len(matched_probe_ids):,} "
         f"/ {len(excluded_ids):,}"
     )
-
-    missing_probe_ids = (
-        excluded_ids
-        -
-        matched_probe_ids
-    )
-
-    print(
-        f"Missing probe IDs   : "
-        f"{len(missing_probe_ids):,}"
-    )
-
-    if matched_probe_ids:
-
-        print(
-            f"Probe row multiplicity: "
-            f"{rejected_probe / len(matched_probe_ids):.2f}x"
-        )
 
     return candidates
 
@@ -1488,14 +936,11 @@ def predict_candidates(
         ]
 
         X = make_feature_matrix(
-            chunk,
-            RICH_FEATURES,
+            chunk
         )
 
-        prediction_log = (
-            model.predict(
-                X
-            )
+        prediction_log = model.predict(
+            X
         )
 
         prediction = np.expm1(
@@ -1551,6 +996,7 @@ class FenwickMax:
             dtype=np.int32,
         )
 
+
     def query(
         self,
         index,
@@ -1577,6 +1023,7 @@ class FenwickMax:
             )
 
         return result
+
 
     def update(
         self,
@@ -1608,13 +1055,7 @@ class FenwickMax:
 # ============================================================
 # Exact 2D Pareto ranks
 #
-# Maximize BOTH objectives.
-#
-# Rank 1 = non-dominated front.
-# Rank 2 = next front.
-# ...
-#
-# O(N log N)
+# Maximize both objectives.
 # ============================================================
 
 def pareto_ranks_2d(
@@ -1651,12 +1092,6 @@ def pareto_ranks_2d(
         flush=True,
     )
 
-    # --------------------------------------------------------
-    # y rank:
-    #
-    # index 1 = highest y
-    # --------------------------------------------------------
-
     unique_y = np.unique(
         y
     )
@@ -1670,13 +1105,6 @@ def pareto_ranks_2d(
             side="left",
         )
     )
-
-    # --------------------------------------------------------
-    # Sort:
-    #
-    # x descending
-    # y descending
-    # --------------------------------------------------------
 
     order = np.lexsort(
         (
@@ -1718,11 +1146,6 @@ def pareto_ranks_2d(
             1
         )
 
-        # ----------------------------------------------------
-        # Identical objective vectors do not dominate
-        # one another.
-        # ----------------------------------------------------
-
         while end < n:
 
             idx2 = order[
@@ -1761,11 +1184,6 @@ def pareto_ranks_2d(
             group
         ] = layer
 
-        # ----------------------------------------------------
-        # Update only after all identical vectors received
-        # the same rank.
-        # ----------------------------------------------------
-
         fenwick.update(
             yi,
             layer,
@@ -1773,25 +1191,11 @@ def pareto_ranks_2d(
 
         position = end
 
-        if (
-            position % 100000
-            <
-            len(group)
-        ):
-
-            print(
-                f"  ranked "
-                f"{position:,} / {n:,}",
-                flush=True,
-            )
-
     return ranks
 
 
 # ============================================================
 # Crowding distance
-#
-# Standard NSGA-II-style distance inside ONE front.
 # ============================================================
 
 def crowding_distance(
@@ -1833,6 +1237,7 @@ def crowding_distance(
         objective_1[
             indices
         ],
+
         objective_2[
             indices
         ],
@@ -1954,10 +1359,6 @@ def select_budget(
 
             break
 
-        # ----------------------------------------------------
-        # Entire front fits
-        # ----------------------------------------------------
-
         if len(
             front
         ) <= remaining:
@@ -1968,9 +1369,9 @@ def select_budget(
 
             continue
 
+
         # ----------------------------------------------------
-        # Last partially included front:
-        # preserve objective-space diversity
+        # Last partially included front
         # ----------------------------------------------------
 
         distances = crowding_distance(
@@ -1979,13 +1380,6 @@ def select_budget(
             predicted_v,
         )
 
-        # Deterministic tie-break:
-        #
-        # 1. larger crowding distance
-        # 2. larger predicted KL
-        # 3. larger predicted V
-        # 4. smaller candidate index
-        #
         local_order = sorted(
             range(
                 len(front)
@@ -2004,22 +1398,19 @@ def select_budget(
             ),
         )
 
-        chosen_local = (
-            local_order[
-                :remaining
-            ]
-        )
-
         selected.extend(
             [
                 int(
                     front[j]
                 )
-                for j in chosen_local
+                for j in local_order[
+                    :remaining
+                ]
             ]
         )
 
         break
+
 
     if len(
         selected
@@ -2038,7 +1429,14 @@ def select_budget(
 
 
 # ============================================================
-# Write strict HMI queue
+# Strict HMI queue
+#
+# NOTE:
+#
+# score / I_norm are kept as None ONLY if your HMI schema
+# expects these keys to exist.
+#
+# They have no role in the acquisition method.
 # ============================================================
 
 def write_hmi_queue(
@@ -2050,7 +1448,8 @@ def write_hmi_queue(
 
     if (
         output_path.exists()
-        and output_path.stat().st_size > 0
+        and
+        output_path.stat().st_size > 0
         and not force
     ):
 
@@ -2075,19 +1474,13 @@ def write_hmi_queue(
         encoding="utf-8",
     ) as f:
 
-        for offset, idx in enumerate(
-            selected_indices
-        ):
+        for idx in selected_indices:
 
             candidate = candidates[
                 int(
                     idx
                 )
             ]
-
-            created_at = (
-                now.isoformat()
-            )
 
             item = {
                 "query_id":
@@ -2121,25 +1514,24 @@ def write_hmi_queue(
                         ]
                     ),
 
+                # --------------------------------------------
+                # Legacy HMI fields.
+                #
+                # Kept only for schema compatibility.
+                # Not used by dynamic Pareto.
+                # --------------------------------------------
+
                 "score":
-                    float(
-                        candidate[
-                            "score"
-                        ]
-                    ),
+                    None,
 
                 "I_norm":
-                    float(
-                        candidate[
-                            "I_norm"
-                        ]
-                    ),
+                    None,
 
                 "threshold":
                     None,
 
                 "model":
-                    "historical_json",
+                    "dynamic_pareto",
 
                 "epoch":
                     -1,
@@ -2151,7 +1543,7 @@ def write_hmi_queue(
                     -1,
 
                 "created_at":
-                    created_at,
+                    now.isoformat(),
 
                 "status":
                     "pending",
@@ -2180,10 +1572,6 @@ def write_hmi_queue(
                 "\n"
             )
 
-
-# ============================================================
-# Diagnostics
-# ============================================================
 
 # ============================================================
 # Distribution diagnostics
@@ -2230,6 +1618,10 @@ def print_quantiles(
         )
 
 
+# ============================================================
+# Probe correlations
+# ============================================================
+
 def print_probe_correlations(
     rows,
 ):
@@ -2253,7 +1645,8 @@ def print_probe_correlations(
                 row["delta_kl"]
             )
             for row in rows
-        ]
+        ],
+        dtype=np.float64,
     )
 
     delta_v = np.asarray(
@@ -2262,16 +1655,11 @@ def print_probe_correlations(
                 row["delta_v"]
             )
             for row in rows
-        ]
+        ],
+        dtype=np.float64,
     )
 
-    for feature in (
-        "H",
-        "U",
-        "HU",
-        "score",
-        "I_norm",
-    ):
+    for feature in FEATURES:
 
         values = np.asarray(
             [
@@ -2279,7 +1667,8 @@ def print_probe_correlations(
                     row[feature]
                 )
                 for row in rows
-            ]
+            ],
+            dtype=np.float64,
         )
 
         rho_kl = safe_spearman(
@@ -2307,15 +1696,51 @@ def main():
 
     parser = argparse.ArgumentParser(
         description=(
-            "ALBERTA Pareto acquisition selection"
+            "ALBERTA dynamic Pareto acquisition"
         )
+    )
+
+    parser.add_argument(
+        "--probe-responses",
+        type=Path,
+        default=DEFAULT_PROBE_RESPONSE_PATH,
+        help=(
+            "JSONL containing current local probe responses."
+        ),
+    )
+
+    parser.add_argument(
+        "--probe-queue",
+        type=Path,
+        default=DEFAULT_PROBE_QUEUE_PATH,
+        help=(
+            "Original calibration queue used for leakage exclusion."
+        ),
+    )
+
+    parser.add_argument(
+        "--pool",
+        type=Path,
+        default=DEFAULT_POOL_PATH,
+        help=(
+            "Current self-play uncertainty JSON."
+        ),
+    )
+
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT_QUEUE_PATH,
+        help=(
+            "Output HMI queue."
+        ),
     )
 
     parser.add_argument(
         "--force",
         action="store_true",
         help=(
-            "Overwrite an existing final Pareto queue."
+            "Overwrite existing output queue."
         ),
     )
 
@@ -2323,12 +1748,12 @@ def main():
         "--diagnostic-only",
         action="store_true",
         help=(
-            "Run probe diagnostics and CV only. "
-            "Do not project the full pool."
+            "Run probe diagnostics and CV only."
         ),
     )
 
     args = parser.parse_args()
+
 
     # ========================================================
     # Header
@@ -2339,7 +1764,7 @@ def main():
     )
 
     print(
-        "ALBERTA - PARETO SELECTION"
+        "ALBERTA - DYNAMIC PARETO SELECTION"
     )
 
     print(
@@ -2350,17 +1775,23 @@ def main():
 
     print(
         f"Probe responses : "
-        f"{PROBE_RESPONSE_PATH}"
+        f"{args.probe_responses}"
     )
 
     print(
         f"Candidate pool  : "
-        f"{POOL_PATH}"
+        f"{args.pool}"
     )
 
     print(
-        f"Budget          : "
-        f"{BUDGET}"
+        f"Budget fraction : "
+        f"{BUDGET_FRACTION:.6f} "
+        f"({BUDGET_FRACTION * 100:.4f}%)"
+    )
+
+    print(
+        f"Features        : "
+        f"{FEATURES}"
     )
 
     print(
@@ -2373,11 +1804,14 @@ def main():
         f"{CV_FOLDS}"
     )
 
+
     # ========================================================
     # Load probe responses
     # ========================================================
 
-    probes = load_probe_dataset()
+    probes = load_probe_dataset(
+        args.probe_responses
+    )
 
     print()
 
@@ -2385,6 +1819,7 @@ def main():
         f"Probe responses loaded: "
         f"{len(probes)}"
     )
+
 
     # ========================================================
     # Raw correlations
@@ -2394,9 +1829,15 @@ def main():
         probes
     )
 
+
     # ========================================================
-    # Random CV
+    # Surrogate CV
     # ========================================================
+
+    metrics = cross_validate_surrogate(
+        probes
+    )
+
 
     print()
     print(
@@ -2404,183 +1845,28 @@ def main():
     )
 
     print(
-        "RANDOM CROSS-VALIDATION"
+        "CV SUMMARY"
     )
 
     print(
         "=" * 70
     )
 
-    score_metrics_random = (
-        cross_validate_model(
-            probes,
-            SCORE_ONLY_FEATURES,
-            "I / score only",
-            mode="random",
-        )
-    )
-
-    rich_metrics_random = (
-        cross_validate_model(
-            probes,
-            RICH_FEATURES,
-            "H + U + HU + score",
-            mode="random",
-        )
-    )
-
-    # ========================================================
-    # Grouped-I CV
-    # ========================================================
-
-    print()
     print(
-        "=" * 70
+        "Pareto acquisition primarily requires "
+        "useful response ranking."
     )
 
     print(
-        "GROUPED-I CROSS-VALIDATION"
+        f"Delta KL Spearman : "
+        f"{metrics['delta_kl']['spearman']:+.4f}"
     )
 
     print(
-        "=" * 70
+        f"Delta V  Spearman : "
+        f"{metrics['delta_v']['spearman']:+.4f}"
     )
 
-    score_metrics_grouped = (
-        cross_validate_model(
-            probes,
-            SCORE_ONLY_FEATURES,
-            "I / score only",
-            mode="i_grouped",
-        )
-    )
-
-    rich_metrics_grouped = (
-        cross_validate_model(
-            probes,
-            RICH_FEATURES,
-            "H + U + HU + score",
-            mode="i_grouped",
-        )
-    )
-
-    # ========================================================
-    # Surrogate comparison
-    # ========================================================
-
-    print()
-    print(
-        "=" * 70
-    )
-
-    print(
-        "SURROGATE COMPARISON"
-    )
-
-    print(
-        "=" * 70
-    )
-
-    for target in (
-        "delta_kl",
-        "delta_v",
-    ):
-
-        random_i = (
-            score_metrics_random[
-                target
-            ][
-                "spearman"
-            ]
-        )
-
-        random_rich = (
-            rich_metrics_random[
-                target
-            ][
-                "spearman"
-            ]
-        )
-
-        grouped_i = (
-            score_metrics_grouped[
-                target
-            ][
-                "spearman"
-            ]
-        )
-
-        grouped_rich = (
-            rich_metrics_grouped[
-                target
-            ][
-                "spearman"
-            ]
-        )
-
-        print()
-
-        print(
-            target
-        )
-
-        print(
-            f"  Random CV "
-            f"| I={random_i:+.4f} "
-            f"| rich={random_rich:+.4f} "
-            f"| gain="
-            f"{random_rich - random_i:+.4f}"
-        )
-
-        print(
-            f"  Grouped-I "
-            f"| I={grouped_i:+.4f} "
-            f"| rich={grouped_rich:+.4f} "
-            f"| gain="
-            f"{grouped_rich - grouped_i:+.4f}"
-        )
-
-    # ========================================================
-    # Interpretation warning
-    # ========================================================
-
-    print()
-    print(
-        "=" * 70
-    )
-
-    print(
-        "DIAGNOSTIC SUMMARY"
-    )
-
-    print(
-        "=" * 70
-    )
-
-    print()
-
-    print(
-        "The random CV estimates ordinary "
-        "out-of-sample interpolation performance."
-    )
-
-    print(
-        "The Grouped-I CV is stricter: "
-        "local regions of the I spectrum are held out "
-        "together."
-    )
-
-    print()
-
-    print(
-        "The final Pareto queue should only be interpreted "
-        "if the rich surrogate retains meaningful ranking "
-        "ability, especially under Grouped-I CV."
-    )
-
-    # ========================================================
-    # Diagnostic-only mode
-    # ========================================================
 
     if args.diagnostic_only:
 
@@ -2592,8 +1878,9 @@ def main():
 
         return
 
+
     # ========================================================
-    # Fit final rich surrogate
+    # Fit final surrogate
     # ========================================================
 
     print()
@@ -2609,91 +1896,96 @@ def main():
         "=" * 70
     )
 
-    print()
-
-    print(
-        "Fitting rich surrogate "
-        "on all probe responses...",
-        flush=True,
-    )
-
     surrogate = fit_final_surrogate(
         probes
     )
 
+
     # ========================================================
-    # Load full candidate pool
+    # Load current candidate pool
     # ========================================================
 
     records = load_json_records(
-        POOL_PATH
+        args.pool
     )
 
-    print()
-
-    print(
-        f"Raw pool positions: "
-        f"{len(records):,}"
-    )
-
-    # ========================================================
-    # Recompute exact I
-    # ========================================================
-
-    scores = compute_scores(
+    raw_pool_size = len(
         records
     )
 
-    print()
 
+    # ========================================================
+    # Dynamic annotation budget
+    #
+    # 0.02% of the JSON produced by the previous generation.
+    #
+    # Example:
+    #
+    # 1,229,546 * 0.0002 = 245.9092 -> 246
+    # ========================================================
+
+    budget = max(
+        1,
+        int(
+            round(
+                raw_pool_size
+                *
+                BUDGET_FRACTION
+            )
+        ),
+    )
+
+
+    print()
     print(
-        f"I raw range : "
-        f"{scores['score'].min():.6f} "
-        f"-> "
-        f"{scores['score'].max():.6f}"
+        f"Raw pool positions : "
+        f"{raw_pool_size:,}"
     )
 
     print(
-        f"I norm range: "
-        f"{scores['I_norm'].min():.6f} "
-        f"-> "
-        f"{scores['I_norm'].max():.6f}"
+        f"Dynamic budget     : "
+        f"{budget:,}"
     )
 
+
     # ========================================================
-    # Exclude calibration probes
+    # Probe leakage exclusion
     # ========================================================
 
-    excluded_ids = load_probe_query_ids()
+    excluded_ids = load_probe_query_ids(
+        args.probe_queue
+    )
 
     print()
 
     print(
-        f"Probe IDs excluded from final pool: "
+        f"Calibration probe IDs excluded: "
         f"{len(excluded_ids)}"
     )
 
+
     # ========================================================
-    # Build eligible candidate pool
+    # Candidate pool
     # ========================================================
 
     candidates = build_candidate_pool(
         records,
-        scores,
         excluded_ids,
     )
 
+
     if len(
         candidates
-    ) < BUDGET:
+    ) < budget:
 
         raise RuntimeError(
-            "Eligible pool is smaller than "
-            "the requested budget."
+            "Eligible candidate pool is smaller "
+            "than the dynamic budget."
         )
 
+
     # ========================================================
-    # Predict local response
+    # Predict response
     # ========================================================
 
     (
@@ -2703,6 +1995,7 @@ def main():
         surrogate,
         candidates,
     )
+
 
     print()
 
@@ -2724,8 +2017,9 @@ def main():
         f"{predicted_v.max():.6e}"
     )
 
+
     # ========================================================
-    # Exact Pareto layers
+    # Pareto layers
     # ========================================================
 
     ranks = pareto_ranks_2d(
@@ -2733,50 +2027,31 @@ def main():
         predicted_v,
     )
 
+
     # ========================================================
-    # Budgeted selection
+    # Budget selection
     # ========================================================
 
     selected = select_budget(
         ranks,
         predicted_kl,
         predicted_v,
-        BUDGET,
+        budget,
     )
 
-    # ========================================================
-    # Selected diagnostics
-    # ========================================================
 
-    selected_kl = (
-        predicted_kl[
-            selected
-        ]
-    )
+    selected_kl = predicted_kl[
+        selected
+    ]
 
-    selected_v = (
-        predicted_v[
-            selected
-        ]
-    )
+    selected_v = predicted_v[
+        selected
+    ]
 
-    selected_ranks = (
-        ranks[
-            selected
-        ]
-    )
+    selected_ranks = ranks[
+        selected
+    ]
 
-    selected_i = np.asarray(
-        [
-            candidates[
-                int(idx)
-            ][
-                "I_norm"
-            ]
-            for idx in selected
-        ],
-        dtype=np.float64,
-    )
 
     selected_h = np.asarray(
         [
@@ -2802,7 +2077,6 @@ def main():
         dtype=np.float64,
     )
 
-
     selected_hu = np.asarray(
         [
             candidates[
@@ -2815,8 +2089,9 @@ def main():
         dtype=np.float64,
     )
 
+
     # ========================================================
-    # Final selection report
+    # Final report
     # ========================================================
 
     print()
@@ -2846,154 +2121,19 @@ def main():
         f"{selected_ranks.max()}"
     )
 
-    print()
-
-    print(
-        "Predicted Delta KL:"
-    )
-
-    print(
-        f"  mean   : "
-        f"{selected_kl.mean():.6e}"
-    )
-
-    print(
-        f"  median : "
-        f"{np.median(selected_kl):.6e}"
-    )
-
-    print(
-        f"  min    : "
-        f"{selected_kl.min():.6e}"
-    )
-
-    print(
-        f"  max    : "
-        f"{selected_kl.max():.6e}"
-    )
-
-    print()
-
-    print(
-        "Predicted Delta V:"
-    )
-
-    print(
-        f"  mean   : "
-        f"{selected_v.mean():.6e}"
-    )
-
-    print(
-        f"  median : "
-        f"{np.median(selected_v):.6e}"
-    )
-
-    print(
-        f"  min    : "
-        f"{selected_v.min():.6e}"
-    )
-
-    print(
-        f"  max    : "
-        f"{selected_v.max():.6e}"
-    )
-
-    print()
-
-    print(
-        "Selected I_norm:"
-    )
-
-    print(
-        f"  mean   : "
-        f"{selected_i.mean():.6f}"
-    )
-
-    print(
-        f"  median : "
-        f"{np.median(selected_i):.6f}"
-    )
-
-    print(
-        f"  min    : "
-        f"{selected_i.min():.6f}"
-    )
-
-    print(
-        f"  max    : "
-        f"{selected_i.max():.6f}"
-    )
-
-    print()
-
-    print(
-        "Selected raw H:"
-    )
-
-    print(
-        f"  mean   : "
-        f"{selected_h.mean():.6f}"
-    )
-
-    print(
-        f"  median : "
-        f"{np.median(selected_h):.6f}"
-    )
-
-    print()
-
-    print(
-        "Selected raw U:"
-    )
-
-    print(
-        f"  mean   : "
-        f"{selected_u.mean():.6f}"
-    )
-
-    print(
-        f"  median : "
-        f"{np.median(selected_u):.6f}"
-    )
-
-        # ========================================================
-    # Final sanity checks
-    # ========================================================
-
-    print()
-    print(
-        "=" * 70
-    )
-
-    print(
-        "FINAL SANITY CHECKS"
-    )
-
-    print(
-        "=" * 70
-    )
-
-    # --------------------------------------------------------
-    # Selected-set quantiles
-    # --------------------------------------------------------
 
     print_quantiles(
-        "Selected I_norm",
-        selected_i,
-    )
-
-    print_quantiles(
-        "Selected raw H",
+        "Selected H",
         selected_h,
     )
 
     print_quantiles(
-        "Selected raw U",
+        "Selected U",
         selected_u,
     )
 
     print_quantiles(
-        "Selected raw HU",
+        "Selected HU",
         selected_hu,
     )
 
@@ -3007,9 +2147,10 @@ def main():
         selected_v,
     )
 
-    # --------------------------------------------------------
-    # Actor / critic response relationship
-    # --------------------------------------------------------
+
+    # ========================================================
+    # Response relationship
+    # ========================================================
 
     selected_response_rho = safe_spearman(
         selected_kl,
@@ -3028,31 +2169,26 @@ def main():
 
     print(
         f"  Full eligible pool "
-        f"| rho(KL, V)="
+        f"| rho(KL,V)="
         f"{pool_response_rho:+.4f}"
     )
 
     print(
         f"  Selected Pareto set "
-        f"| rho(KL, V)="
+        f"| rho(KL,V)="
         f"{selected_response_rho:+.4f}"
     )
 
-    # --------------------------------------------------------
-    # Compare selected feature distribution to decision pool
-    # --------------------------------------------------------
 
-    pool_i = np.asarray(
-        [
-            candidate["I_norm"]
-            for candidate in candidates
-        ],
-        dtype=np.float64,
-    )
+    # ========================================================
+    # Compare feature distributions
+    # ========================================================
 
     pool_h = np.asarray(
         [
-            candidate["H"]
+            candidate[
+                "H"
+            ]
             for candidate in candidates
         ],
         dtype=np.float64,
@@ -3060,45 +2196,60 @@ def main():
 
     pool_u = np.asarray(
         [
-            candidate["U"]
+            candidate[
+                "U"
+            ]
             for candidate in candidates
         ],
         dtype=np.float64,
     )
 
-    print_quantiles(
-        "Eligible pool I_norm",
-        pool_i,
+    pool_hu = np.asarray(
+        [
+            candidate[
+                "HU"
+            ]
+            for candidate in candidates
+        ],
+        dtype=np.float64,
     )
 
+
     print_quantiles(
-        "Eligible pool raw H",
+        "Eligible pool H",
         pool_h,
     )
 
     print_quantiles(
-        "Eligible pool raw U",
+        "Eligible pool U",
         pool_u,
     )
 
+    print_quantiles(
+        "Eligible pool HU",
+        pool_hu,
+    )
+
+
     # ========================================================
-    # Write strict HMI queue
+    # Write queue
     # ========================================================
 
     write_hmi_queue(
         candidates,
         selected,
-        OUTPUT_QUEUE_PATH,
+        args.output,
         force=args.force,
     )
 
+
     print()
     print(
         "=" * 70
     )
 
     print(
-        "PARETO QUEUE CREATED"
+        "DYNAMIC PARETO QUEUE CREATED"
     )
 
     print(
@@ -3108,15 +2259,21 @@ def main():
     print()
 
     print(
-        f"Final HMI queue saved to:\n"
-        f"  {OUTPUT_QUEUE_PATH}"
+        f"Raw pool size : "
+        f"{raw_pool_size:,}"
+    )
+
+    print(
+        f"Budget        : "
+        f"{budget:,} "
+        f"({BUDGET_FRACTION * 100:.4f}%)"
     )
 
     print()
 
     print(
-        f"The queue contains exactly "
-        f"{BUDGET} pending Oracle annotations."
+        f"Saved to:\n"
+        f"  {args.output}"
     )
 
 

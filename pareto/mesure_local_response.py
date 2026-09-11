@@ -1,28 +1,41 @@
 #!/usr/bin/env python3
 
 """
-ALBERTA - Measure Local Oracle Response
+ALBERTA - Dynamic Local Oracle Response
 =======================================
 
-For each manually annotated Pareto probe position:
+For each manually annotated Pareto calibration probe:
 
-    1. restore the exact same RL10 model state
-    2. restore the exact same optimizer state
-    3. measure policy/value before Oracle update
-    4. apply one controlled Oracle gradient step
-    5. measure policy/value after Oracle update
-    6. compute:
+    1. load the current learner checkpoint
+    2. load the current historical league
+    3. load the BC opening-prior model
+    4. recompute dynamically:
 
-           Delta_KL
-           Delta_V
+           H_t
+           U_t
+           HU_t = H_t * U_t
 
-    7. restore RL10 before the next annotation
+    5. restore the exact current learner state
+    6. restore the exact current optimizer state
+    7. measure policy/value before Oracle update
+    8. apply one controlled Oracle gradient step
+    9. measure policy/value after Oracle update
+   10. compute:
 
-The resulting dataset maps:
+           Delta_KL_t
+           Delta_V_t
 
-    (H, U, HU, score, I_norm)
+   11. restore the learner before the next annotation
+
+The resulting calibration dataset maps:
+
+    (H_t, U_t, HU_t)
         ->
-    (Delta_KL, Delta_V)
+    (Delta_KL_t, Delta_V_t)
+
+The 200 FENs and their human Oracle annotations stay fixed.
+The learner-dependent quantities are refreshed at every
+dynamic acquisition generation.
 
 Output
 ------
@@ -38,7 +51,6 @@ import sys
 from pathlib import Path
 
 import chess.variant
-
 import numpy as np
 
 import torch
@@ -53,6 +65,7 @@ from torch.optim import Adam
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 if str(PROJECT_ROOT) not in sys.path:
+
     sys.path.insert(
         0,
         str(PROJECT_ROOT),
@@ -73,8 +86,16 @@ from src.actions_space import (
 )
 
 from src.models.resnet import ChessResNet
-
 from src.models.actor_critic import ActorCritic
+
+
+# ============================================================
+# Dynamic experiment configuration
+#
+# Change CURRENT_EPOCH / CHECKPOINT_PATH for each dynamic step.
+# ============================================================
+
+CURRENT_EPOCH = 10
 
 
 # ============================================================
@@ -88,12 +109,42 @@ ORACLE_QUEUE_PATH = (
     / "oracle_queue_1-10_pareto_probe.jsonl"
 )
 
+
 CHECKPOINT_PATH = (
     PROJECT_ROOT
     / "checkpoints"
-    / "rl_epoch"
-    / "rl_epoch_10.pt"
+    / "dynamic_pareto_epoch"
+    / f"al_epoch_{CURRENT_EPOCH}.pt"
 )
+
+LEAGUE_DIR = (
+    PROJECT_ROOT
+    / "checkpoints"
+    / "dynamic_pareto_league"
+)
+
+# ------------------------------------------------------------
+# BC checkpoints
+#
+# BC6 + BC7 are persistent historical league anchors.
+#
+# BC7 is also used as the opening policy prior.
+# ------------------------------------------------------------
+
+BC6_CHECKPOINT_PATH = (
+    PROJECT_ROOT
+    / "checkpoints"
+    / "bc_epoch"
+    / "bc_epoch_6.pt"
+)
+
+BC7_CHECKPOINT_PATH = (
+    PROJECT_ROOT
+    / "checkpoints"
+    / "bc_epoch"
+    / "bc_epoch_7.pt"
+)
+
 
 OUTPUT_PATH = (
     PROJECT_ROOT
@@ -117,9 +168,48 @@ N_UPDATE_STEPS = 1
 
 
 # ============================================================
+# League configuration
+#
+# ALBERTA keeps:
+#
+#     BC6
+#     BC7
+#     last 10 historical learner snapshots
+#
+# ============================================================
+
+LEAGUE_HISTORY = 10
+
+
+# ============================================================
+# Opening prior configuration
+#
+# Try to reuse training values when available.
+#
+# Historical ALBERTA configuration:
+#
+#   plies = 6
+#
+# Default strength = 1.0 if not exposed by training module.
+# ============================================================
+
+OPENING_PRIOR_PLIES = getattr(
+    rl,
+    "OPENING_PRIOR_PLIES",
+    6,
+)
+
+OPENING_PRIOR_STRENGTH = getattr(
+    rl,
+    "OPENING_PRIOR_STRENGTH",
+    1.0,
+)
+
+
+# ============================================================
 # Oracle loss coefficients
 #
-# Keep identical to current AL experiment.
+# Must match AL training.
 # ============================================================
 
 ORACLE_POLICY_COEF = 0.05
@@ -146,7 +236,248 @@ CRITICALITY_WEIGHTS = {
 
 
 # ============================================================
-# Load annotations
+# Build ActorCritic model
+# ============================================================
+
+def create_model():
+
+    base_model = ChessResNet(
+        num_actions=len(
+            ACTIONS
+        ),
+        channels=32,
+        blocks=4,
+    )
+
+    model = ActorCritic(
+        base_model
+    ).to(
+        DEVICE
+    )
+
+    return model
+
+
+# ============================================================
+# Load generic ActorCritic checkpoint
+# ============================================================
+
+def load_actor_critic_from_path(
+    path: Path,
+):
+
+    if not path.exists():
+
+        raise FileNotFoundError(
+            f"Model checkpoint not found:\n"
+            f"{path}"
+        )
+
+    checkpoint = torch.load(
+        path,
+        map_location=DEVICE,
+    )
+
+    if "model_state_dict" not in checkpoint:
+
+        raise RuntimeError(
+            f"No model_state_dict in:\n"
+            f"{path}"
+        )
+
+    model = create_model()
+
+    model.load_state_dict(
+        checkpoint[
+            "model_state_dict"
+        ]
+    )
+
+    model.eval()
+
+    return model
+
+
+# ============================================================
+# Load current learner checkpoint
+# ============================================================
+
+def load_base_state():
+
+    if not CHECKPOINT_PATH.exists():
+
+        raise FileNotFoundError(
+            f"Checkpoint not found:\n"
+            f"{CHECKPOINT_PATH}"
+        )
+
+    checkpoint = torch.load(
+        CHECKPOINT_PATH,
+        map_location=DEVICE,
+    )
+
+    if "model_state_dict" not in checkpoint:
+
+        raise RuntimeError(
+            "Checkpoint has no model_state_dict."
+        )
+
+    if "optimizer_state_dict" not in checkpoint:
+
+        raise RuntimeError(
+            "Checkpoint has no optimizer_state_dict."
+        )
+
+    return checkpoint
+
+
+# ============================================================
+# Load BC opening-prior model
+# ============================================================
+
+def load_bc_model():
+
+    print()
+    print(
+        "Loading BC opening-prior model..."
+    )
+
+    print(
+        f"  {BC7_CHECKPOINT_PATH}"
+    )
+
+    model = load_actor_critic_from_path(
+        BC7_CHECKPOINT_PATH
+    )
+
+    return model
+
+
+# ============================================================
+# Load current historical league
+#
+# Composition:
+#
+#     BC6
+#     BC7
+#     up to last 10 historical learner snapshots
+#
+# Current learner itself is NOT included here because it is
+# explicitly added during uncertainty computation.
+# ============================================================
+
+def load_current_league():
+
+    print()
+    print("=" * 70)
+    print("LOADING HISTORICAL LEAGUE")
+    print("=" * 70)
+    print()
+
+    models = []
+
+    # ========================================================
+    # Persistent BC anchors
+    # ========================================================
+
+    for name, path in (
+        (
+            "BC6",
+            BC6_CHECKPOINT_PATH,
+        ),
+        (
+            "BC7",
+            BC7_CHECKPOINT_PATH,
+        ),
+    ):
+
+        model = load_actor_critic_from_path(
+            path
+        )
+
+        models.append(
+            model
+        )
+
+        print(
+            f"Loaded {name}"
+        )
+
+
+    # ========================================================
+    # Historical learner snapshots
+    # ========================================================
+
+    start_epoch = max(
+        1,
+        CURRENT_EPOCH
+        -
+        LEAGUE_HISTORY
+        +
+        1,
+    )
+
+    loaded_snapshots = 0
+
+    for epoch in range(
+        start_epoch,
+        CURRENT_EPOCH + 1,
+    ):
+
+        path = (
+            LEAGUE_DIR
+            /
+            f"league_epoch_{epoch:03d}.pt"
+        )
+
+        if not path.exists():
+
+            print(
+                f"WARNING: missing league snapshot: "
+                f"{path}"
+            )
+
+            continue
+
+        model = load_actor_critic_from_path(
+            path
+        )
+
+        models.append(
+            model
+        )
+
+        loaded_snapshots += 1
+
+        print(
+            f"Loaded league_epoch_{epoch:03d}"
+        )
+
+
+    print()
+
+    print(
+        f"Persistent BC agents : 2"
+    )
+
+    print(
+        f"Historical snapshots : "
+        f"{loaded_snapshots}"
+    )
+
+    print(
+        f"League models        : "
+        f"{len(models)}"
+    )
+
+    return models
+
+
+# ============================================================
+# Load human probe annotations
+#
+# H/U/HU stored in the historical queue are intentionally
+# ignored. They are recomputed dynamically later.
 # ============================================================
 
 def load_annotations():
@@ -180,7 +511,14 @@ def load_annotations():
                 line
             )
 
-            if record.get("status") != "answered":
+            # ------------------------------------------------
+            # Answered probes only
+            # ------------------------------------------------
+
+            if record.get(
+                "status"
+            ) != "answered":
+
                 continue
 
             oracle_move = record.get(
@@ -197,6 +535,11 @@ def load_annotations():
             if reward is None:
                 continue
 
+
+            # ------------------------------------------------
+            # Annotation metadata
+            # ------------------------------------------------
+
             confidence = record.get(
                 "oracle_confidence",
                 "medium",
@@ -207,6 +550,7 @@ def load_annotations():
                 "non_critical",
             )
 
+
             if confidence not in CONFIDENCE_WEIGHTS:
 
                 raise ValueError(
@@ -214,6 +558,7 @@ def load_annotations():
                     f"at line {line_number}: "
                     f"{confidence}"
                 )
+
 
             if criticality not in CRITICALITY_WEIGHTS:
 
@@ -223,6 +568,11 @@ def load_annotations():
                     f"{criticality}"
                 )
 
+
+            # ------------------------------------------------
+            # Oracle action
+            # ------------------------------------------------
+
             if oracle_move not in ACTION_TO_INDEX:
 
                 raise ValueError(
@@ -230,6 +580,11 @@ def load_annotations():
                     f"{line_number}: "
                     f"{oracle_move}"
                 )
+
+
+            # ------------------------------------------------
+            # Reward
+            # ------------------------------------------------
 
             reward = float(
                 reward
@@ -247,28 +602,26 @@ def load_annotations():
                     f"{reward}"
                 )
 
+
+            # ------------------------------------------------
+            # IMPORTANT
+            #
+            # Historical H/U/HU are NOT copied.
+            #
+            # Only fixed human information is retained.
+            # ------------------------------------------------
+
             annotations.append(
                 {
                     "query_id":
-                        record["query_id"],
+                        record[
+                            "query_id"
+                        ],
 
                     "fen":
-                        record["fen"],
-
-                    "H":
-                        float(record["H"]),
-
-                    "U":
-                        float(record["U"]),
-
-                    "HU":
-                        float(record["HU"]),
-
-                    "score":
-                        float(record["score"]),
-
-                    "I_norm":
-                        float(record["I_norm"]),
+                        record[
+                            "fen"
+                        ],
 
                     "oracle_move":
                         oracle_move,
@@ -284,6 +637,7 @@ def load_annotations():
                 }
             )
 
+
     if not annotations:
 
         raise RuntimeError(
@@ -294,59 +648,7 @@ def load_annotations():
 
 
 # ============================================================
-# Build model
-# ============================================================
-
-def create_model():
-
-    base_model = ChessResNet(
-        num_actions=len(ACTIONS),
-        channels=32,
-        blocks=4,
-    )
-
-    model = ActorCritic(
-        base_model
-    ).to(DEVICE)
-
-    return model
-
-
-# ============================================================
-# Load base checkpoint
-# ============================================================
-
-def load_base_state():
-
-    if not CHECKPOINT_PATH.exists():
-
-        raise FileNotFoundError(
-            f"Checkpoint not found:\n"
-            f"{CHECKPOINT_PATH}"
-        )
-
-    checkpoint = torch.load(
-        CHECKPOINT_PATH,
-        map_location=DEVICE,
-    )
-
-    if "model_state_dict" not in checkpoint:
-
-        raise RuntimeError(
-            "Checkpoint has no model_state_dict."
-        )
-
-    if "optimizer_state_dict" not in checkpoint:
-
-        raise RuntimeError(
-            "Checkpoint has no optimizer_state_dict."
-        )
-
-    return checkpoint
-
-
-# ============================================================
-# Legal mask
+# Legal action indices
 # ============================================================
 
 def get_legal_indices(
@@ -373,6 +675,7 @@ def get_legal_indices(
             ]
         )
 
+
     if not legal_indices:
 
         raise RuntimeError(
@@ -384,7 +687,336 @@ def get_legal_indices(
 
 
 # ============================================================
-# Evaluate one position
+# Opening-prior coefficient
+#
+# Same linear schedule used during self-play.
+# ============================================================
+
+def opening_prior_alpha(
+    board,
+):
+
+    ply = board.ply()
+
+    if (
+        OPENING_PRIOR_PLIES <= 0
+        or
+        OPENING_PRIOR_STRENGTH <= 0
+        or
+        ply >= OPENING_PRIOR_PLIES
+    ):
+
+        return 0.0
+
+
+    return (
+        OPENING_PRIOR_STRENGTH
+        *
+        (
+            1.0
+            -
+            (
+                ply
+                /
+                OPENING_PRIOR_PLIES
+            )
+        )
+    )
+
+
+# ============================================================
+# Compute H
+#
+# H = entropy of the current guided policy over legal actions.
+#
+# BC opening prior is added BEFORE entropy.
+# Temperature is NOT applied.
+# ============================================================
+
+@torch.no_grad()
+def compute_entropy(
+    current_model,
+    bc_model,
+    board,
+):
+
+    current_model.eval()
+    bc_model.eval()
+
+    x = encode_boards(
+        [board]
+    ).to(
+        DEVICE
+    )
+
+
+    # ========================================================
+    # Current learner policy
+    # ========================================================
+
+    logits, _ = current_model(
+        x
+    )
+
+    legal_indices = get_legal_indices(
+        board
+    )
+
+    legal_logits = logits[
+        0,
+        legal_indices
+    ]
+
+
+    # ========================================================
+    # Optional BC opening prior
+    # ========================================================
+
+    alpha = opening_prior_alpha(
+        board
+    )
+
+    if alpha > 0.0:
+
+        bc_logits, _ = bc_model(
+            x
+        )
+
+        bc_legal_logits = bc_logits[
+            0,
+            legal_indices
+        ]
+
+        bc_log_probs = F.log_softmax(
+            bc_legal_logits,
+            dim=0,
+        )
+
+        legal_logits = (
+            legal_logits
+            +
+            alpha
+            *
+            bc_log_probs
+        )
+
+
+    # ========================================================
+    # Intrinsic policy entropy
+    # ========================================================
+
+    log_probs = F.log_softmax(
+        legal_logits,
+        dim=0,
+    )
+
+    probs = torch.exp(
+        log_probs
+    )
+
+    entropy = -torch.sum(
+        probs
+        *
+        log_probs
+    )
+
+    return float(
+        entropy.item()
+    )
+
+
+# ============================================================
+# Compute U
+#
+# Variance of value predictions across:
+#
+#     historical league agents
+#     +
+#     current learner
+#
+# Same definition as:
+#
+#     torch.var(..., unbiased=False)
+# ============================================================
+
+@torch.no_grad()
+def compute_uncertainty(
+    current_model,
+    league_models,
+    board,
+):
+
+    x = encode_boards(
+        [board]
+    ).to(
+        DEVICE
+    )
+
+    values = []
+
+
+    # ========================================================
+    # Historical league
+    # ========================================================
+
+    for model in league_models:
+
+        model.eval()
+
+        _, value = model(
+            x
+        )
+
+        values.append(
+            float(
+                value[
+                    0,
+                    0
+                ].item()
+            )
+        )
+
+
+    # ========================================================
+    # Current learner
+    # ========================================================
+
+    current_model.eval()
+
+    _, current_value = current_model(
+        x
+    )
+
+    values.append(
+        float(
+            current_value[
+                0,
+                0
+            ].item()
+        )
+    )
+
+
+    # ========================================================
+    # Population variance
+    # ========================================================
+
+    values_tensor = torch.tensor(
+        values,
+        dtype=torch.float32,
+    )
+
+    uncertainty = torch.var(
+        values_tensor,
+        unbiased=False,
+    )
+
+    return float(
+        uncertainty.item()
+    )
+
+
+# ============================================================
+# Refresh H / U / HU for all fixed probes
+# ============================================================
+
+def refresh_annotation_features(
+    annotations,
+    current_model,
+    bc_model,
+    league_models,
+):
+
+    print()
+    print("=" * 70)
+    print("REFRESHING PARETO PROBE FEATURES")
+    print("=" * 70)
+    print()
+
+    refreshed = []
+
+
+    for i, annotation in enumerate(
+        annotations,
+        start=1,
+    ):
+
+        board = chess.variant.AtomicBoard(
+            annotation[
+                "fen"
+            ]
+        )
+
+
+        # ====================================================
+        # Dynamic features
+        # ====================================================
+
+        H = compute_entropy(
+            current_model,
+            bc_model,
+            board,
+        )
+
+        U = compute_uncertainty(
+            current_model,
+            league_models,
+            board,
+        )
+
+        HU = (
+            H
+            *
+            U
+        )
+
+
+        updated = dict(
+            annotation
+        )
+
+        updated[
+            "H"
+        ] = H
+
+        updated[
+            "U"
+        ] = U
+
+        updated[
+            "HU"
+        ] = HU
+
+
+        refreshed.append(
+            updated
+        )
+
+
+        print(
+            f"[{i:03d}/{len(annotations):03d}] "
+            f"H={H:.6f} "
+            f"| U={U:.6e} "
+            f"| HU={HU:.6e}"
+        )
+
+
+    return refreshed
+
+
+# ============================================================
+# Evaluate policy + value on one position
+#
+# NOTE:
+#
+# Delta_KL measures the raw learner policy response.
+# The BC opening prior is NOT applied here.
+#
+# This matches the original local-response experiment:
+#
+#     learner policy before Oracle update
+#         versus
+#     learner policy after Oracle update
 # ============================================================
 
 @torch.no_grad()
@@ -401,13 +1033,17 @@ def evaluate_position(
 
     boards = encode_boards(
         [board]
-    ).to(DEVICE)
+    ).to(
+        DEVICE
+    )
 
     logits, values = model(
         boards
     )
 
-    logits = logits[0]
+    logits = logits[
+        0
+    ]
 
     legal_indices = get_legal_indices(
         board
@@ -433,6 +1069,7 @@ def evaluate_position(
         ].item()
     )
 
+
     return {
         "legal_indices":
             legal_indices,
@@ -449,7 +1086,7 @@ def evaluate_position(
 
 
 # ============================================================
-# Oracle loss for one annotation
+# Oracle loss for one calibration annotation
 # ============================================================
 
 def compute_single_oracle_loss(
@@ -458,20 +1095,25 @@ def compute_single_oracle_loss(
 ):
 
     board = chess.variant.AtomicBoard(
-        annotation["fen"]
+        annotation[
+            "fen"
+        ]
     )
 
     boards = encode_boards(
         [board]
-    ).to(DEVICE)
+    ).to(
+        DEVICE
+    )
 
     logits, values = model(
         boards
     )
 
-    # --------------------------------------------------------
-    # Legal mask
-    # --------------------------------------------------------
+
+    # ========================================================
+    # Legal action mask
+    # ========================================================
 
     legal_indices = get_legal_indices(
         board
@@ -487,6 +1129,7 @@ def compute_single_oracle_loss(
         legal_indices
     ] = True
 
+
     masked_logits = logits.clone()
 
     masked_logits[
@@ -498,71 +1141,83 @@ def compute_single_oracle_loss(
         float("-inf"),
     )
 
-    # --------------------------------------------------------
-    # Policy
-    # --------------------------------------------------------
 
-    oracle_action = (
-        ACTION_TO_INDEX[
-            annotation["oracle_move"]
+    # ========================================================
+    # Policy loss
+    # ========================================================
+
+    oracle_action = ACTION_TO_INDEX[
+        annotation[
+            "oracle_move"
         ]
-    )
+    ]
+
+
+    if oracle_action not in legal_indices:
+
+        raise ValueError(
+            "Oracle move is not legal for position:\n"
+            f"{annotation['fen']}\n"
+            f"move={annotation['oracle_move']}"
+        )
+
 
     log_probs = F.log_softmax(
         masked_logits,
         dim=1,
     )
 
-    policy_loss = (
-        -log_probs[
-            0,
-            oracle_action
-        ]
-    )
+    policy_loss = -log_probs[
+        0,
+        oracle_action
+    ]
 
-    # --------------------------------------------------------
-    # Value
-    # --------------------------------------------------------
+
+    # ========================================================
+    # Value loss
+    # ========================================================
 
     reward = torch.tensor(
-        annotation["reward"],
+        annotation[
+            "reward"
+        ],
         dtype=torch.float32,
         device=DEVICE,
     )
 
-    predicted_value = (
-        values[
-            0,
-            0
-        ]
-    )
+    predicted_value = values[
+        0,
+        0
+    ]
 
     value_loss = F.mse_loss(
         predicted_value,
         reward,
     )
 
-    # --------------------------------------------------------
-    # Annotation weighting
-    # --------------------------------------------------------
 
-    confidence_weight = (
-        CONFIDENCE_WEIGHTS[
-            annotation["confidence"]
-        ]
-    )
+    # ========================================================
+    # Human annotation weighting
+    # ========================================================
 
-    criticality_weight = (
-        CRITICALITY_WEIGHTS[
-            annotation["criticality"]
+    confidence_weight = CONFIDENCE_WEIGHTS[
+        annotation[
+            "confidence"
         ]
-    )
+    ]
+
+    criticality_weight = CRITICALITY_WEIGHTS[
+        annotation[
+            "criticality"
+        ]
+    ]
 
     weight = (
         confidence_weight
         *
         criticality_weight
     )
+
 
     weighted_policy_loss = (
         weight
@@ -576,11 +1231,23 @@ def compute_single_oracle_loss(
         value_loss
     )
 
+
+    # ========================================================
+    # Total Oracle loss
+    #
+    # Weight ACTUALLY affects the gradient.
+    # ========================================================
+
     total_loss = (
-        ORACLE_POLICY_COEF * policy_loss
+        ORACLE_POLICY_COEF
+        *
+        weighted_policy_loss
         +
-        ORACLE_VALUE_COEF * value_loss
+        ORACLE_VALUE_COEF
+        *
+        weighted_value_loss
     )
+
 
     return {
         "loss":
@@ -592,6 +1259,18 @@ def compute_single_oracle_loss(
         "value_loss":
             value_loss,
 
+        "weighted_policy_loss":
+            weighted_policy_loss,
+
+        "weighted_value_loss":
+            weighted_value_loss,
+
+        "confidence_weight":
+            confidence_weight,
+
+        "criticality_weight":
+            criticality_weight,
+
         "weight":
             weight,
     }
@@ -599,6 +1278,14 @@ def compute_single_oracle_loss(
 
 # ============================================================
 # KL divergence
+#
+# KL(
+#     policy_before
+#     ||
+#     policy_after
+# )
+#
+# Restricted to legal actions.
 # ============================================================
 
 def compute_kl(
@@ -607,15 +1294,20 @@ def compute_kl(
 ):
 
     if (
-        before["legal_indices"]
+        before[
+            "legal_indices"
+        ]
         !=
-        after["legal_indices"]
+        after[
+            "legal_indices"
+        ]
     ):
 
         raise RuntimeError(
             "Legal action space changed "
             "between evaluations."
         )
+
 
     p = before[
         "probs"
@@ -629,6 +1321,7 @@ def compute_kl(
         "log_probs"
     ]
 
+
     kl = torch.sum(
         p
         *
@@ -638,6 +1331,7 @@ def compute_kl(
             log_q
         )
     )
+
 
     return float(
         kl.item()
@@ -654,22 +1348,26 @@ def measure_annotation(
     annotation,
 ):
 
-    # --------------------------------------------------------
-    # Before
-    # --------------------------------------------------------
+    # ========================================================
+    # Before Oracle update
+    # ========================================================
 
     before = evaluate_position(
         model,
-        annotation["fen"],
+        annotation[
+            "fen"
+        ],
     )
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # Controlled Oracle update
-    # --------------------------------------------------------
+    # ========================================================
 
     model.train()
 
     loss_info = None
+
 
     for _ in range(
         N_UPDATE_STEPS
@@ -679,11 +1377,9 @@ def measure_annotation(
             set_to_none=True
         )
 
-        loss_info = (
-            compute_single_oracle_loss(
-                model,
-                annotation,
-            )
+        loss_info = compute_single_oracle_loss(
+            model,
+            annotation,
         )
 
         loss_info[
@@ -692,33 +1388,47 @@ def measure_annotation(
 
         optimizer.step()
 
-    # --------------------------------------------------------
-    # After
-    # --------------------------------------------------------
+
+    # ========================================================
+    # After Oracle update
+    # ========================================================
 
     after = evaluate_position(
         model,
-        annotation["fen"],
+        annotation[
+            "fen"
+        ],
     )
 
-    # --------------------------------------------------------
-    # Responses
-    # --------------------------------------------------------
+
+    # ========================================================
+    # Actor response
+    # ========================================================
 
     delta_kl = compute_kl(
         before,
         after,
     )
 
+
+    # ========================================================
+    # Critic response
+    # ========================================================
+
     delta_v_signed = (
-        after["value"]
+        after[
+            "value"
+        ]
         -
-        before["value"]
+        before[
+            "value"
+        ]
     )
 
     delta_v = abs(
         delta_v_signed
     )
+
 
     return {
         "delta_kl":
@@ -731,30 +1441,72 @@ def measure_annotation(
             delta_v_signed,
 
         "value_before":
-            before["value"],
+            before[
+                "value"
+            ],
 
         "value_after":
-            after["value"],
+            after[
+                "value"
+            ],
 
         "oracle_loss":
             float(
                 loss_info[
                     "loss"
-                ].detach().item()
+                ]
+                .detach()
+                .item()
             ),
 
         "oracle_policy_loss":
             float(
                 loss_info[
                     "policy_loss"
-                ].detach().item()
+                ]
+                .detach()
+                .item()
             ),
 
         "oracle_value_loss":
             float(
                 loss_info[
                     "value_loss"
-                ].detach().item()
+                ]
+                .detach()
+                .item()
+            ),
+
+        "weighted_oracle_policy_loss":
+            float(
+                loss_info[
+                    "weighted_policy_loss"
+                ]
+                .detach()
+                .item()
+            ),
+
+        "weighted_oracle_value_loss":
+            float(
+                loss_info[
+                    "weighted_value_loss"
+                ]
+                .detach()
+                .item()
+            ),
+
+        "confidence_weight":
+            float(
+                loss_info[
+                    "confidence_weight"
+                ]
+            ),
+
+        "criticality_weight":
+            float(
+                loss_info[
+                    "criticality_weight"
+                ]
             ),
 
         "oracle_weight":
@@ -772,60 +1524,93 @@ def measure_annotation(
 
 def main():
 
+    print()
     print("=" * 70)
-    print(
-        "ALBERTA - LOCAL ORACLE RESPONSE"
-    )
+    print("ALBERTA - DYNAMIC LOCAL ORACLE RESPONSE")
     print("=" * 70)
-
     print()
 
     print(
-        f"Device            : {DEVICE}"
+        f"Device                 : "
+        f"{DEVICE}"
     )
 
     print(
-        f"Checkpoint        : {CHECKPOINT_PATH}"
+        f"Current epoch          : "
+        f"{CURRENT_EPOCH}"
     )
 
     print(
-        f"Oracle queue      : {ORACLE_QUEUE_PATH}"
+        f"Checkpoint             : "
+        f"{CHECKPOINT_PATH}"
     )
 
     print(
-        f"Update steps      : {N_UPDATE_STEPS}"
+        f"Probe queue            : "
+        f"{ORACLE_QUEUE_PATH}"
     )
 
     print(
-        f"Learning rate     : {rl.LR}"
+        f"League directory       : "
+        f"{LEAGUE_DIR}"
     )
 
     print(
-        f"Policy coef       : {ORACLE_POLICY_COEF}"
+        f"Historical snapshots   : "
+        f"{LEAGUE_HISTORY}"
     )
 
     print(
-        f"Value coef        : {ORACLE_VALUE_COEF}"
+        f"Opening prior plies    : "
+        f"{OPENING_PRIOR_PLIES}"
     )
 
-    # --------------------------------------------------------
-    # Data
-    # --------------------------------------------------------
+    print(
+        f"Opening prior strength : "
+        f"{OPENING_PRIOR_STRENGTH}"
+    )
+
+    print(
+        f"Update steps           : "
+        f"{N_UPDATE_STEPS}"
+    )
+
+    print(
+        f"Configured RL LR       : "
+        f"{rl.LR}"
+    )
+
+    print(
+        f"Oracle policy coef     : "
+        f"{ORACLE_POLICY_COEF}"
+    )
+
+    print(
+        f"Oracle value coef      : "
+        f"{ORACLE_VALUE_COEF}"
+    )
+
+
+    # ========================================================
+    # Fixed human probe annotations
+    # ========================================================
 
     annotations = load_annotations()
 
     print()
 
     print(
-        f"Answered annotations: "
+        f"Answered calibration probes: "
         f"{len(annotations)}"
     )
 
-    # --------------------------------------------------------
-    # Frozen RL10 starting state
-    # --------------------------------------------------------
+
+    # ========================================================
+    # Current learner checkpoint
+    # ========================================================
 
     checkpoint = load_base_state()
+
 
     base_model_state = copy.deepcopy(
         checkpoint[
@@ -839,9 +1624,49 @@ def main():
         ]
     )
 
-    # --------------------------------------------------------
-    # Model + optimizer
-    # --------------------------------------------------------
+
+    # ========================================================
+    # Current learner used for feature refresh
+    # ========================================================
+
+    current_model = create_model()
+
+    current_model.load_state_dict(
+        base_model_state
+    )
+
+    current_model.eval()
+
+
+    # ========================================================
+    # BC7 opening prior
+    # ========================================================
+
+    bc_model = load_bc_model()
+
+
+    # ========================================================
+    # Current historical league
+    # ========================================================
+
+    league_models = load_current_league()
+
+
+    # ========================================================
+    # Refresh H / U / HU
+    # ========================================================
+
+    annotations = refresh_annotation_features(
+        annotations,
+        current_model,
+        bc_model,
+        league_models,
+    )
+
+
+    # ========================================================
+    # Model + optimizer used for controlled response probes
+    # ========================================================
 
     model = create_model()
 
@@ -850,9 +1675,39 @@ def main():
         lr=rl.LR,
     )
 
-    # --------------------------------------------------------
+
+    # ========================================================
+    # Important optimizer diagnostic
+    #
+    # optimizer.load_state_dict() overwrites optimizer
+    # hyperparameters such as LR.
+    # ========================================================
+
+    model.load_state_dict(
+        base_model_state
+    )
+
+    optimizer.load_state_dict(
+        base_optimizer_state
+    )
+
+
+    actual_lr = optimizer.param_groups[
+        0
+    ][
+        "lr"
+    ]
+
+    print()
+    print(
+        f"Actual checkpoint optimizer LR: "
+        f"{actual_lr}"
+    )
+
+
+    # ========================================================
     # Output
-    # --------------------------------------------------------
+    # ========================================================
 
     OUTPUT_PATH.parent.mkdir(
         parents=True,
@@ -861,17 +1716,29 @@ def main():
 
     results = []
 
-    # --------------------------------------------------------
-    # Probe loop
-    # --------------------------------------------------------
 
-    for i, annotation in enumerate(
+    # ========================================================
+    # Local-response probe loop
+    # ========================================================
+
+    print()
+    print("=" * 70)
+    print("MEASURING LOCAL ORACLE RESPONSE")
+    print("=" * 70)
+    print()
+
+
+    for (
+        i,
+        annotation,
+    ) in enumerate(
         annotations,
         start=1,
     ):
 
+
         # ====================================================
-        # Exact reset
+        # Exact learner + optimizer reset
         # ====================================================
 
         model.load_state_dict(
@@ -882,8 +1749,9 @@ def main():
             base_optimizer_state
         )
 
+
         # ====================================================
-        # Measure
+        # Controlled response measurement
         # ====================================================
 
         response = measure_annotation(
@@ -892,8 +1760,28 @@ def main():
             annotation,
         )
 
-        result = {
 
+        # ====================================================
+        # Final calibration row
+        #
+        # Dynamic:
+        #
+        #   H_t
+        #   U_t
+        #   HU_t
+        #   Delta_KL_t
+        #   Delta_V_t
+        #
+        # Fixed:
+        #
+        #   FEN
+        #   Oracle move
+        #   reward
+        #   confidence
+        #   criticality
+        # ====================================================
+
+        result = {
             "query_id":
                 annotation[
                     "query_id"
@@ -919,16 +1807,6 @@ def main():
                     "HU"
                 ],
 
-            "score":
-                annotation[
-                    "score"
-                ],
-
-            "I_norm":
-                annotation[
-                    "I_norm"
-                ],
-
             "oracle_move":
                 annotation[
                     "oracle_move"
@@ -949,27 +1827,35 @@ def main():
                     "reward"
                 ],
 
+            "learner_epoch":
+                CURRENT_EPOCH,
+
             **response,
         }
+
 
         results.append(
             result
         )
 
+
         print(
             f"[{i:03d}/{len(annotations):03d}] "
-            f"I={annotation['I_norm']:.4f} "
+            f"H={annotation['H']:.4f} "
+            f"| U={annotation['U']:.6e} "
             f"| KL={response['delta_kl']:.6e} "
             f"| dV={response['delta_v']:.6e} "
+            f"| w={response['oracle_weight']:.3f} "
             f"| V "
             f"{response['value_before']:+.4f}"
             f" -> "
             f"{response['value_after']:+.4f}"
         )
 
-    # --------------------------------------------------------
-    # Save
-    # --------------------------------------------------------
+
+    # ========================================================
+    # Save JSONL
+    # ========================================================
 
     with open(
         OUTPUT_PATH,
@@ -987,33 +1873,80 @@ def main():
                 "\n"
             )
 
-    # --------------------------------------------------------
+
+    # ========================================================
+    # Summary arrays
+    # ========================================================
+
+    H_values = np.asarray(
+        [
+            x[
+                "H"
+            ]
+            for x in results
+        ],
+        dtype=np.float64,
+    )
+
+    U_values = np.asarray(
+        [
+            x[
+                "U"
+            ]
+            for x in results
+        ],
+        dtype=np.float64,
+    )
+
+    HU_values = np.asarray(
+        [
+            x[
+                "HU"
+            ]
+            for x in results
+        ],
+        dtype=np.float64,
+    )
+
+    delta_kl = np.asarray(
+        [
+            x[
+                "delta_kl"
+            ]
+            for x in results
+        ],
+        dtype=np.float64,
+    )
+
+    delta_v = np.asarray(
+        [
+            x[
+                "delta_v"
+            ]
+            for x in results
+        ],
+        dtype=np.float64,
+    )
+
+    weights = np.asarray(
+        [
+            x[
+                "oracle_weight"
+            ]
+            for x in results
+        ],
+        dtype=np.float64,
+    )
+
+
+    # ========================================================
     # Summary
-    # --------------------------------------------------------
-
-    delta_kl = np.array(
-        [
-            x["delta_kl"]
-            for x in results
-        ],
-        dtype=np.float64,
-    )
-
-    delta_v = np.array(
-        [
-            x["delta_v"]
-            for x in results
-        ],
-        dtype=np.float64,
-    )
+    # ========================================================
 
     print()
     print("=" * 70)
-    print(
-        "LOCAL RESPONSE COMPLETE"
-    )
+    print("DYNAMIC LOCAL RESPONSE COMPLETE")
     print("=" * 70)
-
     print()
 
     print(
@@ -1021,8 +1954,86 @@ def main():
         f"{len(results)}"
     )
 
-    print()
 
+    print()
+    print(
+        "Refreshed H"
+    )
+
+    print(
+        f"  mean   : "
+        f"{H_values.mean():.6e}"
+    )
+
+    print(
+        f"  median : "
+        f"{np.median(H_values):.6e}"
+    )
+
+    print(
+        f"  min    : "
+        f"{H_values.min():.6e}"
+    )
+
+    print(
+        f"  max    : "
+        f"{H_values.max():.6e}"
+    )
+
+
+    print()
+    print(
+        "Refreshed U"
+    )
+
+    print(
+        f"  mean   : "
+        f"{U_values.mean():.6e}"
+    )
+
+    print(
+        f"  median : "
+        f"{np.median(U_values):.6e}"
+    )
+
+    print(
+        f"  min    : "
+        f"{U_values.min():.6e}"
+    )
+
+    print(
+        f"  max    : "
+        f"{U_values.max():.6e}"
+    )
+
+
+    print()
+    print(
+        "Refreshed HU"
+    )
+
+    print(
+        f"  mean   : "
+        f"{HU_values.mean():.6e}"
+    )
+
+    print(
+        f"  median : "
+        f"{np.median(HU_values):.6e}"
+    )
+
+    print(
+        f"  min    : "
+        f"{HU_values.min():.6e}"
+    )
+
+    print(
+        f"  max    : "
+        f"{HU_values.max():.6e}"
+    )
+
+
+    print()
     print(
         "Delta KL"
     )
@@ -1047,8 +2058,8 @@ def main():
         f"{delta_kl.max():.6e}"
     )
 
-    print()
 
+    print()
     print(
         "Delta V"
     )
@@ -1073,6 +2084,33 @@ def main():
         f"{delta_v.max():.6e}"
     )
 
+
+    print()
+    print(
+        "Oracle weights"
+    )
+
+    print(
+        f"  mean   : "
+        f"{weights.mean():.6f}"
+    )
+
+    print(
+        f"  median : "
+        f"{np.median(weights):.6f}"
+    )
+
+    print(
+        f"  min    : "
+        f"{weights.min():.6f}"
+    )
+
+    print(
+        f"  max    : "
+        f"{weights.max():.6f}"
+    )
+
+
     print()
 
     print(
@@ -1081,5 +2119,10 @@ def main():
     )
 
 
+# ============================================================
+# Entry point
+# ============================================================
+
 if __name__ == "__main__":
+
     main()

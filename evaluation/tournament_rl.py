@@ -43,7 +43,7 @@ RL_CHECKPOINT_DIR = (
 ORACLE_CHECKPOINT_DIR = (
     PROJECT_ROOT
     / "checkpoints"
-    / "oracle_epoch_eq"
+    / "after"
 )
 
 
@@ -133,7 +133,7 @@ def get_checkpoints():
 
         paths = list(
             RL_CHECKPOINT_DIR.glob(
-                "al_epoch_rndm_*.pt"
+                "al_epoch_rndm*.pt"
             )
         )
 
@@ -169,7 +169,7 @@ def get_checkpoints():
 
         paths = list(
             ORACLE_CHECKPOINT_DIR.glob(
-                "al_epoch_*.pt"
+                "rl_epoch_*.pt"
             )
         )
 
