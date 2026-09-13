@@ -1,123 +1,222 @@
+from __future__ import annotations
+
 from pathlib import Path
-import sys
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(PROJECT_ROOT))
-
+import chess.variant
 import torch
 
+from src.actions_space import (
+    ACTIONS,
+    ACTION_TO_INDEX,
+)
+from src.agents.actor_critic_agent import ActorCriticAgent
 from src.encoding import encode_board
-
-from src.models.resnet import ChessResNet
 from src.models.actor_critic import ActorCritic
+from src.models.resnet import ChessResNet
 
-from src.actions_space import ACTIONS
-from src.actions_space import ACTION_TO_INDEX
 
-from src.agents.ppo_agent import PPOAgent
+# ============================================================
+# Project paths
+# ============================================================
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 DEFAULT_CHECKPOINT = (
-    Path("/Users/tom/Desktop/Atomic")
+    PROJECT_ROOT
     / "checkpoints"
     / "oracle_epoch"
     / "al_epoch_30.pt"
 )
 
 
+# ============================================================
+# Default model configuration
+# ============================================================
+
+DEFAULT_CHANNELS = 32
+DEFAULT_BLOCKS = 4
+
+DEFAULT_TEMPERATURE = 2.0
+
+
+# ============================================================
+# RL bot
+# ============================================================
+
 class RLBot:
+    """
+    ALBERTA ActorCritic inference wrapper.
+
+    This wrapper is used by the lichess-bot integration and by
+    evaluation scripts that require the same deployment interface.
+
+    Move selection is delegated to ActorCriticAgent.
+
+    No BC opening prior is applied during inference.
+    """
 
     def __init__(
         self,
-        checkpoint=DEFAULT_CHECKPOINT,
-        temperature=2,
-        deterministic=False,
-    ):
+        checkpoint: str | Path = DEFAULT_CHECKPOINT,
+        temperature: float = DEFAULT_TEMPERATURE,
+        deterministic: bool = False,
+        device: str | torch.device = "cpu",
+        channels: int = DEFAULT_CHANNELS,
+        blocks: int = DEFAULT_BLOCKS,
+    ) -> None:
 
-        self.device = torch.device("cpu")
-
-        #
-        # Backbone BC
-        #
-
-        bc_model = ChessResNet(
-            num_actions=len(ACTIONS),
-            channels=32,
-            blocks=4,
+        self.device = torch.device(
+            device
         )
 
+        self.checkpoint = Path(
+            checkpoint
+        )
 
-        #
-        # Actor-Critic
-        #
+        if not self.checkpoint.exists():
+
+            raise FileNotFoundError(
+                f"RL checkpoint not found: {self.checkpoint}"
+            )
+
+        # ====================================================
+        # ActorCritic architecture
+        # ====================================================
+
+        bc_model = ChessResNet(
+            num_actions=len(
+                ACTIONS
+            ),
+            channels=channels,
+            blocks=blocks,
+        )
 
         self.model = ActorCritic(
             bc_model
-        ).to(self.device)
+        ).to(
+            self.device
+        )
 
-
-        #
-        # Checkpoint RL
-        #
+        # ====================================================
+        # Checkpoint
+        # ====================================================
 
         checkpoint_data = torch.load(
-            checkpoint,
+            self.checkpoint,
             map_location=self.device,
         )
 
-
-        self.model.load_state_dict(
-            checkpoint_data["model_state_dict"]
+        checkpoint_actions = checkpoint_data.get(
+            "actions"
         )
 
+        if (
+            checkpoint_actions is not None
+            and checkpoint_actions != len(ACTIONS)
+        ):
+
+            raise ValueError(
+                "Action-space mismatch in checkpoint: "
+                f"{checkpoint_actions} != {len(ACTIONS)}"
+            )
+
+        self.model.load_state_dict(
+            checkpoint_data[
+                "model_state_dict"
+            ]
+        )
 
         self.model.eval()
 
+        # ====================================================
+        # Inference agent
+        # ====================================================
 
-        #
-        # Agent PPO
-        #
-
-        self.agent = PPOAgent(
+        self.agent = ActorCriticAgent(
             self.model,
-            device="cpu",
+            device=self.device,
             deterministic=deterministic,
             temperature=temperature,
         )
 
-
         print(
-            f"Loaded RL checkpoint: {checkpoint}"
+            f"Loaded RL checkpoint: {self.checkpoint}"
         )
 
+    # ========================================================
+    # Move selection
+    # ========================================================
 
     @torch.no_grad()
     def choose_move(
         self,
-        board,
-    ):
+        board: chess.variant.AtomicBoard,
+    ) -> dict:
 
         return self.agent.choose_move(
             board
         )
 
+    # ========================================================
+    # Policy inspection
+    # ========================================================
+
     @torch.no_grad()
-    def evaluate_policy(self, board):
+    def evaluate_policy(
+        self,
+        board: chess.variant.AtomicBoard,
+    ) -> dict:
         """
-        Return the policy distribution over LEGAL moves.
+        Return the intrinsic ActorCritic policy over legal moves.
 
-        The distribution is the intrinsic policy:
-        no temperature is applied.
+        No temperature scaling is applied here.
+
+        The returned distribution therefore corresponds to:
+
+            softmax(legal RL logits)
+
+        rather than to the possibly temperature-scaled
+        move-selection distribution used by choose_move().
         """
 
-        x = encode_board(board)
-        x = x.unsqueeze(0).to(self.device)
+        legal_moves = list(
+            board.legal_moves
+        )
 
-        policy, value = self.model(x)
+        if not legal_moves:
 
-        logits = policy[0]
+            raise RuntimeError(
+                "evaluate_policy() called on a position "
+                "without legal moves."
+            )
 
-        legal_moves = list(board.legal_moves)
+        # ----------------------------------------------------
+        # Encode position
+        # ----------------------------------------------------
+
+        x = encode_board(
+            board
+        ).unsqueeze(
+            0
+        ).to(
+            self.device
+        )
+
+        # ----------------------------------------------------
+        # Forward pass
+        # ----------------------------------------------------
+
+        policy, value = self.model(
+            x
+        )
+
+        logits = policy[
+            0
+        ]
+
+        # ----------------------------------------------------
+        # Legal actions only
+        # ----------------------------------------------------
 
         legal_uci = [
             move.uci()
@@ -125,13 +224,19 @@ class RLBot:
         ]
 
         legal_indices = [
-            ACTION_TO_INDEX[uci]
+            ACTION_TO_INDEX[
+                uci
+            ]
             for uci in legal_uci
         ]
 
         legal_logits = logits[
             legal_indices
         ]
+
+        # ----------------------------------------------------
+        # Intrinsic policy distribution
+        # ----------------------------------------------------
 
         log_probs = torch.log_softmax(
             legal_logits,
@@ -143,13 +248,23 @@ class RLBot:
         )
 
         entropy = -(
-            probs * log_probs
+            probs
+            * log_probs
         ).sum().item()
 
         return {
-            "moves": legal_uci,
-            "probs": probs.cpu().tolist(),
-            "log_probs": log_probs.cpu().tolist(),
-            "entropy": entropy,
-            "value": value.item(),
+            "moves":
+                legal_uci,
+
+            "probs":
+                probs.cpu().tolist(),
+
+            "log_probs":
+                log_probs.cpu().tolist(),
+
+            "entropy":
+                entropy,
+
+            "value":
+                value.item(),
         }

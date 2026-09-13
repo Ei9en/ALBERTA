@@ -1,76 +1,134 @@
-from pathlib import Path
-import sys
+from __future__ import annotations
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(PROJECT_ROOT))
+from collections.abc import Sequence
 
 import chess
+import chess.variant
 import torch
+from torch import nn
 
+from src.actions_space import ACTION_TO_INDEX
 from src.encoding import encode_board, encode_boards
-from src.actions_space import (
-    ACTION_TO_INDEX,
-)
 
 
 class ActorCriticAgent:
+    """
+    Inference wrapper for an ALBERTA ActorCritic model.
+
+    Supports:
+        - deterministic greedy move selection;
+        - stochastic temperature-based sampling;
+        - single-position inference;
+        - batched inference.
+
+    Unlike PPOAgent, this agent does not apply a BC opening prior.
+
+    Random sampling uses PyTorch's global RNG. The calling script
+    is responsible for setting the random seed when reproducible
+    stochastic evaluation is required.
+    """
 
     def __init__(
         self,
-        model,
-        device="cpu",
-        deterministic=False,
-        temperature=0.75,
-    ):
+        model: nn.Module,
+        device: str | torch.device = "cpu",
+        deterministic: bool = False,
+        temperature: float = 0.75,
+    ) -> None:
 
-        self.device = torch.device(device)
+        if temperature < 0.0:
+            raise ValueError(
+                "temperature cannot be negative."
+            )
 
-        self.model = model.to(self.device)
+        self.device = torch.device(
+            device
+        )
 
-        self.deterministic = deterministic
+        self.model = model.to(
+            self.device
+        )
 
-        self.temperature = temperature
+        self.deterministic = (
+            deterministic
+        )
+
+        self.temperature = (
+            temperature
+        )
 
         self.model.eval()
 
 
+    # ========================================================
+    # Single move
+    # ========================================================
+
     @torch.no_grad()
     def choose_move(
         self,
-        board: chess.Board,
-    ):
+        board: chess.variant.AtomicBoard,
+    ) -> dict:
+        """
+        Select one legal move for a single Atomic Chess state.
 
-        x = encode_board(board)
+        Entropy is computed from the legal policy before
+        temperature scaling.
+        """
 
-        x = x.unsqueeze(0).to(self.device)
+        legal_moves = list(
+            board.legal_moves
+        )
 
-        policy, value = self.model(x)
+        if not legal_moves:
+            raise RuntimeError(
+                "choose_move() called on a position "
+                "without legal moves."
+            )
 
-        logits = policy[0]
+        # ----------------------------------------------------
+        # Encode position
+        # ----------------------------------------------------
 
-        #
-        # Coups légaux
-        #
-        legal_moves = {
-            move.uci(): move
-            for move in board.legal_moves
-        }
+        x = encode_board(
+            board
+        ).unsqueeze(0).to(
+            self.device
+        )
+
+        # ----------------------------------------------------
+        # Forward pass
+        # ----------------------------------------------------
+
+        policy, value = self.model(
+            x
+        )
+
+        logits = (
+            policy[0]
+        )
+
+        # ----------------------------------------------------
+        # Legal actions
+        # ----------------------------------------------------
 
         legal_indices = [
-            ACTION_TO_INDEX[uci]
-            for uci in legal_moves
+            ACTION_TO_INDEX[
+                move.uci()
+            ]
+            for move in legal_moves
         ]
 
-        #
-        # Logits légaux uniquement
-        #
-        legal_logits = logits[
-            legal_indices
-        ]
+        legal_logits = (
+            logits[
+                legal_indices
+            ]
+        )
 
-        #
-        # Entropie avant température
-        #
+        # ----------------------------------------------------
+        # Entropy before temperature scaling
+        # ----------------------------------------------------
+
         log_probs = torch.log_softmax(
             legal_logits,
             dim=0,
@@ -81,20 +139,24 @@ class ActorCriticAgent:
         )
 
         entropy = -(
-            probs * log_probs
+            probs
+            * log_probs
         ).sum().item()
 
-        #
-        # Choix du coup
-        #
+        # ----------------------------------------------------
+        # Move selection
+        # ----------------------------------------------------
+
         if (
             self.deterministic
-            or self.temperature <= 0
+            or self.temperature <= 0.0
         ):
 
-            position = torch.argmax(
-                legal_logits
-            ).item()
+            position = (
+                torch.argmax(
+                    legal_logits
+                ).item()
+            )
 
         else:
 
@@ -103,134 +165,140 @@ class ActorCriticAgent:
                 / self.temperature
             )
 
-            sampling_probs = torch.softmax(
-                sampling_logits,
-                dim=0,
+            sampling_probs = (
+                torch.softmax(
+                    sampling_logits,
+                    dim=0,
+                )
             )
 
-            position = torch.multinomial(
-                sampling_probs,
-                1,
-            ).item()
+            position = (
+                torch.multinomial(
+                    sampling_probs,
+                    num_samples=1,
+                ).item()
+            )
 
-        #
-        # Conversion position légale -> action globale
-        #
-        action = legal_indices[position]
+        # ----------------------------------------------------
+        # Legal-position index -> global action / move
+        # ----------------------------------------------------
 
-        move_uci = list(
-            legal_moves.keys()
-        )[position]
+        action = (
+            legal_indices[
+                position
+            ]
+        )
+
+        move = (
+            legal_moves[
+                position
+            ]
+        )
 
         return {
-            "move": legal_moves[move_uci],
-            "action": action,
-            "value": value.item(),
-            "entropy": entropy,
-            "fen": board.fen(),
+            "move":
+                move,
+
+            "action":
+                action,
+
+            "value":
+                value.item(),
+
+            "entropy":
+                entropy,
+
+            "fen":
+                board.fen(),
         }
 
+
+    # ========================================================
+    # Batched moves
+    # ========================================================
 
     @torch.no_grad()
     def choose_moves(
         self,
-        boards,
-    ):
+        boards: Sequence[
+            chess.variant.AtomicBoard
+        ],
+    ) -> list[dict]:
+        """
+        Select one legal move for each board in a batch.
+
+        The policy semantics are identical to choose_move(), while
+        neural-network inference is batched.
+        """
 
         if len(boards) == 0:
             return []
 
-        batch_size = len(boards)
-
-        #
-        # ========================================================
-        # Encodage batch
-        # ========================================================
-        #
-
-        x = encode_boards(
+        batch_size = len(
             boards
-        ).to(self.device)
+        )
 
-        #
-        # ========================================================
-        # Forward batch
-        # ========================================================
-        #
+        # ====================================================
+        # Legal actions
+        # ====================================================
 
-        policies, values = self.model(x)
+        board_legal_moves: list[
+            list[chess.Move]
+        ] = []
 
-        #
-        # ========================================================
-        # Coups légaux
-        # ========================================================
-        #
-        # On conserve directement :
-        #
-        #   - les indices globaux des actions
-        #   - les objets Move correspondants
-        #
-        # afin d'éviter plus tard :
-        #
-        #   action -> INDEX_TO_ACTION -> UCI -> Move
-        #
-
-        legal_indices = []
-        legal_moves = []
-        max_legal_moves = 0
+        legal_indices: list[
+            list[int]
+        ] = []
 
         for board in boards:
 
-            board_legal_moves = list(
+            moves = list(
                 board.legal_moves
             )
 
-            board_indices = []
-            board_moves = {}
-
-            for move in board_legal_moves:
-
-                uci = move.uci()
-
-                action = ACTION_TO_INDEX[
-                    uci
-                ]
-
-                board_indices.append(
-                    action
+            if not moves:
+                raise RuntimeError(
+                    "choose_moves() received a position "
+                    "without legal moves."
                 )
 
-                board_moves[action] = move
+            indices = [
+                ACTION_TO_INDEX[
+                    move.uci()
+                ]
+                for move in moves
+            ]
+
+            board_legal_moves.append(
+                moves
+            )
 
             legal_indices.append(
-                board_indices
+                indices
             )
 
-            legal_moves.append(
-                board_moves
-            )
+        max_legal_moves = max(
+            len(indices)
+            for indices in legal_indices
+        )
 
-            max_legal_moves = max(
-                max_legal_moves,
-                len(board_indices),
-            )
+        # ====================================================
+        # Batched forward pass
+        # ====================================================
 
-        #
-        # ========================================================
-        # Indices légaux batchés
-        # ========================================================
-        #
-        # On construit maintenant un tenseur :
-        #
-        #     [batch_size, max_legal_moves]
-        #
-        # au lieu de :
-        #
-        #     [batch_size, action_size]
-        #
-        # Les positions de padding sont remplies avec 0,
-        # puis masquées avant les calculs de probabilité.
-        #
+        x = encode_boards(
+            boards
+        ).to(
+            self.device
+        )
+
+        policies, values = self.model(
+            x
+        )
+
+        # ====================================================
+        # Padded legal-action representation
+        # ====================================================
 
         legal_index_tensor = torch.zeros(
             (
@@ -254,12 +322,14 @@ class ActorCriticAgent:
             legal_indices
         ):
 
-            n = len(indices)
+            n = len(
+                indices
+            )
 
             legal_index_tensor[
                 i,
                 :n,
-            ] = torch.tensor(
+            ] = torch.as_tensor(
                 indices,
                 dtype=torch.long,
                 device=self.device,
@@ -270,33 +340,30 @@ class ActorCriticAgent:
                 :n,
             ] = True
 
-        #
-        # ========================================================
-        # Extraction des logits légaux
-        # ========================================================
-        #
-        # On ne travaille désormais que sur les coups légaux.
-        #
+        # ====================================================
+        # Legal logits only
+        # ====================================================
 
         legal_logits = policies.gather(
             1,
             legal_index_tensor,
         )
 
-        #
-        # Les positions de padding deviennent -inf.
-        #
-
-        legal_logits = legal_logits.masked_fill(
-            ~legal_mask,
-            float("-inf"),
+        legal_logits = (
+            legal_logits.masked_fill(
+                ~legal_mask,
+                float("-inf"),
+            )
         )
 
+        # ====================================================
+        # Entropy before temperature scaling
         #
-        # ========================================================
-        # Entropie AVANT température
-        # ========================================================
+        # Padding log-probabilities are replaced by zero before
+        # multiplication to avoid:
         #
+        #     0 * (-inf) -> NaN
+        # ====================================================
 
         log_probs = torch.log_softmax(
             legal_logits,
@@ -307,19 +374,27 @@ class ActorCriticAgent:
             log_probs
         )
 
-        entropy = -(
-            probs * log_probs
-        ).sum(dim=1)
+        safe_log_probs = (
+            log_probs.masked_fill(
+                ~legal_mask,
+                0.0,
+            )
+        )
 
-        #
-        # ========================================================
-        # Choix des coups
-        # ========================================================
-        #
+        entropy = -(
+            probs
+            * safe_log_probs
+        ).sum(
+            dim=1
+        )
+
+        # ====================================================
+        # Move selection
+        # ====================================================
 
         if (
             self.deterministic
-            or self.temperature <= 0
+            or self.temperature <= 0.0
         ):
 
             positions = torch.argmax(
@@ -334,34 +409,52 @@ class ActorCriticAgent:
                 / self.temperature
             )
 
-            sampling_probs = torch.softmax(
-                sampling_logits,
-                dim=1,
+            sampling_probs = (
+                torch.softmax(
+                    sampling_logits,
+                    dim=1,
+                )
             )
 
-            positions = torch.multinomial(
-                sampling_probs,
-                1,
-            ).squeeze(1)
+            positions = (
+                torch.multinomial(
+                    sampling_probs,
+                    num_samples=1,
+                ).squeeze(
+                    1
+                )
+            )
 
-        #
-        # ========================================================
-        # Conversion position légale -> action -> Move
-        # ========================================================
-        #
+        # ====================================================
+        # Convert legal position -> global action -> Move
+        # ====================================================
 
         results = []
 
-        for i in range(batch_size):
+        for i in range(
+            batch_size
+        ):
 
-            position = positions[i].item()
+            position = (
+                positions[
+                    i
+                ].item()
+            )
 
-            action = legal_index_tensor[
-                i,
-                position,
-            ].item()
+            action = (
+                legal_index_tensor[
+                    i,
+                    position,
+                ].item()
+            )
 
-            move = legal_moves[i][action]
+            move = (
+                board_legal_moves[
+                    i
+                ][
+                    position
+                ]
+            )
 
             results.append(
                 {
@@ -372,13 +465,19 @@ class ActorCriticAgent:
                         action,
 
                     "value":
-                        values[i].item(),
+                        values[
+                            i
+                        ].item(),
 
                     "entropy":
-                        entropy[i].item(),
+                        entropy[
+                            i
+                        ].item(),
 
                     "fen":
-                        boards[i].fen(),
+                        boards[
+                            i
+                        ].fen(),
                 }
             )
 

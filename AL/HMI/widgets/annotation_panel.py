@@ -1,19 +1,28 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import pyqtSignal
-
 from PyQt6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QGroupBox,
-    QRadioButton,
     QCheckBox,
+    QGroupBox,
+    QHBoxLayout,
     QPushButton,
+    QRadioButton,
+    QVBoxLayout,
+    QWidget,
 )
 
 
 class AnnotationPanel(QWidget):
+    """
+    Annotation controls for the ALBERTA Human Oracle Interface.
+
+    The panel supports two independent annotation families:
+
+        - terminal reward;
+        - Oracle decision annotation.
+
+    Both modes are enabled by default.
+    """
 
     validated = pyqtSignal(dict)
 
@@ -38,25 +47,44 @@ class AnnotationPanel(QWidget):
     def __init__(
         self,
         parent=None,
-    ):
+    ) -> None:
 
-        super().__init__(parent)
+        super().__init__(
+            parent
+        )
 
-        self.confidence_buttons = {}
-        self.situation_buttons = {}
-        self.reward_buttons = {}
+        self.confidence_buttons: dict[
+            str,
+            QRadioButton,
+        ] = {}
 
-        self.build_ui()
+        self.situation_buttons: dict[
+            str,
+            QRadioButton,
+        ] = {}
 
-    # =====================================================
+        self.reward_buttons: dict[
+            int,
+            QRadioButton,
+        ] = {}
+
+        self._build_ui()
+
+    # ========================================================
     # UI
-    # =====================================================
+    # ========================================================
 
-    def build_ui(self):
+    def _build_ui(
+        self,
+    ) -> None:
 
-        layout = QVBoxLayout(self)
+        layout = QVBoxLayout(
+            self
+        )
 
-        layout.setSpacing(15)
+        layout.setSpacing(
+            15
+        )
 
         self.setStyleSheet(
             """
@@ -99,9 +127,9 @@ class AnnotationPanel(QWidget):
             """
         )
 
-        # =================================================
+        # ====================================================
         # Annotation modes
-        # =================================================
+        # ====================================================
 
         mode_group = QGroupBox(
             "Annotation modes"
@@ -117,9 +145,14 @@ class AnnotationPanel(QWidget):
             "Oracle decision"
         )
 
-        # Reward-only is the default for the current pass.
-        self.reward_mode.setChecked(True)
-        self.oracle_mode.setChecked(True)
+        # Both annotation families are enabled by default.
+        self.reward_mode.setChecked(
+            True
+        )
+
+        self.oracle_mode.setChecked(
+            True
+        )
 
         self.reward_mode.toggled.connect(
             self.update_mode_state
@@ -145,9 +178,9 @@ class AnnotationPanel(QWidget):
             mode_group
         )
 
-        # =================================================
+        # ====================================================
         # Reward
-        # =================================================
+        # ====================================================
 
         self.reward_group = QGroupBox(
             "Reward"
@@ -172,7 +205,9 @@ class AnnotationPanel(QWidget):
                 label
             )
 
-            self.reward_buttons[value] = button
+            self.reward_buttons[
+                value
+            ] = button
 
             reward_layout.addWidget(
                 button
@@ -186,14 +221,16 @@ class AnnotationPanel(QWidget):
             self.reward_group
         )
 
-        # +1 selected by default.
+        # Default reward annotation.
         self.reward_buttons[
             1
-        ].setChecked(True)
+        ].setChecked(
+            True
+        )
 
-        # =================================================
+        # ====================================================
         # Oracle decision
-        # =================================================
+        # ====================================================
 
         self.oracle_group = QWidget()
 
@@ -208,9 +245,9 @@ class AnnotationPanel(QWidget):
             0,
         )
 
-        # -------------------------------------------------
+        # ----------------------------------------------------
         # Confidence
-        # -------------------------------------------------
+        # ----------------------------------------------------
 
         confidence_group = QGroupBox(
             "Confidence"
@@ -224,7 +261,9 @@ class AnnotationPanel(QWidget):
                 label
             )
 
-            self.confidence_buttons[value] = button
+            self.confidence_buttons[
+                value
+            ] = button
 
             confidence_layout.addWidget(
                 button
@@ -238,12 +277,12 @@ class AnnotationPanel(QWidget):
             confidence_group
         )
 
-        # -------------------------------------------------
-        # Decision criticality
-        # -------------------------------------------------
+        # ----------------------------------------------------
+        # Decision situation
+        # ----------------------------------------------------
 
         situation_group = QGroupBox(
-            "Decision criticality"
+            "Decision situation"
         )
 
         situation_layout = QVBoxLayout()
@@ -254,7 +293,9 @@ class AnnotationPanel(QWidget):
                 label
             )
 
-            self.situation_buttons[value] = button
+            self.situation_buttons[
+                value
+            ] = button
 
             situation_layout.addWidget(
                 button
@@ -272,18 +313,22 @@ class AnnotationPanel(QWidget):
             self.oracle_group
         )
 
-        # Defaults for Oracle mode.
+        # Default Oracle annotations.
         self.confidence_buttons[
             "high"
-        ].setChecked(True)
+        ].setChecked(
+            True
+        )
 
         self.situation_buttons[
             "critical"
-        ].setChecked(True)
+        ].setChecked(
+            True
+        )
 
-        # =================================================
+        # ====================================================
         # Validate
-        # =================================================
+        # ====================================================
 
         self.validate_button = QPushButton(
             "✓ Validate annotation"
@@ -301,16 +346,21 @@ class AnnotationPanel(QWidget):
 
         self.update_mode_state()
 
-    # =====================================================
+    # ========================================================
     # Mode state
-    # =====================================================
+    # ========================================================
 
     def update_mode_state(
         self,
-    ):
+    ) -> None:
 
-        reward_enabled = self.reward_mode.isChecked()
-        oracle_enabled = self.oracle_mode.isChecked()
+        reward_enabled = (
+            self.reward_mode.isChecked()
+        )
+
+        oracle_enabled = (
+            self.oracle_mode.isChecked()
+        )
 
         self.reward_group.setEnabled(
             reward_enabled
@@ -320,9 +370,15 @@ class AnnotationPanel(QWidget):
             oracle_enabled
         )
 
-    # =====================================================
-    # API
-    # =====================================================
+        # Prevent validation when no annotation family is active.
+        self.validate_button.setEnabled(
+            reward_enabled
+            or oracle_enabled
+        )
+
+    # ========================================================
+    # Annotation API
+    # ========================================================
 
     def get_annotation(
         self,
@@ -330,11 +386,11 @@ class AnnotationPanel(QWidget):
 
         annotation = {}
 
-        # -------------------------------------------------
+        # ----------------------------------------------------
         # Reward
-        # -------------------------------------------------
+        # ----------------------------------------------------
 
-        if self.reward_mode.isChecked():
+        if self.reward_enabled():
 
             reward = None
 
@@ -351,25 +407,33 @@ class AnnotationPanel(QWidget):
                     "Reward annotation is required."
                 )
 
-            annotation["reward"] = reward
+            annotation[
+                "reward"
+            ] = reward
 
-        # -------------------------------------------------
+        # ----------------------------------------------------
         # Oracle decision
-        # -------------------------------------------------
+        # ----------------------------------------------------
 
-        if self.oracle_mode.isChecked():
+        if self.oracle_enabled():
 
             confidence = None
             situation = None
 
-            for value, button in self.confidence_buttons.items():
+            for (
+                value,
+                button,
+            ) in self.confidence_buttons.items():
 
                 if button.isChecked():
 
                     confidence = value
                     break
 
-            for value, button in self.situation_buttons.items():
+            for (
+                value,
+                button,
+            ) in self.situation_buttons.items():
 
                 if button.isChecked():
 
@@ -385,15 +449,16 @@ class AnnotationPanel(QWidget):
             if situation is None:
 
                 raise ValueError(
-                    "Decision criticality annotation is required."
+                    "Decision situation annotation is required."
                 )
 
-            annotation["confidence"] = confidence
-            annotation["situation"] = situation
+            annotation[
+                "confidence"
+            ] = confidence
 
-        # -------------------------------------------------
-        # At least one mode must be active.
-        # -------------------------------------------------
+            annotation[
+                "situation"
+            ] = situation
 
         if not annotation:
 
@@ -403,53 +468,65 @@ class AnnotationPanel(QWidget):
 
         return annotation
 
-    # =====================================================
+    # ========================================================
     # Mode API
-    # =====================================================
+    # ========================================================
 
     def reward_enabled(
         self,
     ) -> bool:
 
-        return self.reward_mode.isChecked()
+        return (
+            self.reward_mode.isChecked()
+        )
 
     def oracle_enabled(
         self,
     ) -> bool:
 
-        return self.oracle_mode.isChecked()
+        return (
+            self.oracle_mode.isChecked()
+        )
 
-    # =====================================================
+    # ========================================================
     # Reset
-    # =====================================================
+    # ========================================================
 
     def reset(
         self,
-    ):
+    ) -> None:
 
         self.reward_buttons[
             1
-        ].setChecked(True)
+        ].setChecked(
+            True
+        )
 
         self.confidence_buttons[
             "high"
-        ].setChecked(True)
+        ].setChecked(
+            True
+        )
 
         self.situation_buttons[
             "critical"
-        ].setChecked(True)
+        ].setChecked(
+            True
+        )
 
-    # =====================================================
+    # ========================================================
     # Validate
-    # =====================================================
+    # ========================================================
 
     def validate(
         self,
-    ):
+    ) -> None:
 
         try:
 
-            annotation = self.get_annotation()
+            annotation = (
+                self.get_annotation()
+            )
 
         except ValueError:
 

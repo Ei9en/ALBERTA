@@ -1,36 +1,49 @@
-from pathlib import Path
-import chess
-from chess.engine import PlayResult
-from lib.engine_wrapper import MinimalEngine
-from lib.lichess_types import HOMEMADE_ARGS_TYPE
+from __future__ import annotations
+
 import logging
 
+import chess
+from chess.engine import PlayResult
+
 from atomic_engine.rl_bot import RLBot
-from atomic_engine.bc_bot_stochastic import BCBotStochastic
+from lib.engine_wrapper import MinimalEngine
+from lib.lichess_types import HOMEMADE_ARGS_TYPE
 
 
-logger = logging.getLogger(__name__)
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+logger = logging.getLogger(
+    __name__
+)
 
 
 class ExampleEngine(MinimalEngine):
-    """Base class required by lichess-bot homemade mode."""
+    """
+    Base class required by lichess-bot homemade mode.
+    """
+
     pass
 
 
-class AtomicRandom(ExampleEngine):
-    """Bot Atomic utilisant RL."""
+class AtomicRL(ExampleEngine):
+    """
+    ALBERTA Atomic Chess engine for lichess-bot.
 
-    def __init__(self, *args, **kwargs):
+    Move selection is delegated to RLBot.
+    """
 
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        *args,
+        **kwargs,
+    ) -> None:
 
-        self.bot = RLBot(
-            temperature=2,
+        super().__init__(
+            *args,
+            **kwargs,
         )
 
+        self.bot = RLBot(
+            temperature=2.0,
+        )
 
     def search(
         self,
@@ -38,12 +51,17 @@ class AtomicRandom(ExampleEngine):
         *args: HOMEMADE_ARGS_TYPE,
     ) -> PlayResult:
 
-        info = self.bot.choose_move(board)
+        info = self.bot.choose_move(
+            board
+        )
 
-        move = info["move"]
+        move = info[
+            "move"
+        ]
 
         logger.info(
-            f"RL joue : {move}"
+            "RL move: %s",
+            move,
         )
 
         return PlayResult(

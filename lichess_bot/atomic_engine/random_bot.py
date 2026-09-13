@@ -1,21 +1,33 @@
+from __future__ import annotations
+
 import random
+
+import chess
 
 
 class RandomBot:
-    """Bot qui choisit un coup légal au hasard."""
+    """
+    Baseline bot that selects uniformly among legal moves.
 
-    def choose_move(self, board):
-        """
-        Retourne un coup légal choisi aléatoirement.
+    Randomness uses Python's global RNG.
+    Reproducibility is controlled by the caller.
+    """
 
-        Parameters
-        ----------
-        board : chess.Board
-            Position actuelle.
+    def choose_move(
+        self,
+        board: chess.Board,
+    ) -> chess.Move:
 
-        Returns
-        -------
-        chess.Move
-            Coup sélectionné.
-        """
-        return random.choice(list(board.legal_moves))
+        legal_moves = list(
+            board.legal_moves
+        )
+
+        if not legal_moves:
+            raise RuntimeError(
+                "choose_move() called on a position "
+                "without legal moves."
+            )
+
+        return random.choice(
+            legal_moves
+        )

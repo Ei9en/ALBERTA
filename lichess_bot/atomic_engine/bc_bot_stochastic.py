@@ -1,16 +1,32 @@
-from pathlib import Path
-import sys
+from __future__ import annotations
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(PROJECT_ROOT))
+import sys
+from pathlib import Path
 
 import chess
 import torch
 
-from src.models.resnet import ChessResNet
-from src.encoding import encode_fen
-from src.actions_space import ACTIONS, INDEX_TO_ACTION
 
+# ============================================================
+# Project imports
+# ============================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(PROJECT_ROOT),
+    )
+
+from src.actions_space import ACTIONS, ACTION_TO_INDEX
+from src.encoding import encode_board
+from src.models.resnet import ChessResNet
+
+
+# ============================================================
+# Defaults
+# ============================================================
 
 DEFAULT_CHECKPOINT = (
     PROJECT_ROOT
@@ -19,101 +35,186 @@ DEFAULT_CHECKPOINT = (
     / "bc_epoch_7.pt"
 )
 
+DEFAULT_CHANNELS = 32
+DEFAULT_BLOCKS = 4
+DEFAULT_TEMPERATURE = 2.0
+
+
+# ============================================================
+# Stochastic BC bot
+# ============================================================
 
 class BCBotStochastic:
+    """
+    Stochastic Behavioral Cloning inference wrapper.
+
+    Move selection samples from the BC policy restricted to
+    legal moves and scaled by temperature.
+
+    Randomness uses PyTorch's global RNG and is controlled by
+    the calling evaluation script.
+    """
 
     def __init__(
         self,
-        checkpoint=DEFAULT_CHECKPOINT,
-        temperature=2,
-    ):
+        checkpoint: str | Path = DEFAULT_CHECKPOINT,
+        temperature: float = DEFAULT_TEMPERATURE,
+        device: str | torch.device = "cpu",
+        channels: int = DEFAULT_CHANNELS,
+        blocks: int = DEFAULT_BLOCKS,
+    ) -> None:
 
-        self.device = torch.device("cpu")
+        if temperature <= 0.0:
+            raise ValueError(
+                "temperature must be strictly positive."
+            )
 
-        self.temperature = temperature
+        self.device = torch.device(
+            device
+        )
+
+        self.checkpoint = Path(
+            checkpoint
+        )
+
+        self.temperature = float(
+            temperature
+        )
+
+        if not self.checkpoint.exists():
+            raise FileNotFoundError(
+                f"BC checkpoint not found: {self.checkpoint}"
+            )
 
         self.model = ChessResNet(
             num_actions=len(ACTIONS),
-            channels=32,
-            blocks=4,
-        ).to(self.device)
-
+            channels=channels,
+            blocks=blocks,
+        ).to(
+            self.device
+        )
 
         checkpoint_data = torch.load(
-            checkpoint,
+            self.checkpoint,
             map_location=self.device,
         )
 
+        checkpoint_actions = checkpoint_data.get(
+            "actions"
+        )
+
+        if (
+            checkpoint_actions is not None
+            and checkpoint_actions != len(ACTIONS)
+        ):
+            raise ValueError(
+                "Action-space mismatch in checkpoint: "
+                f"{checkpoint_actions} != {len(ACTIONS)}"
+            )
 
         self.model.load_state_dict(
-            checkpoint_data["model_state_dict"]
+            checkpoint_data[
+                "model_state_dict"
+            ]
         )
 
         self.model.eval()
 
-
         print(
-            f"Loaded checkpoint: {checkpoint}"
+            f"Loaded BC checkpoint: {self.checkpoint}"
         )
 
+    # ========================================================
+    # Move selection
+    # ========================================================
 
     @torch.no_grad()
     def choose_move(
         self,
         board: chess.Board,
-    ):
+    ) -> dict:
 
-        x = encode_fen(
-            board.fen()
+        legal_moves = list(
+            board.legal_moves
         )
 
-        x = x.unsqueeze(0).to(self.device)
+        if not legal_moves:
+            raise RuntimeError(
+                "choose_move() called on a position "
+                "without legal moves."
+            )
 
+        x = encode_board(
+            board
+        ).unsqueeze(
+            0
+        ).to(
+            self.device
+        )
 
-        logits = self.model(x)[0]
+        logits = self.model(
+            x
+        )[0]
 
+        legal_indices = [
+            ACTION_TO_INDEX[
+                move.uci()
+            ]
+            for move in legal_moves
+        ]
 
-        legal_moves = {
-            move.uci(): move
-            for move in board.legal_moves
-        }
+        legal_logits = logits[
+            legal_indices
+        ]
 
+        # ----------------------------------------------------
+        # Temperature-scaled sampling distribution
+        # ----------------------------------------------------
 
-        logits = logits.clone()
+        sampling_logits = (
+            legal_logits
+            / self.temperature
+        )
 
-
-        for idx, uci in INDEX_TO_ACTION.items():
-
-            if uci not in legal_moves:
-
-                logits[idx] = float("-inf")
-
-
-        #
-        # Sampling avec température
-        #
-
-        probs = torch.softmax(
-            logits / self.temperature,
+        sampling_log_probs = torch.log_softmax(
+            sampling_logits,
             dim=0,
         )
 
+        sampling_probs = torch.exp(
+            sampling_log_probs
+        )
 
-        action = torch.multinomial(
-            probs,
-            1,
+        position = torch.multinomial(
+            sampling_probs,
+            num_samples=1,
         ).item()
 
+        action = legal_indices[
+            position
+        ]
 
-        move_uci = INDEX_TO_ACTION[action]
+        move = legal_moves[
+            position
+        ]
+
+        # Historical semantics:
+        # entropy corresponds to the actual sampling policy.
+        entropy = -(
+            sampling_probs
+            * sampling_log_probs
+        ).sum().item()
 
         return {
-            "action": action,
-            "move": legal_moves[move_uci],
-            "value": 0.0,
-            "entropy": (
-                -(probs * torch.log(probs + 1e-8))
-                .sum()
-                .item()
-            ),
+            "action":
+                action,
+
+            "move":
+                move,
+
+            "value":
+                0.0,
+
+            "entropy":
+                entropy,
         }

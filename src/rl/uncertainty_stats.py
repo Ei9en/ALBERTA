@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 from pathlib import Path
 
@@ -5,95 +7,134 @@ import torch
 
 
 class UncertaintyStats:
+    """
+    Collector for state-level uncertainty statistics generated
+    during self-play.
 
-    def __init__(self):
+    Stored quantities:
+        H  : policy entropy
+        U  : league-based value disagreement
+        HU : interaction H * U
+    """
 
-        self.data = []
+    def __init__(
+        self,
+    ) -> None:
 
+        self.data: list[dict] = []
+
+
+    # ========================================================
+    # Uncertainty
+    # ========================================================
 
     @torch.no_grad()
     def compute_uncertainty(
         self,
-        x,
+        x: torch.Tensor,
         league,
         current_model,
-    ):
+    ) -> float:
+        """
+        Compute league-based value uncertainty for one state.
 
-        values = []
+        The canonical definition of U(s) is implemented by
+        League.uncertainty(). This wrapper is retained for
+        compatibility with the existing training pipeline.
+        """
 
-        #
-        # Snapshots league
-        #
-        for model in league.agents.values():
-
-            model.eval()
-
-            _, value = model(x)
-
-            values.append(
-                value.item()
-            )
-
-
-        #
-        # Modèle courant
-        #
-        current_model.eval()
-
-        _, value = current_model(x)
-
-        values.append(
-            value.item()
+        return league.uncertainty(
+            x=x,
+            current_model=current_model,
         )
 
 
-        if len(values) < 2:
-
-            return 0.0
-
-
-        return torch.var(
-            torch.tensor(values),
-            unbiased=False,
-        ).item()
-
+    # ========================================================
+    # Add observation
+    # ========================================================
 
     def add(
         self,
-        fen,
-        action,
-        entropy,
-        uncertainty,
-        HU,
+        fen: str,
+        action: int,
+        entropy: float,
+        uncertainty: float,
+        HU: float,
         result,
-    ):
+    ) -> None:
+        """
+        Store one state-level uncertainty observation.
+
+        The existing JSON field names are intentionally kept
+        unchanged for compatibility with downstream analysis.
+        """
 
         self.data.append(
             {
-                "fen": fen,
-                "actions": action,
-                "H": entropy,
-                "U": uncertainty,
-                "HU": HU,
-                "result": result,
+                "fen":
+                    fen,
+
+                "actions":
+                    action,
+
+                "H":
+                    entropy,
+
+                "U":
+                    uncertainty,
+
+                "HU":
+                    HU,
+
+                "result":
+                    result,
             }
         )
 
 
+    # ========================================================
+    # Save
+    # ========================================================
+
     def save(
         self,
-        path,
-    ):
+        path: str | Path,
+    ) -> None:
+        """
+        Save all collected observations as JSON.
+        """
 
-        path = Path(path)
+        path = Path(
+            path
+        )
+
+        path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
         with open(
             path,
             "w",
+            encoding="utf-8",
         ) as f:
 
             json.dump(
                 self.data,
                 f,
                 indent=2,
+                ensure_ascii=False,
             )
+
+
+    # ========================================================
+    # Length
+    # ========================================================
+
+    def __len__(
+        self,
+    ) -> int:
+
+        return len(
+            self.data
+        )

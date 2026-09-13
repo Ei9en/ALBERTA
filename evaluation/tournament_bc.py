@@ -1,64 +1,157 @@
-# ============================================================
-# tournament_bc.py
-# ============================================================
+from __future__ import annotations
 
-from pathlib import Path
+import argparse
+import json
+import random
 import sys
 
-sys.path.append(
-    str(Path(__file__).resolve().parent.parent)
-)
+from datetime import datetime, timezone
+from itertools import combinations
+from pathlib import Path
 
-import torch
 import chess
 import chess.variant
+import numpy as np
+import torch
 
-from src.models.resnet import ChessResNet
-from src.encoding import encode_fen
+from tqdm import tqdm
+
+
+# ============================================================
+# Project imports
+# ============================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.actions_space import ACTIONS, INDEX_TO_ACTION
+from src.encoding import encode_fen
+from src.models.resnet import ChessResNet
 
 
 # ============================================================
-# Configuration
+# Default configuration
 # ============================================================
 
-CHECKPOINT_DIR = Path(
-    "checkpoints/bc_epoch"
+DEFAULT_CHECKPOINT_DIR = (
+    PROJECT_ROOT
+    / "checkpoints"
+    / "bc_epoch"
 )
 
-TEMPERATURE = 1
-CHANNELS = 32
-BLOCKS = 4
-SEED = 1337
+DEFAULT_CHECKPOINT_PATTERN = (
+    "bc_epoch_*.pt"
+)
 
-N = 10
+DEFAULT_OUTPUT_DIR = (
+    PROJECT_ROOT
+    / "evaluation"
+    / "results"
+)
 
-MAX_PLIES = 1000
+DEFAULT_TEMPERATURE = 1.0
+
+DEFAULT_GAMES_PER_MATCHUP = 10
+
+DEFAULT_CHANNELS = 32
+DEFAULT_BLOCKS = 4
+
+DEFAULT_MAX_PLIES = 1000
+
+DEFAULT_SEED = 42
 
 
 # ============================================================
-# Load model
+# Reproducibility
 # ============================================================
 
-def load_model(path, device):
+def seed_everything(
+    seed: int,
+) -> None:
+    """
+    Seed all random-number generators potentially involved
+    in tournament evaluation.
+
+    BC move sampling itself uses torch.multinomial().
+    """
+
+    random.seed(seed)
+    np.random.seed(seed)
+
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+    torch.use_deterministic_algorithms(
+        True,
+        warn_only=True,
+    )
+
+
+# ============================================================
+# Checkpoint ordering
+# ============================================================
+
+def checkpoint_epoch(
+    path: Path,
+) -> int:
+    """
+    Extract the numeric epoch from checkpoints named:
+
+        bc_epoch_<N>.pt
+    """
+
+    try:
+        return int(
+            path.stem.split("_")[-1]
+        )
+
+    except ValueError as exc:
+        raise ValueError(
+            f"Cannot extract epoch number from {path.name}"
+        ) from exc
+
+
+# ============================================================
+# Model loading
+# ============================================================
+
+def load_model(
+    path: Path,
+    device: torch.device,
+    channels: int,
+    blocks: int,
+) -> ChessResNet:
 
     checkpoint = torch.load(
         path,
         map_location=device,
     )
 
+    if (
+        checkpoint.get("actions")
+        != len(ACTIONS)
+    ):
+        raise ValueError(
+            f"Action-space mismatch in {path}"
+        )
+
     model = ChessResNet(
         num_actions=len(ACTIONS),
-        channels=CHANNELS,
-        blocks=BLOCKS,
+        channels=channels,
+        blocks=blocks,
     ).to(device)
 
-    assert checkpoint["actions"] == len(ACTIONS), (
-        f"Action space mismatch in {path}"
-    )
-
     model.load_state_dict(
-        checkpoint["model_state_dict"]
+        checkpoint[
+            "model_state_dict"
+        ]
     )
 
     model.eval()
@@ -67,281 +160,543 @@ def load_model(path, device):
 
 
 # ============================================================
-# Select move
-# ============================================================
-
-# ============================================================
-# Select move
+# Move selection
 # ============================================================
 
 def select_move(
-    model,
-    board,
-    device,
-):
+    model: ChessResNet,
+    board: chess.variant.AtomicBoard,
+    device: torch.device,
+    temperature: float,
+) -> chess.Move:
+    """
+    Select one legal move from the BC policy.
+
+    temperature == 0:
+        deterministic greedy action.
+
+    temperature > 0:
+        sample from the legal-action distribution obtained
+        after temperature scaling.
+    """
 
     x = encode_fen(
         board.fen()
-    ).unsqueeze(0).to(device)
+    ).unsqueeze(0).to(
+        device
+    )
 
     with torch.no_grad():
-
         logits = model(x)[0]
 
     # --------------------------------------------------------
-    # Mask illegal actions
+    # Legal-action mask
     # --------------------------------------------------------
 
-    legal = {
+    legal_moves = {
         move.uci()
         for move in board.legal_moves
     }
 
     masked_logits = torch.full_like(
         logits,
-        -float("inf")
+        -float("inf"),
     )
 
-    for idx, uci in INDEX_TO_ACTION.items():
+    for index, uci in INDEX_TO_ACTION.items():
 
-        if uci in legal:
-
-            masked_logits[idx] = logits[idx]
+        if uci in legal_moves:
+            masked_logits[index] = logits[index]
 
     # --------------------------------------------------------
-    # Temperature
+    # Greedy evaluation
     # --------------------------------------------------------
 
-    if TEMPERATURE == 0:
+    if temperature == 0.0:
 
-        # Greedy / deterministic
-        best_idx = (
+        action_index = (
             masked_logits.argmax()
         ).item()
 
+    # --------------------------------------------------------
+    # Stochastic evaluation
+    # --------------------------------------------------------
+
     else:
 
-        # ----------------------------------------------------
-        # Softmax sampling
-        #
-        # T = 1:
-        # distribution directly induced by the logits
-        # ----------------------------------------------------
-
         probabilities = torch.softmax(
-            masked_logits / TEMPERATURE,
+            masked_logits / temperature,
             dim=0,
         )
 
-        best_idx = torch.multinomial(
+        action_index = torch.multinomial(
             probabilities,
             num_samples=1,
         ).item()
 
     return chess.Move.from_uci(
-        INDEX_TO_ACTION[best_idx]
+        INDEX_TO_ACTION[
+            action_index
+        ]
     )
 
 
 # ============================================================
-# Play one game
+# Single game
 # ============================================================
 
 def play_game(
-    white_model,
-    black_model,
-    device,
-):
+    white_model: ChessResNet,
+    black_model: ChessResNet,
+    device: torch.device,
+    temperature: float,
+    max_plies: int,
+) -> tuple[str, int]:
+    """
+    Play one Atomic Chess game.
+
+    Returns:
+        result,
+        number of plies played.
+
+    If max_plies is reached before a terminal state, "*"
+    is returned. Tournament scoring treats this as a draw,
+    matching the historical ALBERTA evaluation protocol.
+    """
 
     board = chess.variant.AtomicBoard()
 
-    for _ in range(MAX_PLIES):
+    for ply in range(
+        1,
+        max_plies + 1,
+    ):
 
-        if board.turn == chess.WHITE:
-
-            model = white_model
-
-        else:
-
-            model = black_model
+        model = (
+            white_model
+            if board.turn == chess.WHITE
+            else black_model
+        )
 
         move = select_move(
-            model,
-            board,
-            device,
+            model=model,
+            board=board,
+            device=device,
+            temperature=temperature,
         )
 
         board.push(move)
 
         if board.is_game_over():
 
-            return board.result()
+            return (
+                board.result(),
+                ply,
+            )
 
-    # --------------------------------------------------------
-    # Maximum length reached
-    # --------------------------------------------------------
+    return (
+        "*",
+        max_plies,
+    )
 
-    return "*"
-
-
-# ============================================================
-# Play a match
-# ============================================================
 
 # ============================================================
-# Play a match
+# Match
 # ============================================================
 
 def play_match(
-    model_a,
-    model_b,
-    device,
-):
+    model_a: ChessResNet,
+    model_b: ChessResNet,
+    device: torch.device,
+    temperature: float,
+    games_per_matchup: int,
+    max_plies: int,
+) -> list[dict]:
+    """
+    Play one balanced matchup.
 
-    results = []
+    Model A has White on even-numbered games and model B has
+    White on odd-numbered games.
+    """
 
-    for game in range(N):
+    games = []
 
-        # ----------------------------------------------------
-        # Alternate colors
-        # ----------------------------------------------------
+    for game_index in tqdm(
+        range(games_per_matchup),
+        leave=False,
+        desc="Games",
+    ):
 
-        if game % 2 == 0:
+        if game_index % 2 == 0:
 
-            # A = White
-            # B = Black
+            white = "a"
+            black = "b"
 
-            result = play_game(
-                model_a,
-                model_b,
-                device,
-            )
-
-            results.append(
-                (model_a, model_b, result)
+            result, plies = play_game(
+                white_model=model_a,
+                black_model=model_b,
+                device=device,
+                temperature=temperature,
+                max_plies=max_plies,
             )
 
         else:
 
-            # B = White
-            # A = Black
+            white = "b"
+            black = "a"
 
-            result = play_game(
-                model_b,
-                model_a,
-                device,
+            result, plies = play_game(
+                white_model=model_b,
+                black_model=model_a,
+                device=device,
+                temperature=temperature,
+                max_plies=max_plies,
             )
 
-            results.append(
-                (model_b, model_a, result)
-            )
+        games.append(
+            {
+                "game":
+                    game_index,
 
-    return results
+                "white":
+                    white,
+
+                "black":
+                    black,
+
+                "result":
+                    result,
+
+                "plies":
+                    plies,
+            }
+        )
+
+    return games
 
 
 # ============================================================
-# Update tournament score
+# Process matchup
 # ============================================================
 
-def update_score(
-    scores,
-    model_a,
-    model_b,
-    result,
-):
+def summarize_matchup(
+    games: list[dict],
+) -> dict:
+    """
+    Convert game results into model-A/model-B statistics.
+    """
 
-    # result is from White's perspective
-    #
-    # 1-0 : White wins
-    # 0-1 : Black wins
-    # 1/2-1/2 : draw
+    a_wins = 0
+    b_wins = 0
+    draws = 0
+    unfinished = 0
 
-    if result == "1-0":
+    for game in games:
 
-        scores[model_a]["wins"] += 1
-        scores[model_b]["losses"] += 1
+        result = game["result"]
+        white = game["white"]
+        black = game["black"]
 
-    elif result == "0-1":
+        if result == "1-0":
 
-        scores[model_a]["losses"] += 1
-        scores[model_b]["wins"] += 1
+            if white == "a":
+                a_wins += 1
+            else:
+                b_wins += 1
 
-    elif result == "1/2-1/2":
+        elif result == "0-1":
 
-        scores[model_a]["draws"] += 1
-        scores[model_b]["draws"] += 1
+            if black == "a":
+                a_wins += 1
+            else:
+                b_wins += 1
 
-    else:
+        else:
 
-        scores[model_a]["draws"] += 1
-        scores[model_b]["draws"] += 1
+            draws += 1
+
+            if result == "*":
+                unfinished += 1
+
+    total = (
+        a_wins
+        + b_wins
+        + draws
+    )
+
+    a_points = (
+        a_wins
+        + 0.5 * draws
+    )
+
+    b_points = (
+        b_wins
+        + 0.5 * draws
+    )
+
+    return {
+        "a_wins":
+            a_wins,
+
+        "b_wins":
+            b_wins,
+
+        "draws":
+            draws,
+
+        "unfinished":
+            unfinished,
+
+        "a_points":
+            a_points,
+
+        "b_points":
+            b_points,
+
+        "a_score":
+            a_points / total,
+
+        "b_score":
+            b_points / total,
+    }
 
 
 # ============================================================
 # Main
 # ============================================================
 
-def main():
+def main() -> None:
 
-    torch.manual_seed(SEED)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run a round-robin tournament between ALBERTA "
+            "behavioral-cloning checkpoints."
+        )
+    )
+
+    # --------------------------------------------------------
+    # Checkpoints
+    # --------------------------------------------------------
+
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        default=DEFAULT_CHECKPOINT_DIR,
+        help=(
+            "Directory containing BC checkpoints "
+            f"(default: {DEFAULT_CHECKPOINT_DIR})."
+        ),
+    )
+
+    parser.add_argument(
+        "--checkpoint-pattern",
+        type=str,
+        default=DEFAULT_CHECKPOINT_PATTERN,
+        help=(
+            "Checkpoint glob pattern "
+            f"(default: {DEFAULT_CHECKPOINT_PATTERN})."
+        ),
+    )
+
+    # --------------------------------------------------------
+    # Tournament
+    # --------------------------------------------------------
+
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=DEFAULT_TEMPERATURE,
+        help=(
+            "Sampling temperature. Use 0 for greedy "
+            f"evaluation (default: {DEFAULT_TEMPERATURE})."
+        ),
+    )
+
+    parser.add_argument(
+        "--games-per-matchup",
+        type=int,
+        default=DEFAULT_GAMES_PER_MATCHUP,
+        help=(
+            "Number of games per checkpoint pair "
+            f"(default: {DEFAULT_GAMES_PER_MATCHUP})."
+        ),
+    )
+
+    parser.add_argument(
+        "--max-plies",
+        type=int,
+        default=DEFAULT_MAX_PLIES,
+        help=(
+            "Maximum number of plies before a game is "
+            "recorded as unfinished."
+        ),
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        help=(
+            "Master random seed "
+            f"(default: {DEFAULT_SEED})."
+        ),
+    )
+
+    # --------------------------------------------------------
+    # Architecture
+    # --------------------------------------------------------
+
+    parser.add_argument(
+        "--channels",
+        type=int,
+        default=DEFAULT_CHANNELS,
+    )
+
+    parser.add_argument(
+        "--blocks",
+        type=int,
+        default=DEFAULT_BLOCKS,
+    )
+
+    # --------------------------------------------------------
+    # Output
+    # --------------------------------------------------------
+
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help=(
+            "Output JSON file. When omitted, a timestamped "
+            "file is written under evaluation/results."
+        ),
+    )
+
+    args = parser.parse_args()
+
+    # ========================================================
+    # Configuration validation
+    # ========================================================
+
+    if not args.checkpoint_dir.exists():
+
+        raise FileNotFoundError(
+            "Checkpoint directory does not exist: "
+            f"{args.checkpoint_dir}"
+        )
+
+    if args.temperature < 0.0:
+
+        raise ValueError(
+            "--temperature cannot be negative."
+        )
+
+    if args.games_per_matchup <= 0:
+
+        raise ValueError(
+            "--games-per-matchup must be greater than zero."
+        )
+
+    if args.games_per_matchup % 2 != 0:
+
+        raise ValueError(
+            "--games-per-matchup must be even so that "
+            "colors are exactly balanced."
+        )
+
+    if args.max_plies <= 0:
+
+        raise ValueError(
+            "--max-plies must be greater than zero."
+        )
+
+    # ========================================================
+    # Reproducibility
+    # ========================================================
+
+    seed_everything(
+        args.seed
+    )
 
     # ========================================================
     # Device
     # ========================================================
 
-    device = (
+    device = torch.device(
         "cuda"
         if torch.cuda.is_available()
         else "cpu"
     )
 
     print()
-    print("=" * 60)
-    print("BC ROUND-ROBIN TOURNAMENT")
-    print("=" * 60)
+    print("=" * 70)
+    print("ALBERTA - BC ROUND-ROBIN TOURNAMENT")
+    print("=" * 70)
 
-    print()
-    print("Device:", device)
-    print("Temperature:", TEMPERATURE)
-    print("Games per matchup:", N)
-    print("Seed:", SEED)
+    print(
+        f"Device             : {device}"
+    )
+
+    print(
+        f"Temperature        : {args.temperature}"
+    )
+
+    print(
+        f"Games / matchup    : {args.games_per_matchup}"
+    )
+
+    print(
+        f"Maximum plies      : {args.max_plies}"
+    )
+
+    print(
+        f"Seed               : {args.seed}"
+    )
 
     if torch.cuda.is_available():
 
         print(
-            "GPU:",
-            torch.cuda.get_device_name(0)
+            f"GPU                : "
+            f"{torch.cuda.get_device_name(0)}"
         )
 
     # ========================================================
-    # Find checkpoints
+    # Checkpoints
     # ========================================================
 
     checkpoints = sorted(
-        CHECKPOINT_DIR.glob(
-            "bc_epoch_*.pt"
+        args.checkpoint_dir.glob(
+            args.checkpoint_pattern
         ),
-        key=lambda p: int(
-            p.stem.split("_")[-1]
-        ),
+        key=checkpoint_epoch,
     )
 
     if len(checkpoints) < 2:
 
         raise RuntimeError(
-            "At least two BC checkpoints are required."
+            "At least two BC checkpoints are required. "
+            f"Found {len(checkpoints)} matching "
+            f"{args.checkpoint_pattern!r} in "
+            f"{args.checkpoint_dir}."
         )
 
     print()
     print(
-        f"Found {len(checkpoints)} checkpoints."
+        f"Found {len(checkpoints)} checkpoints:"
     )
 
+    for checkpoint in checkpoints:
+        print(
+            f"  - {checkpoint.name}"
+        )
+
     # ========================================================
-    # Load models
+    # Models
     # ========================================================
 
-    models = {}
+    models: dict[
+        str,
+        ChessResNet,
+    ] = {}
 
     for path in checkpoints:
 
@@ -352,28 +707,27 @@ def main():
         )
 
         models[name] = load_model(
-            path,
-            device,
+            path=path,
+            device=device,
+            channels=args.channels,
+            blocks=args.blocks,
         )
 
     # ========================================================
-    # Initialize scores
+    # Scores
     # ========================================================
 
-    scores = {}
-
-    for name in models:
-
-        scores[name] = {
-
+    scores = {
+        name: {
             "wins": 0,
-
             "draws": 0,
-
             "losses": 0,
-
             "points": 0.0,
         }
+        for name in models
+    }
+
+    matchup_results = []
 
     total_games = 0
 
@@ -382,185 +736,143 @@ def main():
     # ========================================================
 
     print()
-    print("=" * 60)
+    print("=" * 70)
     print("TOURNAMENT")
-    print("=" * 60)
+    print("=" * 70)
 
-    for i in range(
-        len(checkpoints)
+    for matchup_index, (
+        name_a,
+        name_b,
+    ) in enumerate(
+        combinations(
+            models.keys(),
+            2,
+        )
     ):
 
-        for j in range(
-            i + 1,
-            len(checkpoints)
-        ):
+        model_a = models[name_a]
+        model_b = models[name_b]
 
-            name_a = (
-                checkpoints[i].stem
-            )
+        # ----------------------------------------------------
+        # Each matchup receives a deterministic seed derived
+        # from the global master seed.
+        #
+        # This prevents changes in an earlier matchup from
+        # shifting the stochastic trajectories of every later
+        # matchup.
+        # ----------------------------------------------------
 
-            name_b = (
-                checkpoints[j].stem
-            )
+        matchup_seed = (
+            args.seed
+            + matchup_index
+        )
 
-            model_a = models[name_a]
-            model_b = models[name_b]
+        seed_everything(
+            matchup_seed
+        )
 
-            print()
-            print(
-                f"{name_a} vs {name_b}"
-            )
+        print()
+        print(
+            f"{name_a} vs {name_b} "
+            f"(seed={matchup_seed})"
+        )
 
-            # ------------------------------------------------
-            # Play N games
-            # ------------------------------------------------
+        games = play_match(
+            model_a=model_a,
+            model_b=model_b,
+            device=device,
+            temperature=args.temperature,
+            games_per_matchup=args.games_per_matchup,
+            max_plies=args.max_plies,
+        )
 
-            results = play_match(
-                model_a,
-                model_b,
-                device,
-            )
+        summary = summarize_matchup(
+            games
+        )
 
-            # ------------------------------------------------
-            # Process results
-            # ------------------------------------------------
+        # ----------------------------------------------------
+        # Global tournament score
+        # ----------------------------------------------------
 
-            for (
-                white_model,
-                black_model,
-                result,
-            ) in results:
+        scores[name_a]["wins"] += (
+            summary["a_wins"]
+        )
 
-                # --------------------------------------------
-                # Identify players
-                # --------------------------------------------
+        scores[name_a]["losses"] += (
+            summary["b_wins"]
+        )
 
-                if white_model is model_a:
+        scores[name_a]["draws"] += (
+            summary["draws"]
+        )
 
-                    white_name = name_a
-                    black_name = name_b
+        scores[name_a]["points"] += (
+            summary["a_points"]
+        )
 
-                else:
+        scores[name_b]["wins"] += (
+            summary["b_wins"]
+        )
 
-                    white_name = name_b
-                    black_name = name_a
+        scores[name_b]["losses"] += (
+            summary["a_wins"]
+        )
 
-                # --------------------------------------------
-                # Result
-                # --------------------------------------------
+        scores[name_b]["draws"] += (
+            summary["draws"]
+        )
 
-                if result == "1-0":
+        scores[name_b]["points"] += (
+            summary["b_points"]
+        )
 
-                    scores[
-                        white_name
-                    ]["wins"] += 1
+        total_games += (
+            len(games)
+        )
 
-                    scores[
-                        black_name
-                    ]["losses"] += 1
+        matchup_results.append(
+            {
+                "model_a":
+                    name_a,
 
-                    scores[
-                        white_name
-                    ]["points"] += 1.0
+                "model_b":
+                    name_b,
 
-                elif result == "0-1":
+                "seed":
+                    matchup_seed,
 
-                    scores[
-                        white_name
-                    ]["losses"] += 1
+                **summary,
 
-                    scores[
-                        black_name
-                    ]["wins"] += 1
+                "games":
+                    games,
+            }
+        )
 
-                    scores[
-                        black_name
-                    ]["points"] += 1.0
+        print(
+            f"  {name_a}: "
+            f"{summary['a_wins']}W "
+            f"{summary['draws']}D "
+            f"{summary['b_wins']}L "
+            f"({100 * summary['a_score']:.1f}%)"
+        )
 
-                else:
+        print(
+            f"  {name_b}: "
+            f"{summary['b_wins']}W "
+            f"{summary['draws']}D "
+            f"{summary['a_wins']}L "
+            f"({100 * summary['b_score']:.1f}%)"
+        )
 
-                    # ----------------------------------------
-                    # Draw or unfinished game
-                    # ----------------------------------------
-
-                    scores[
-                        white_name
-                    ]["draws"] += 1
-
-                    scores[
-                        black_name
-                    ]["draws"] += 1
-
-                    scores[
-                        white_name
-                    ]["points"] += 0.5
-
-                    scores[
-                        black_name
-                    ]["points"] += 0.5
-
-                total_games += 1
-
-            # ------------------------------------------------
-            # Match summary
-            # ------------------------------------------------
-
-            a_points = (
-                scores[name_a]["points"]
-            )
-
-            b_points = (
-                scores[name_b]["points"]
-            )
-
-            # ------------------------------------------------
-            # Count only this matchup
-            # ------------------------------------------------
-
-            matchup_a_wins = 0
-            matchup_b_wins = 0
-            matchup_draws = 0
-
-            for (
-                white_model,
-                black_model,
-                result,
-            ) in results:
-
-                if result == "1-0":
-
-                    if white_model is model_a:
-                        matchup_a_wins += 1
-                    else:
-                        matchup_b_wins += 1
-
-                elif result == "0-1":
-
-                    if black_model is model_a:
-                        matchup_a_wins += 1
-                    else:
-                        matchup_b_wins += 1
-
-                else:
-
-                    matchup_draws += 1
+        if summary["unfinished"] > 0:
 
             print(
-                f"  {name_a}: "
-                f"{matchup_a_wins}W "
-                f"{matchup_draws}D "
-                f"{matchup_b_wins}L"
-            )
-
-            print(
-                f"  {name_b}: "
-                f"{matchup_b_wins}W "
-                f"{matchup_draws}D "
-                f"{matchup_a_wins}L"
+                f"  Unfinished: "
+                f"{summary['unfinished']}"
             )
 
     # ========================================================
-    # Final ranking
+    # Ranking
     # ========================================================
 
     ranking = sorted(
@@ -569,65 +881,197 @@ def main():
             -item[1]["points"],
             -item[1]["wins"],
             item[1]["losses"],
+            item[0],
         ),
     )
 
     # ========================================================
-    # Results
+    # Print final ranking
     # ========================================================
 
     print()
-    print("=" * 60)
+    print("=" * 70)
     print("FINAL RANKING")
-    print("=" * 60)
+    print("=" * 70)
 
     print()
 
     print(
         f"{'Rank':<6}"
-        f"{'Model':<20}"
-        f"{'W':>5}"
-        f"{'D':>5}"
-        f"{'L':>5}"
+        f"{'Model':<22}"
+        f"{'W':>6}"
+        f"{'D':>6}"
+        f"{'L':>6}"
         f"{'Points':>10}"
+        f"{'Score':>10}"
     )
 
-    print("-" * 60)
+    print("-" * 70)
 
-    for rank, (name, data) in enumerate(
+    ranking_output = []
+
+    for rank, (
+        name,
+        data,
+    ) in enumerate(
         ranking,
         start=1,
     ):
 
+        games_played = (
+            data["wins"]
+            + data["draws"]
+            + data["losses"]
+        )
+
+        score = (
+            data["points"]
+            / games_played
+        )
+
         print(
             f"{rank:<6}"
-            f"{name:<20}"
-            f"{data['wins']:>5}"
-            f"{data['draws']:>5}"
-            f"{data['losses']:>5}"
+            f"{name:<22}"
+            f"{data['wins']:>6}"
+            f"{data['draws']:>6}"
+            f"{data['losses']:>6}"
             f"{data['points']:>10.1f}"
+            f"{100 * score:>9.1f}%"
+        )
+
+        ranking_output.append(
+            {
+                "rank":
+                    rank,
+
+                "model":
+                    name,
+
+                **data,
+
+                "games":
+                    games_played,
+
+                "score":
+                    score,
+            }
+        )
+
+    number_of_matchups = (
+        len(checkpoints)
+        * (
+            len(checkpoints) - 1
+        )
+        // 2
+    )
+
+    print()
+    print(
+        f"Total games       : {total_games}"
+    )
+
+    print(
+        f"Games / matchup   : "
+        f"{args.games_per_matchup}"
+    )
+
+    print(
+        f"Matchups          : "
+        f"{number_of_matchups}"
+    )
+
+    print("=" * 70)
+
+    # ========================================================
+    # Save
+    # ========================================================
+
+    if args.output is None:
+
+        timestamp = datetime.now(
+            timezone.utc
+        ).strftime(
+            "%Y%m%d_%H%M%S"
+        )
+
+        output_path = (
+            DEFAULT_OUTPUT_DIR
+            / f"bc_tournament_{timestamp}.json"
+        )
+
+    else:
+
+        output_path = (
+            args.output
+        )
+
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    output = {
+        "seed":
+            args.seed,
+
+        "temperature":
+            args.temperature,
+
+        "games_per_matchup":
+            args.games_per_matchup,
+
+        "max_plies":
+            args.max_plies,
+
+        "channels":
+            args.channels,
+
+        "blocks":
+            args.blocks,
+
+        "checkpoint_dir":
+            str(args.checkpoint_dir),
+
+        "checkpoint_pattern":
+            args.checkpoint_pattern,
+
+        "checkpoints":
+            [
+                str(path)
+                for path in checkpoints
+            ],
+
+        "total_games":
+            total_games,
+
+        "matchups":
+            matchup_results,
+
+        "ranking":
+            ranking_output,
+    }
+
+    with open(
+        output_path,
+        "w",
+        encoding="utf-8",
+    ) as f:
+
+        json.dump(
+            output,
+            f,
+            indent=2,
         )
 
     print()
     print(
-        f"Total games: {total_games}"
+        f"Results saved to: {output_path}"
     )
 
-    print(
-        f"Games per matchup: {N}"
-    )
-
-    print(
-        f"Matchups: "
-        f"{len(checkpoints) * (len(checkpoints) - 1) // 2}"
-    )
-
-    print("=" * 60)
 
 # ============================================================
 # Entry point
 # ============================================================
 
 if __name__ == "__main__":
-
     main()

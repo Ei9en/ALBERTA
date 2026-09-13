@@ -1,41 +1,67 @@
 from __future__ import annotations
 
-from pathlib import Path
+import argparse
 import sys
-
-AL_ROOT = Path(__file__).resolve().parent
-PROJECT_ROOT = AL_ROOT.parent
-
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from PyQt6.QtWidgets import (
-    QApplication,
-    QMainWindow,
-    QWidget,
-    QHBoxLayout,
-    QVBoxLayout,
-    QLabel,
-    QPushButton,
-)
+from pathlib import Path
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
-from oracle_queue import OracleQueue
 
-from widgets.chessboard import ChessBoardWidget
-from widgets.annotation_panel import AnnotationPanel
+# ============================================================
+# Project imports
+# ============================================================
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(PROJECT_ROOT),
+    )
+
+from AL.oracle_queue import OracleQueue
+from AL.HMI.widgets.annotation_panel import AnnotationPanel
+from AL.HMI.widgets.chessboard import ChessBoardWidget
+
+
+# ============================================================
+# Defaults
+# ============================================================
+
+DEFAULT_QUEUE_PATH = (
+    PROJECT_ROOT
+    / "checkpoints"
+    / "queue"
+    / "oracle_queue_1-10_AL.jsonl"
+)
+
+
+# ============================================================
+# Main window
+# ============================================================
 
 class OracleHMI(QMainWindow):
     """
     ALBERTA Human Oracle Interface.
+
+    Supports reward annotation, Oracle move annotation,
+    or both depending on the active modes exposed by the
+    AnnotationPanel.
     """
 
     def __init__(
         self,
-        queue_path="checkpoints/queue/oracle_queue_1-10_pareto.jsonl",
-    ):
+        queue_path: str | Path,
+    ) -> None:
 
         super().__init__()
 
@@ -57,8 +83,7 @@ class OracleHMI(QMainWindow):
         )
 
         self.current_query = None
-
-        self.current_move = None
+        self.current_move: str | None = None
 
         # ====================================================
         # Main layout
@@ -163,7 +188,7 @@ class OracleHMI(QMainWindow):
         )
 
         # ----------------------------------------------------
-        # Annotation
+        # Annotation panel
         # ----------------------------------------------------
 
         self.annotation = AnnotationPanel()
@@ -194,40 +219,40 @@ class OracleHMI(QMainWindow):
 
     def update_info(
         self,
-        extra="",
-    ):
+        extra: str = "",
+    ) -> None:
 
         if self.current_query is None:
-
             return
+
+        fen_parts = (
+            self.current_query.fen.split()
+        )
 
         side = (
             "White"
-            if self.current_query.fen.split()[1] == "w"
+            if fen_parts[1] == "w"
             else "Black"
         )
 
         # ----------------------------------------------------
-        # Active-learning score
+        # Acquisition score
         #
-        # Normal AL positions have a numeric I score.
-        # Manually injected positions have I = None.
+        # I_norm is a min-max representation of the active-
+        # learning acquisition score. It is not a calibrated
+        # probability or a pure uncertainty measure.
         # ----------------------------------------------------
 
         if self.current_query.I_norm is None:
 
-            uncertainty_text = (
+            score_text = (
                 "N/A"
             )
 
         else:
 
-            uncertainty = (
-                self.current_query.I_norm * 100
-            )
-
-            uncertainty_text = (
-                f"{uncertainty:.2f}%"
+            score_text = (
+                f"{100 * self.current_query.I_norm:.2f}%"
             )
 
         text = f"""
@@ -236,8 +261,8 @@ class OracleHMI(QMainWindow):
 
 <br>
 
-<b>Agent uncertainty (relative):</b><br>
-{uncertainty_text}
+<b>Relative acquisition score:</b><br>
+{score_text}
 
 <br>
 
@@ -262,14 +287,16 @@ class OracleHMI(QMainWindow):
 
     def remaining_count(
         self,
-    ):
+    ) -> int:
 
         pending = self.queue.pending(
             reward_mode=self.annotation.reward_enabled(),
             oracle_mode=self.annotation.oracle_enabled(),
         )
 
-        return len(pending)
+        return len(
+            pending
+        )
 
     # ========================================================
     # Load next position
@@ -277,7 +304,7 @@ class OracleHMI(QMainWindow):
 
     def load_next(
         self,
-    ):
+    ) -> None:
 
         query = self.queue.next(
             reward_mode=self.annotation.reward_enabled(),
@@ -287,6 +314,7 @@ class OracleHMI(QMainWindow):
         if query is None:
 
             self.current_query = None
+            self.current_move = None
 
             self.info_label.setText(
                 """
@@ -312,7 +340,6 @@ class OracleHMI(QMainWindow):
             return
 
         self.current_query = query
-
         self.current_move = None
 
         self.board.setEnabled(
@@ -344,7 +371,7 @@ class OracleHMI(QMainWindow):
     def on_move_selected(
         self,
         uci: str,
-    ):
+    ) -> None:
 
         self.current_move = uci
 
@@ -366,7 +393,7 @@ class OracleHMI(QMainWindow):
 
     def take_back(
         self,
-    ):
+    ) -> None:
 
         self.board.take_back()
 
@@ -387,14 +414,14 @@ class OracleHMI(QMainWindow):
     def submit_answer(
         self,
         annotation: dict,
-    ):
+    ) -> None:
 
         if self.current_query is None:
-
             return
 
         # ----------------------------------------------------
         # Oracle mode requires a selected move.
+        #
         # Reward-only mode does not.
         # ----------------------------------------------------
 
@@ -410,11 +437,12 @@ class OracleHMI(QMainWindow):
 
             annotation = {
                 **annotation,
-                "oracle_move": self.current_move,
+                "oracle_move":
+                    self.current_move,
             }
 
         # ----------------------------------------------------
-        # Save
+        # Persist annotation
         # ----------------------------------------------------
 
         try:
@@ -427,28 +455,58 @@ class OracleHMI(QMainWindow):
         except (
             ValueError,
             KeyError,
-        ) as e:
+        ) as exc:
 
             self.update_info(
-                f"<b>Error:</b><br>{e}"
+                f"<b>Error:</b><br>{exc}"
             )
 
             return
 
         # ----------------------------------------------------
-        # Next
+        # Load next required annotation
         # ----------------------------------------------------
 
         self.load_next()
 
 
-def main():
+# ============================================================
+# CLI
+# ============================================================
+
+def parse_args() -> argparse.Namespace:
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Launch the ALBERTA Human Oracle Interface."
+        )
+    )
+
+    parser.add_argument(
+        "--queue",
+        type=Path,
+        default=DEFAULT_QUEUE_PATH,
+        help="Oracle queue JSONL file.",
+    )
+
+    return parser.parse_args()
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main() -> None:
+
+    args = parse_args()
 
     app = QApplication(
         sys.argv
     )
 
-    window = OracleHMI()
+    window = OracleHMI(
+        queue_path=args.queue
+    )
 
     window.show()
 

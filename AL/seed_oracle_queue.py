@@ -1,49 +1,38 @@
-import sys
-import json
-import uuid
-import argparse
-from pathlib import Path
-from datetime import datetime, timezone
-import math
+from __future__ import annotations
 
-import numpy as np
-import chess
+import argparse
+import json
+import math
+import uuid
+
+from datetime import datetime, timezone
+from pathlib import Path
+
 import chess.variant
+import numpy as np
+
+from AL.AL_weights import (
+    RAW_W_H,
+    RAW_W_HU,
+    RAW_W_U,
+    TAU,
+)
 
 
 # ============================================================
-# Paths
+# Project paths
 # ============================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(
-        0,
-        str(PROJECT_ROOT),
-    )
-
-
-# ============================================================
-# Active Learning weights
-# ============================================================
-
-from data.uncertainty_analysis.active_learning_weights import (
-    TAU,
-    RAW_W_H,
-    RAW_W_U,
-    RAW_W_HU,
-)
-
-
-DATA_FILE = (
+DEFAULT_DATA_FILE = (
     PROJECT_ROOT
     / "data"
     / "selfplay_jsons"
     / "uncertainty_stats_1-10.json"
 )
 
-QUEUE_DIR = (
+DEFAULT_QUEUE_DIR = (
     PROJECT_ROOT
     / "checkpoints"
     / "queue"
@@ -54,37 +43,60 @@ QUEUE_DIR = (
 # Configuration
 # ============================================================
 
-AL_BUDGET = 0.0002
+DEFAULT_AL_BUDGET = 0.0002
+DEFAULT_SEED = 42
 
 
 # ============================================================
-# Percentile rank normalization
+# Query ID
 # ============================================================
 
-def percentile_rank(values):
+def fen_to_query_id(
+    fen: str,
+) -> str:
+    """
+    Return the deterministic ALBERTA query identifier
+    associated with a FEN.
+    """
+
+    return uuid.uuid5(
+        uuid.NAMESPACE_DNS,
+        fen,
+    ).hex
+
+
+# ============================================================
+# Percentile-rank normalization
+# ============================================================
+
+def percentile_rank(
+    values: np.ndarray,
+) -> np.ndarray:
 
     values = np.asarray(
         values,
-        dtype=np.float64
+        dtype=np.float64,
     )
 
     n = len(values)
 
     if n < 2:
         raise ValueError(
-            "Not enough values for percentile rank."
+            "Not enough values for percentile-rank normalization."
         )
 
     order = np.argsort(
         values,
-        kind="stable"
+        kind="stable",
     )
 
-    sorted_values = values[order]
+    sorted_values = values[
+        order
+    ]
 
     ranks = np.empty(
         n,
-        dtype=np.float64
+        dtype=np.float64,
     )
 
     start = 0
@@ -96,23 +108,23 @@ def percentile_rank(values):
         while (
             end < n
             and sorted_values[end]
-            ==
-            sorted_values[start]
+            == sorted_values[start]
         ):
             end += 1
 
         rank = (
-            (start + end - 1)
-            /
-            2.0
-        )
+            start
+            + end
+            - 1
+        ) / 2.0
 
         ranks[
-            order[start:end]
+            order[
+                start:end
+            ]
         ] = (
             rank
-            /
-            (n - 1)
+            / (n - 1)
         )
 
         start = end
@@ -121,10 +133,12 @@ def percentile_rank(values):
 
 
 # ============================================================
-# Extract side to move
+# Side to move
 # ============================================================
 
-def extract_side(fens):
+def extract_side(
+    fens: np.ndarray,
+) -> np.ndarray:
 
     sides = []
 
@@ -133,48 +147,57 @@ def extract_side(fens):
         parts = fen.split()
 
         if len(parts) < 2:
-
             raise ValueError(
                 f"Invalid FEN: {fen}"
             )
 
         side = parts[1]
 
-        if side not in ("w", "b"):
-
+        if side not in {
+            "w",
+            "b",
+        }:
             raise ValueError(
-                f"Invalid FEN side: {fen}"
+                f"Invalid side-to-move field in FEN: {fen}"
             )
 
-        sides.append(side)
+        sides.append(
+            side
+        )
 
-    return np.array(
+    return np.asarray(
         sides,
-        dtype="<U1"
+        dtype="<U1",
     )
 
 
 # ============================================================
-# Count legal Atomic moves
+# Atomic legal moves
 # ============================================================
 
-def count_legal_moves(fen):
+def count_legal_moves(
+    fen: str,
+) -> int:
 
     try:
 
-        board = chess.variant.AtomicBoard(
-            fen
+        board = (
+            chess.variant.AtomicBoard(
+                fen
+            )
         )
 
-        return board.legal_moves.count()
+        return (
+            board.legal_moves.count()
+        )
 
-    except Exception as e:
+    except Exception as exc:
 
         raise ValueError(
-            f"Could not parse Atomic FEN:\n"
+            "Could not parse Atomic Chess FEN:\n"
             f"{fen}\n"
-            f"Error: {e}"
-        )
+            f"Error: {exc}"
+        ) from exc
 
 
 # ============================================================
@@ -182,29 +205,39 @@ def count_legal_moves(fen):
 # ============================================================
 
 def normalize_side_aware(
-    values,
-    sides
-):
+    values: np.ndarray,
+    sides: np.ndarray,
+) -> np.ndarray:
+
+    values = np.asarray(
+        values,
+        dtype=np.float64,
+    )
 
     normalized = np.zeros_like(
         values,
-        dtype=np.float64
+        dtype=np.float64,
     )
 
     for side in (
         "w",
-        "b"
+        "b",
     ):
 
         mask = (
             sides == side
         )
 
-        if np.sum(mask) < 2:
+        count = int(
+            np.sum(
+                mask
+            )
+        )
 
+        if count < 2:
             raise ValueError(
-                f"Not enough positions for side "
-                f"{side} normalization."
+                f"Not enough positions for side {side} "
+                "normalization."
             )
 
         normalized[
@@ -222,70 +255,89 @@ def normalize_side_aware(
 # Min-max normalization
 # ============================================================
 
-def minmax_normalize(values):
+def minmax_normalize(
+    values: np.ndarray,
+) -> np.ndarray:
 
     values = np.asarray(
         values,
-        dtype=np.float64
+        dtype=np.float64,
     )
 
-    minimum = np.min(values)
-    maximum = np.max(values)
+    minimum = float(
+        np.min(
+            values
+        )
+    )
+
+    maximum = float(
+        np.max(
+            values
+        )
+    )
 
     if maximum <= minimum:
-
         raise ValueError(
             "Cannot min-max normalize a constant score."
         )
 
     return (
-        values - minimum
+        values
+        - minimum
     ) / (
-        maximum - minimum
+        maximum
+        - minimum
     )
 
 
 # ============================================================
-# Build candidate order
+# Candidate order
 # ============================================================
 
 def build_candidate_order(
-    I,
-    mode
-):
+    scores: np.ndarray,
+    mode: str,
+    rng: np.random.Generator,
+) -> tuple[
+    np.ndarray,
+    str,
+]:
 
-    n = len(I)
+    n = len(
+        scores
+    )
 
     if n == 0:
-
         raise ValueError(
             "No positions available."
         )
 
     # --------------------------------------------------------
-    # HIGH
+    # Highest score
     # --------------------------------------------------------
 
     if mode == "high":
 
-        order = np.argsort(
-            I,
-            kind="stable"
-        )[::-1]
+        order = (
+            np.argsort(
+                scores,
+                kind="stable",
+            )[::-1]
+        )
 
         description = (
             "Highest I"
         )
 
     # --------------------------------------------------------
-    # LOW
+    # Lowest score
     # --------------------------------------------------------
 
     elif mode == "low":
 
         order = np.argsort(
-            I,
-            kind="stable"
+            scores,
+            kind="stable",
         )
 
         description = (
@@ -293,21 +345,26 @@ def build_candidate_order(
         )
 
     # --------------------------------------------------------
-    # MIDDLE
+    # Around median
     # --------------------------------------------------------
 
     elif mode == "middle":
 
         sorted_indices = np.argsort(
-            I,
-            kind="stable"
+            scores,
+            kind="stable",
         )
 
-        center = n // 2
+        center = (
+            n // 2
+        )
 
         order_list = []
 
-        left = center - 1
+        left = (
+            center - 1
+        )
+
         right = center
 
         while (
@@ -318,7 +375,9 @@ def build_candidate_order(
             if right < n:
 
                 order_list.append(
-                    sorted_indices[right]
+                    sorted_indices[
+                        right
+                    ]
                 )
 
                 right += 1
@@ -326,14 +385,16 @@ def build_candidate_order(
             if left >= 0:
 
                 order_list.append(
-                    sorted_indices[left]
+                    sorted_indices[
+                        left
+                    ]
                 )
 
                 left -= 1
 
-        order = np.array(
+        order = np.asarray(
             order_list,
-            dtype=np.int64
+            dtype=np.int64,
         )
 
         description = (
@@ -341,14 +402,14 @@ def build_candidate_order(
         )
 
     # --------------------------------------------------------
-    # RANDOM
+    # Uniform random
     #
-    # I is completely ignored.
+    # Acquisition score is deliberately ignored.
     # --------------------------------------------------------
 
     elif mode == "random":
 
-        order = np.random.permutation(
+        order = rng.permutation(
             n
         )
 
@@ -362,120 +423,165 @@ def build_candidate_order(
             f"Unknown selection mode: {mode}"
         )
 
-    return order, description
+    return (
+        order,
+        description,
+    )
 
 
 # ============================================================
-# Queue path
+# Default queue path
 # ============================================================
 
-def get_queue_file(mode):
+def get_queue_file(
+    queue_dir: Path,
+    mode: str,
+) -> Path:
 
-    if mode == "random":
+    filenames = {
+        "random":
+            "oracle_queue_1-10_random.jsonl",
 
-        filename = (
-            "oracle_queue_1-10_random.jsonl"
-        )
+        "high":
+            "oracle_queue_1-10_AL.jsonl",
 
-    elif mode == "high":
+        "low":
+            "oracle_queue_1-10_low.jsonl",
 
-        filename = (
-            "oracle_queue_1-10_AL.jsonl"
-        )
+        "middle":
+            "oracle_queue_1-10_middle.jsonl",
+    }
 
-    elif mode == "low":
+    try:
 
-        filename = (
-            "oracle_queue_1-10_low.jsonl"
-        )
+        filename = filenames[
+            mode
+        ]
 
-    elif mode == "middle":
-
-        filename = (
-            "oracle_queue_1-10_middle.jsonl"
-        )
-
-    else:
+    except KeyError as exc:
 
         raise ValueError(
-            f"Unknown mode: {mode}"
-        )
+            f"Unknown selection mode: {mode}"
+        ) from exc
 
     return (
-        QUEUE_DIR
+        queue_dir
         / filename
     )
 
 
 # ============================================================
-# Load existing queue IDs
+# Existing queue IDs
 # ============================================================
 
 def load_existing_ids(
-    queue_file
-):
+    queue_file: Path,
+) -> set[str]:
 
     if not queue_file.exists():
-
         return set()
 
     existing_ids = set()
 
-    with open(
-        queue_file,
+    with queue_file.open(
         "r",
-        encoding="utf-8"
+        encoding="utf-8",
     ) as f:
 
-        for line in f:
+        for line_number, line in enumerate(
+            f,
+            start=1,
+        ):
 
-            if not line.strip():
+            line = line.strip()
 
+            if not line:
                 continue
 
-            item = json.loads(line)
+            try:
+
+                item = json.loads(
+                    line
+                )
+
+            except json.JSONDecodeError as exc:
+
+                raise RuntimeError(
+                    f"Invalid JSONL in {queue_file} "
+                    f"at line {line_number}."
+                ) from exc
+
+            query_id = item.get(
+                "query_id"
+            )
+
+            if query_id is None:
+                raise RuntimeError(
+                    f"Missing query_id in {queue_file} "
+                    f"at line {line_number}."
+                )
 
             existing_ids.add(
-                item["query_id"]
+                query_id
             )
 
     return existing_ids
 
 
 # ============================================================
-# Select positions
+# Position selection
 # ============================================================
 
 def select_positions(
-    data,
-    I,
-    mode,
-    existing_ids
-):
+    data: list[dict],
+    scores: np.ndarray,
+    mode: str,
+    existing_ids: set[str],
+    budget: float,
+    rng: np.random.Generator,
+) -> tuple[
+    np.ndarray,
+    str,
+    int,
+    int,
+    int,
+]:
 
-    n = len(I)
+    n = len(
+        scores
+    )
 
     if n == 0:
-
         raise ValueError(
             "No positions available."
         )
 
+    if not (
+        0.0
+        < budget
+        <= 1.0
+    ):
+        raise ValueError(
+            "budget must satisfy 0 < budget <= 1."
+        )
+
     # --------------------------------------------------------
-    # Budget is 0.02% of the original dataset.
+    # Annotation budget
     # --------------------------------------------------------
 
     target_count = max(
         1,
         math.ceil(
-            n * AL_BUDGET
-        )
+            n
+            * budget
+        ),
     )
 
     candidate_order, description = (
         build_candidate_order(
-            I,
-            mode
+            scores=scores,
+            mode=mode,
+            rng=rng,
         )
     )
 
@@ -486,22 +592,29 @@ def select_positions(
     rejected_duplicates = 0
 
     # --------------------------------------------------------
-    # Examine candidates in priority order.
+    # Examine candidates in priority order
     # --------------------------------------------------------
 
     for idx in candidate_order:
 
         checked += 1
 
-        record = data[idx]
+        record = data[
+            int(
+                idx
+            )
+        ]
 
-        query_id = uuid.uuid5(
-            uuid.NAMESPACE_DNS,
-            record["fen"]
-        ).hex
+        fen = record[
+            "fen"
+        ]
+
+        query_id = fen_to_query_id(
+            fen
+        )
 
         # ----------------------------------------------------
-        # Duplicate check
+        # Existing position
         # ----------------------------------------------------
 
         if query_id in existing_ids:
@@ -511,11 +624,11 @@ def select_positions(
             continue
 
         # ----------------------------------------------------
-        # Legal move check
+        # Trivial / forced position
         # ----------------------------------------------------
 
         legal_count = count_legal_moves(
-            record["fen"]
+            fen
         )
 
         if legal_count <= 1:
@@ -529,22 +642,23 @@ def select_positions(
         # ----------------------------------------------------
 
         selected.append(
-            idx
+            int(
+                idx
+            )
         )
 
         existing_ids.add(
             query_id
         )
 
-        if len(selected) >= target_count:
-
+        if len(
+            selected
+        ) >= target_count:
             break
 
-    # --------------------------------------------------------
-    # Safety check
-    # --------------------------------------------------------
-
-    if len(selected) < target_count:
+    if len(
+        selected
+    ) < target_count:
 
         raise RuntimeError(
             "Could not find enough new eligible positions "
@@ -552,27 +666,28 @@ def select_positions(
         )
 
     return (
-        np.array(
+        np.asarray(
             selected,
-            dtype=np.int64
+            dtype=np.int64,
         ),
         description,
         checked,
         rejected_moves,
-        rejected_duplicates
+        rejected_duplicates,
     )
 
 
 # ============================================================
-# Main
+# CLI
 # ============================================================
 
-def main():
+def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(
-        description=
-        "Seed ALBERTA oracle queue using the frozen "
-        "active-learning score or uniform random sampling."
+        description=(
+            "Seed an ALBERTA Oracle queue using the frozen "
+            "active-learning score or uniform random sampling."
+        )
     )
 
     parser.add_argument(
@@ -581,60 +696,137 @@ def main():
             "high",
             "low",
             "middle",
-            "random"
+            "random",
         ],
         default="high",
-        help=
-        "Selection mode: "
-        "high = highest I, "
-        "low = lowest I, "
-        "middle = around median, "
-        "random = uniform random selection."
+        help=(
+            "Selection mode: high = highest I, "
+            "low = lowest I, middle = around median, "
+            "random = uniform random."
+        ),
     )
 
-    args = parser.parse_args()
-
-    queue_file = get_queue_file(
-        args.mode
+    parser.add_argument(
+        "--data-file",
+        type=Path,
+        default=DEFAULT_DATA_FILE,
+        help="Input uncertainty-statistics JSON file.",
     )
 
-    print("=" * 70)
-    print(
-        "ALBERTA - SEED ORACLE QUEUE"
+    parser.add_argument(
+        "--queue-dir",
+        type=Path,
+        default=DEFAULT_QUEUE_DIR,
+        help="Directory containing Oracle queues.",
     )
-    print("=" * 70)
+
+    parser.add_argument(
+        "--queue-file",
+        type=Path,
+        default=None,
+        help=(
+            "Optional explicit output queue path. "
+            "Overrides the mode-specific default."
+        ),
+    )
+
+    parser.add_argument(
+        "--budget",
+        type=float,
+        default=DEFAULT_AL_BUDGET,
+        help=(
+            "Fraction of input observations to annotate. "
+            "Default: 0.0002 = 0.02%%."
+        ),
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        help=(
+            "Master seed used for random acquisition. "
+            "Default: 42."
+        ),
+    )
+
+    return parser.parse_args()
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main() -> None:
+
+    args = parse_args()
+
+    if args.seed < 0:
+        raise ValueError(
+            "--seed must be non-negative."
+        )
+
+    if not (
+        0.0
+        < args.budget
+        <= 1.0
+    ):
+        raise ValueError(
+            "--budget must satisfy 0 < budget <= 1."
+        )
+
+    rng = np.random.default_rng(
+        args.seed
+    )
+
+    queue_file = (
+        args.queue_file
+        if args.queue_file is not None
+        else get_queue_file(
+            queue_dir=args.queue_dir,
+            mode=args.mode,
+        )
+    )
+
+    # ========================================================
+    # Header
+    # ========================================================
 
     print()
+    print("=" * 70)
+    print("ALBERTA - SEED ORACLE QUEUE")
+    print("=" * 70)
+
     print(
         f"Selection mode : {args.mode}"
+    )
+
+    print(
+        f"Input file     : {args.data_file}"
     )
 
     print(
         f"Queue file     : {queue_file}"
     )
 
-    # --------------------------------------------------------
-    # Configuration
-    # --------------------------------------------------------
+    print(
+        f"Master seed    : {args.seed}"
+    )
+
+    print(
+        f"AL budget      : {100 * args.budget:.5f}%"
+    )
+
+    # ========================================================
+    # Acquisition-score configuration
+    # ========================================================
 
     print()
-    print(
-        "CONFIGURATION"
-    )
+    print("ACQUISITION SCORE")
     print("-" * 70)
 
     print(
         f"TAU            : {TAU:.6f}"
-    )
-
-    print(
-        f"AL budget      : "
-        f"{100 * AL_BUDGET:.5f}%"
-    )
-
-    print()
-    print(
-        "RAW OLS COEFFICIENTS"
     )
 
     print(
@@ -651,197 +843,225 @@ def main():
 
     print()
     print(
-        "Coefficients are used at their original "
-        "OLS scale; no coefficient normalization."
+        "Coefficients are used at their original OLS scale; "
+        "no coefficient normalization."
     )
 
-    # --------------------------------------------------------
-    # Load data
-    # --------------------------------------------------------
+    # ========================================================
+    # Load uncertainty data
+    # ========================================================
 
     print()
-    print(
-        "Loading uncertainty statistics..."
-    )
+    print("Loading uncertainty statistics...")
 
-    with open(
-        DATA_FILE,
+    if not args.data_file.exists():
+        raise FileNotFoundError(
+            f"Input file not found: {args.data_file}"
+        )
+
+    with args.data_file.open(
         "r",
-        encoding="utf-8"
+        encoding="utf-8",
     ) as f:
 
-        data = json.load(f)
+        data = json.load(
+            f
+        )
+
+    if not isinstance(
+        data,
+        list,
+    ):
+        raise ValueError(
+            "Input uncertainty file must contain a JSON list."
+        )
+
+    if len(
+        data
+    ) == 0:
+        raise RuntimeError(
+            "No positions found."
+        )
 
     print(
         f"Positions loaded : {len(data):,}"
     )
 
-    if len(data) == 0:
+    # ========================================================
+    # Raw signals
+    # ========================================================
 
-        raise RuntimeError(
-            "No positions found."
-        )
-
-    # --------------------------------------------------------
-    # Extract signals
-    # --------------------------------------------------------
-
-    fens = np.array(
+    fens = np.asarray(
         [
-            x["fen"]
-            for x in data
+            record[
+                "fen"
+            ]
+            for record in data
         ],
-        dtype=object
+        dtype=object,
     )
 
-    H = np.array(
+    H = np.asarray(
         [
-            x["H"]
-            for x in data
+            record[
+                "H"
+            ]
+            for record in data
         ],
-        dtype=np.float64
+        dtype=np.float64,
     )
 
-    U = np.array(
+    U = np.asarray(
         [
-            x["U"]
-            for x in data
+            record[
+                "U"
+            ]
+            for record in data
         ],
-        dtype=np.float64
+        dtype=np.float64,
     )
 
-    HU = np.array(
+    HU = np.asarray(
         [
-            x["HU"]
-            for x in data
+            record[
+                "HU"
+            ]
+            for record in data
         ],
-        dtype=np.float64
+        dtype=np.float64,
     )
 
     sides = extract_side(
         fens
     )
 
-    # --------------------------------------------------------
-    # Log transform of U
-    # --------------------------------------------------------
+    # ========================================================
+    # U log transform
+    # ========================================================
 
-    print()
-    print(
-        "Applying log transform to U..."
-    )
+    if TAU <= 0.0:
+        raise ValueError(
+            "TAU must be strictly positive."
+        )
+
+    if np.any(
+        U < 0.0
+    ):
+        raise ValueError(
+            "U contains negative values."
+        )
 
     U_log = np.log1p(
         U / TAU
     )
 
-    # --------------------------------------------------------
-    # Side-aware normalization
-    # --------------------------------------------------------
-
-    print()
-    print(
-        "Computing side-aware normalization..."
-    )
+    # ========================================================
+    # Side-aware percentile normalization
+    # ========================================================
 
     H_norm = normalize_side_aware(
         H,
-        sides
+        sides,
     )
 
     U_log_norm = normalize_side_aware(
         U_log,
-        sides
+        sides,
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Interaction
-    # --------------------------------------------------------
+    # ========================================================
 
     HU_log_norm = (
         H_norm
         * U_log_norm
     )
 
-    # --------------------------------------------------------
-    # Standardize predictors
+    # ========================================================
+    # Standardization
     #
-    # IMPORTANT:
-    #
-    # The OLS coefficients were estimated on standardized
-    # predictors, therefore we must reproduce exactly the same
-    # standardization here.
-    # --------------------------------------------------------
+    # These transformations must match those used when fitting
+    # the OLS acquisition coefficients.
+    # ========================================================
 
-    print()
-    print(
-        "Standardizing predictors..."
+    H_mean = float(
+        H_norm.mean()
     )
 
-    H_mean = H_norm.mean()
-    H_std = H_norm.std()
+    H_std = float(
+        H_norm.std()
+    )
 
-    U_log_mean = U_log_norm.mean()
-    U_log_std = U_log_norm.std()
+    U_log_mean = float(
+        U_log_norm.mean()
+    )
 
-    HU_log_mean = HU_log_norm.mean()
-    HU_log_std = HU_log_norm.std()
+    U_log_std = float(
+        U_log_norm.std()
+    )
 
-    if H_std <= 0:
+    HU_log_mean = float(
+        HU_log_norm.mean()
+    )
+
+    HU_log_std = float(
+        HU_log_norm.std()
+    )
+
+    if H_std <= 0.0:
         raise ValueError(
             "H normalized standard deviation is zero."
         )
 
-    if U_log_std <= 0:
+    if U_log_std <= 0.0:
         raise ValueError(
             "U_log normalized standard deviation is zero."
         )
 
-    if HU_log_std <= 0:
+    if HU_log_std <= 0.0:
         raise ValueError(
             "H*U_log normalized standard deviation is zero."
         )
 
     H_star = (
-        H_norm - H_mean
+        H_norm
+        - H_mean
     ) / H_std
 
     U_log_star = (
-        U_log_norm - U_log_mean
+        U_log_norm
+        - U_log_mean
     ) / U_log_std
 
     HU_log_star = (
-        HU_log_norm - HU_log_mean
+        HU_log_norm
+        - HU_log_mean
     ) / HU_log_std
 
-    # --------------------------------------------------------
-    # Compute raw I
-    # --------------------------------------------------------
+    # ========================================================
+    # Raw acquisition score
+    # ========================================================
 
     I = (
-        RAW_W_H * H_star
-        +
-        RAW_W_U * U_log_star
-        +
-        RAW_W_HU * HU_log_star
+        RAW_W_H
+        * H_star
+        + RAW_W_U
+        * U_log_star
+        + RAW_W_HU
+        * HU_log_star
     )
 
-    # --------------------------------------------------------
-    # Final min-max normalization
-    #
-    # ONLY for the final score representation.
-    #
-    # This does not affect ranking.
-    # --------------------------------------------------------
+    # ========================================================
+    # Display-only normalized score
+    # ========================================================
 
     I_norm = minmax_normalize(
         I
     )
 
     print()
-    print(
-        "Active learning score computed."
-    )
+    print("Active-learning score computed.")
 
     print(
         f"I min       : {I.min():+.9f}"
@@ -859,9 +1079,9 @@ def main():
         f"I_norm max  : {I_norm.max():.9f}"
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Existing queue
-    # --------------------------------------------------------
+    # ========================================================
 
     existing_ids = load_existing_ids(
         queue_file
@@ -869,30 +1089,26 @@ def main():
 
     print()
     print(
-        f"Existing queue entries : "
-        f"{len(existing_ids):,}"
+        f"Existing queue entries : {len(existing_ids):,}"
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Selection
-    # --------------------------------------------------------
-
-    print()
-    print(
-        "Searching candidates..."
-    )
+    # ========================================================
 
     (
         selected_indices,
         description,
         checked,
         rejected_moves,
-        rejected_duplicates
+        rejected_duplicates,
     ) = select_positions(
-        data,
-        I,
-        args.mode,
-        existing_ids
+        data=data,
+        scores=I,
+        mode=args.mode,
+        existing_ids=existing_ids,
+        budget=args.budget,
+        rng=rng,
     )
 
     selected_I = I[
@@ -903,104 +1119,97 @@ def main():
         selected_indices
     ]
 
-    # --------------------------------------------------------
-    # Selection statistics
-    # --------------------------------------------------------
+    # ========================================================
+    # Selection report
+    # ========================================================
 
     print()
-    print(
-        "ACTIVE LEARNING SELECTION"
-    )
+    print("ACTIVE LEARNING SELECTION")
     print("-" * 70)
 
     print(
-        f"Mode                : "
-        f"{description}"
+        f"Mode                 : {description}"
     )
 
     print(
-        f"Target annotations  : "
-        f"{len(selected_indices):,}"
+        f"Target annotations   : {len(selected_indices):,}"
     )
 
     print(
-        f"Candidates checked  : "
-        f"{checked:,}"
+        f"Candidates checked   : {checked:,}"
     )
 
     print(
-        f"Rejected (<=1 move) : "
-        f"{rejected_moves:,}"
+        f"Rejected (<=1 move)  : {rejected_moves:,}"
     )
 
     print(
-        f"Rejected (duplicate): "
-        f"{rejected_duplicates:,}"
+        f"Rejected (duplicate) : {rejected_duplicates:,}"
     )
 
     print(
-        f"Budget              : "
+        f"Budget               : "
         f"{100 * len(selected_indices) / len(data):.5f}%"
     )
 
     print(
-        f"I min selected      : "
-        f"{selected_I.min():+.9f}"
+        f"I min selected       : {selected_I.min():+.9f}"
     )
 
     print(
-        f"I max selected      : "
-        f"{selected_I.max():+.9f}"
+        f"I max selected       : {selected_I.max():+.9f}"
     )
 
     print(
-        f"I mean selected     : "
-        f"{selected_I.mean():+.9f}"
+        f"I mean selected      : {selected_I.mean():+.9f}"
     )
 
     print(
-        f"I median selected   : "
-        f"{np.median(selected_I):+.9f}"
+        f"I median selected    : {np.median(selected_I):+.9f}"
     )
 
     print(
-        f"I_norm min selected : "
-        f"{selected_I_norm.min():.9f}"
+        f"I_norm min selected  : {selected_I_norm.min():.9f}"
     )
 
     print(
-        f"I_norm max selected : "
-        f"{selected_I_norm.max():.9f}"
+        f"I_norm max selected  : {selected_I_norm.max():.9f}"
     )
 
-    # --------------------------------------------------------
-    # Side-to-move statistics
-    # --------------------------------------------------------
+    # ========================================================
+    # Side-to-move report
+    # ========================================================
 
     selected_sides = sides[
         selected_indices
     ]
 
-    global_white = np.sum(
-        sides == "w"
+    global_white = int(
+        np.sum(
+            sides == "w"
+        )
     )
 
-    global_black = np.sum(
-        sides == "b"
+    global_black = int(
+        np.sum(
+            sides == "b"
+        )
     )
 
-    selected_white = np.sum(
-        selected_sides == "w"
+    selected_white = int(
+        np.sum(
+            selected_sides == "w"
+        )
     )
 
-    selected_black = np.sum(
-        selected_sides == "b"
+    selected_black = int(
+        np.sum(
+            selected_sides == "b"
+        )
     )
 
     print()
-    print(
-        "SIDE-TO-MOVE"
-    )
+    print("SIDE-TO-MOVE")
     print("-" * 70)
 
     print(
@@ -1027,92 +1236,162 @@ def main():
         f"({100 * selected_black / len(selected_indices):.3f}%)"
     )
 
-    white_enrichment = (
-        (
+    if global_white > 0:
+
+        white_enrichment = (
             selected_white
-            /
-            len(selected_indices)
-        )
-        /
-        (
+            / len(
+                selected_indices
+            )
+        ) / (
             global_white
-            /
-            len(data)
+            / len(
+                data
+            )
         )
-    )
 
-    black_enrichment = (
-        (
+        print(
+            f"White enrichment  : {white_enrichment:.3f}x"
+        )
+
+    if global_black > 0:
+
+        black_enrichment = (
             selected_black
-            /
-            len(selected_indices)
-        )
-        /
-        (
+            / len(
+                selected_indices
+            )
+        ) / (
             global_black
-            /
-            len(data)
+            / len(
+                data
+            )
         )
-    )
 
-    print(
-        f"White enrichment : "
-        f"{white_enrichment:.3f}x"
-    )
+        print(
+            f"Black enrichment  : {black_enrichment:.3f}x"
+        )
 
-    print(
-        f"Black enrichment : "
-        f"{black_enrichment:.3f}x"
-    )
+    # ========================================================
+    # Append selected positions
+    # ========================================================
 
-    # --------------------------------------------------------
-    # Append to queue
-    # --------------------------------------------------------
-
-    QUEUE_DIR.mkdir(
+    queue_file.parent.mkdir(
         parents=True,
-        exist_ok=True
+        exist_ok=True,
     )
 
     added = 0
 
-    with open(
-        queue_file,
+    with queue_file.open(
         "a",
-        encoding="utf-8"
+        encoding="utf-8",
     ) as f:
 
         for idx in selected_indices:
 
-            record = data[idx]
+            idx = int(
+                idx
+            )
 
-            query_id = uuid.uuid5(
-                uuid.NAMESPACE_DNS,
-                record["fen"]
-            ).hex
+            record = data[
+                idx
+            ]
+
+            fen = record[
+                "fen"
+            ]
+
+            query_id = (
+                fen_to_query_id(
+                    fen
+                )
+            )
 
             item = {
-
                 "query_id":
                     query_id,
 
                 "fen":
-                    record["fen"],
+                    fen,
 
                 "H":
-                    float(H[idx]),
+                    float(
+                        H[
+                            idx
+                        ]
+                    ),
 
                 "U":
-                    float(U[idx]),
+                    float(
+                        U[
+                            idx
+                        ]
+                    ),
 
                 "HU":
-                    float(HU[idx]),
+                    float(
+                        HU[
+                            idx
+                        ]
+                    ),
 
-                "I":
-                    float(I[idx]),
+                # Canonical field name.
+                "score":
+                    float(
+                        I[
+                            idx
+                        ]
+                    ),
 
                 "I_norm":
-                    float(I_norm[idx]),
+                    float(
+                        I_norm[
+                            idx
+                        ]
+                    ),
+
+                # No single threshold is meaningful for all
+                # acquisition modes.
+                "threshold":
+                    None,
+
+                "model":
+                    str(
+                        record.get(
+                            "model",
+                            "historical_json",
+                        )
+                    ),
+
+                "epoch":
+                    int(
+                        record.get(
+                            "epoch",
+                            -1,
+                        )
+                    ),
+
+                "game_id":
+                    int(
+                        record.get(
+                            "game_id",
+                            -1,
+                        )
+                    ),
+
+                "ply":
+                    int(
+                        record.get(
+                            "ply",
+                            -1,
+                        )
+                    ),
+
+                "created_at":
+                    datetime.now(
+                        timezone.utc
+                    ).isoformat(),
 
                 "status":
                     "pending",
@@ -1126,35 +1405,33 @@ def main():
                 "oracle_situation":
                     None,
 
-                "created_at":
-                    datetime.now(
-                        timezone.utc
-                    ).isoformat(),
-
                 "reward":
                     None,
 
                 "answered_at":
-                    None
+                    None,
             }
 
             f.write(
-                json.dumps(item)
-                +
+                json.dumps(
+                    item,
+                    ensure_ascii=False,
+                )
+            )
+
+            f.write(
                 "\n"
             )
 
             added += 1
 
-    # --------------------------------------------------------
+    # ========================================================
     # Final report
-    # --------------------------------------------------------
+    # ========================================================
 
     print()
     print("=" * 70)
-    print(
-        "QUEUE UPDATED"
-    )
+    print("QUEUE UPDATED")
     print("=" * 70)
 
     print(
@@ -1166,8 +1443,7 @@ def main():
     )
 
     print(
-        f"Budget   : "
-        f"{100 * added / len(data):.5f}%"
+        f"Budget   : {100 * added / len(data):.5f}%"
     )
 
     print(
@@ -1176,5 +1452,4 @@ def main():
 
 
 if __name__ == "__main__":
-
     main()

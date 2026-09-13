@@ -1,115 +1,215 @@
-from pathlib import Path
-import sys
+from __future__ import annotations
+
+import argparse
 import csv
 import itertools
+import json
+import random
+import sys
 
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
 import torch
 
 
 # ============================================================
-# PROJECT ROOT
+# Project imports
 # ============================================================
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-
-from src.models.resnet import ChessResNet
-from src.models.actor_critic import ActorCritic
-from src.agents.actor_critic_agent import ActorCriticAgent
-from src.selfplay.game import SelfPlayGame
 from src.actions_space import ACTIONS
+from src.agents.actor_critic_agent import ActorCriticAgent
+from src.models.actor_critic import ActorCritic
+from src.models.resnet import ChessResNet
+from src.selfplay.game import SelfPlayGame
 
 
 # ============================================================
-# CONSTANTS
+# Default configuration
 # ============================================================
 
-DEVICE = "cpu"
+DEFAULT_RL_CHECKPOINT_DIR = (
+    PROJECT_ROOT
+    / "checkpoints"
+    / "rl_epoch"
+)
 
-
-# ============================================================
-# CHECKPOINT DIRECTORIES
-# ============================================================
-
-RL_CHECKPOINT_DIR = (
+DEFAULT_ORACLE_CHECKPOINT_DIR = (
     PROJECT_ROOT
     / "checkpoints"
     / "oracle_epoch_rndm"
-
 )
 
-ORACLE_CHECKPOINT_DIR = (
+DEFAULT_OUTPUT_DIR = (
     PROJECT_ROOT
-    / "checkpoints"
-    / "after"
+    / "evaluation"
+    / "results"
 )
 
+DEFAULT_GAMES_PER_MATCH = 100
+DEFAULT_TEMPERATURE = 2.0
 
-# ============================================================
-# OPTIONS
-# ============================================================
+DEFAULT_DEVICE = "cpu"
 
-# True  -> RL + Oracle
-# False -> RL only
-INCLUDE_ORACLE = True
+DEFAULT_CHANNELS = 32
+DEFAULT_BLOCKS = 4
 
-GAMES_PER_MATCH = 100
+DEFAULT_SEED = 42
 
-TEMPERATURE = 2
+DEFAULT_INITIAL_ELO = 1500.0
+DEFAULT_ELO_SCALE = 400.0
 
-
-# ============================================================
-# ELO
-# ============================================================
-
-INITIAL_ELO = 1500.0
-ELO_SCALE = 400.0
+DEFAULT_ELO_ITERATIONS = 5000
+DEFAULT_ELO_LEARNING_RATE = 1.0
 
 
 # ============================================================
-# OUTPUT
+# Reproducibility
 # ============================================================
 
-OUTPUT_CSV = (
-    PROJECT_ROOT
-    / "round_robin_results.csv"
-)
+def seed_everything(
+    seed: int,
+) -> None:
+
+    random.seed(seed)
+    np.random.seed(seed)
+
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def derive_game_seed(
+    master_seed: int,
+    match_index: int,
+    game_index: int,
+) -> int:
+    """
+    Derive one deterministic RNG seed per tournament game.
+
+    The master experimental seed remains 42 by default.
+    """
+
+    modulus = 2_147_483_647
+
+    seed = (
+        master_seed
+        + match_index * 1_000_003
+        + game_index * 7_919
+        + 104_729
+    ) % modulus
+
+    if seed == 0:
+        seed = 1
+
+    return seed
 
 
 # ============================================================
-# MODEL
+# Device
 # ============================================================
 
-def build_model():
+def resolve_device(
+    requested: str,
+) -> torch.device:
+
+    if requested == "auto":
+
+        return torch.device(
+            "cuda"
+            if torch.cuda.is_available()
+            else "cpu"
+        )
+
+    device = torch.device(
+        requested
+    )
+
+    if (
+        device.type == "cuda"
+        and not torch.cuda.is_available()
+    ):
+        raise RuntimeError(
+            "CUDA was requested but is not available."
+        )
+
+    return device
+
+
+# ============================================================
+# Model
+# ============================================================
+
+def build_model(
+    device: torch.device,
+    channels: int,
+    blocks: int,
+) -> ActorCritic:
 
     bc_model = ChessResNet(
         num_actions=len(ACTIONS),
-        channels=32,
-        blocks=4,
+        channels=channels,
+        blocks=blocks,
     )
 
     model = ActorCritic(
         bc_model
+    ).to(
+        device
     )
-
-    model.to(DEVICE)
 
     return model
 
 
-def load_model(path):
+def load_model(
+    path: Path,
+    device: torch.device,
+    channels: int,
+    blocks: int,
+) -> ActorCritic:
 
-    model = build_model()
+    if not path.exists():
+
+        raise FileNotFoundError(
+            f"Checkpoint not found: {path}"
+        )
+
+    model = build_model(
+        device=device,
+        channels=channels,
+        blocks=blocks,
+    )
 
     checkpoint = torch.load(
         path,
-        map_location=DEVICE,
+        map_location=device,
     )
 
+    checkpoint_actions = checkpoint.get(
+        "actions"
+    )
+
+    if (
+        checkpoint_actions is not None
+        and checkpoint_actions != len(ACTIONS)
+    ):
+
+        raise ValueError(
+            f"Action-space mismatch in {path}: "
+            f"{checkpoint_actions} != {len(ACTIONS)}"
+        )
+
     model.load_state_dict(
-        checkpoint["model_state_dict"]
+        checkpoint[
+            "model_state_dict"
+        ]
     )
 
     model.eval()
@@ -118,90 +218,121 @@ def load_model(path):
 
 
 # ============================================================
-# CHECKPOINT DISCOVERY
+# Checkpoint discovery
 # ============================================================
 
-def get_checkpoints():
+def extract_epoch(
+    path: Path,
+) -> int:
+
+    try:
+
+        return int(
+            path.stem.split("_")[-1]
+        )
+
+    except ValueError as exc:
+
+        raise ValueError(
+            f"Cannot extract epoch from {path.name}"
+        ) from exc
+
+
+def get_checkpoints(
+    rl_dir: Path,
+    oracle_dir: Path,
+    include_oracle: bool,
+) -> list[dict]:
 
     checkpoints = []
 
-    # ========================================================
+    # --------------------------------------------------------
     # RL
-    # ========================================================
+    # --------------------------------------------------------
 
-    if RL_CHECKPOINT_DIR.exists():
+    if rl_dir.exists():
 
-        paths = list(
-            RL_CHECKPOINT_DIR.glob(
-                "al_epoch_rndm*.pt"
-            )
-        )
-
-        paths.sort(
-            key=lambda p: int(
-                p.stem.split("_")[-1]
-            )
-        )
-
-        for path in paths:
-
-            epoch = int(
-                path.stem.split("_")[-1]
-            )
-
-            checkpoints.append(
-                {
-                    "name": f"RL{epoch}",
-                    "path": path,
-                    "type": "RL",
-                    "epoch": epoch,
-                }
-            )
-
-    # ========================================================
-    # ORACLE
-    # ========================================================
-
-    if (
-        INCLUDE_ORACLE
-        and ORACLE_CHECKPOINT_DIR.exists()
-    ):
-
-        paths = list(
-            ORACLE_CHECKPOINT_DIR.glob(
+        paths = sorted(
+            rl_dir.glob(
                 "rl_epoch_*.pt"
-            )
-        )
-
-        paths.sort(
-            key=lambda p: int(
-                p.stem.split("_")[-1]
-            )
+            ),
+            key=extract_epoch,
         )
 
         for path in paths:
 
-            epoch = int(
-                path.stem.split("_")[-1]
+            epoch = extract_epoch(
+                path
             )
 
             checkpoints.append(
                 {
-                    "name": f"ORACLE{epoch}",
-                    "path": path,
-                    "type": "ORACLE",
-                    "epoch": epoch,
+                    "name":
+                        f"RL{epoch}",
+
+                    "path":
+                        path,
+
+                    "type":
+                        "RL",
+
+                    "epoch":
+                        epoch,
                 }
             )
 
     # --------------------------------------------------------
-    # Sort globally by epoch, then type
+    # Oracle / AL
+    # --------------------------------------------------------
+
+    if (
+        include_oracle
+        and oracle_dir.exists()
+    ):
+
+        paths = sorted(
+            oracle_dir.glob(
+                "al_epoch_*.pt"
+            ),
+            key=extract_epoch,
+        )
+
+        for path in paths:
+
+            epoch = extract_epoch(
+                path
+            )
+
+            checkpoints.append(
+                {
+                    "name":
+                        f"ORACLE{epoch}",
+
+                    "path":
+                        path,
+
+                    "type":
+                        "ORACLE",
+
+                    "epoch":
+                        epoch,
+                }
+            )
+
+    # --------------------------------------------------------
+    # Deterministic global ordering
     # --------------------------------------------------------
 
     checkpoints.sort(
-        key=lambda x: (
-            x["epoch"],
-            0 if x["type"] == "RL" else 1,
+        key=lambda checkpoint: (
+            checkpoint[
+                "epoch"
+            ],
+            0
+            if checkpoint[
+                "type"
+            ] == "RL"
+            else 1,
         )
     )
 
@@ -209,24 +340,28 @@ def get_checkpoints():
 
 
 # ============================================================
-# MATCH
+# Single game
 # ============================================================
 
 def play_game(
-    white_model,
-    black_model,
-):
+    white_model: ActorCritic,
+    black_model: ActorCritic,
+    device: torch.device,
+    temperature: float,
+) -> str:
 
     white_agent = ActorCriticAgent(
         white_model,
+        device=device,
         deterministic=False,
-        temperature=TEMPERATURE,
+        temperature=temperature,
     )
 
     black_agent = ActorCriticAgent(
         black_model,
+        device=device,
         deterministic=False,
-        temperature=TEMPERATURE,
+        temperature=temperature,
     )
 
     game = SelfPlayGame(
@@ -240,72 +375,120 @@ def play_game(
 
 
 # ============================================================
-# ELO
+# Global Elo fit
 # ============================================================
 
 def expected_score(
-    rating_a,
-    rating_b,
-):
+    rating_a: float,
+    rating_b: float,
+    elo_scale: float,
+) -> float:
 
     return 1.0 / (
         1.0
         + 10.0 ** (
-            (rating_b - rating_a)
-            / ELO_SCALE
+            (
+                rating_b
+                - rating_a
+            )
+            / elo_scale
         )
     )
 
 
 def fit_global_elo(
-    agents,
-    match_results,
-    iterations=5000,
-    learning_rate=1.0,
-):
-
+    agents: list[str],
+    match_results: list[dict],
+    initial_elo: float,
+    elo_scale: float,
+    iterations: int,
+    learning_rate: float,
+) -> dict[str, float]:
     """
-    Estimate global Elo ratings from the COMPLETE
-    round-robin tournament.
+    Fit one set of Elo ratings jointly from the complete
+    round-robin results.
 
-    This is NOT sequential Elo.
+    Unlike sequential Elo updates, the result does not depend
+    on tournament match order.
 
-    All match results are considered simultaneously.
+    Draws count as 0.5 points.
 
-    Therefore the final ratings do not depend on
-    the order in which matches were played.
-
-    Draws are treated as 0.5 points.
-
-    Elo convention:
-        baseline = 1500
-        scale    = 400
+    The final ratings are centered so that their mean equals
+    initial_elo.
     """
 
     ratings = {
-        agent_id: INITIAL_ELO
-        for agent_id in agents
+        agent:
+            initial_elo
+        for agent in agents
     }
 
+    # Precompute number of games per agent.
+    games_per_agent = {
+        agent: 0
+        for agent in agents
+    }
+
+    for match in match_results:
+
+        games = (
+            match[
+                "a_wins"
+            ]
+            + match[
+                "b_wins"
+            ]
+            + match[
+                "draws"
+            ]
+        )
+
+        games_per_agent[
+            match[
+                "agent_a"
+            ]
+        ] += games
+
+        games_per_agent[
+            match[
+                "agent_b"
+            ]
+        ] += games
+
     # --------------------------------------------------------
-    # Iterative optimization
+    # Iterative global fit
     # --------------------------------------------------------
 
-    for _ in range(iterations):
+    for _ in range(
+        iterations
+    ):
 
         gradients = {
-            agent_id: 0.0
-            for agent_id in agents
+            agent: 0.0
+            for agent in agents
         }
 
         for match in match_results:
 
-            a = match["agent_a"]
-            b = match["agent_b"]
+            agent_a = match[
+                "agent_a"
+            ]
 
-            a_wins = match["a_wins"]
-            b_wins = match["b_wins"]
-            draws = match["draws"]
+            agent_b = match[
+                "agent_b"
+            ]
+
+            a_wins = match[
+                "a_wins"
+            ]
+
+            b_wins = match[
+                "b_wins"
+            ]
+
+            draws = match[
+                "draws"
+            ]
 
             total = (
                 a_wins
@@ -316,16 +499,19 @@ def fit_global_elo(
             if total == 0:
                 continue
 
-            # Observed score for A
             observed_a = (
                 a_wins
                 + 0.5 * draws
             ) / total
 
-            # Predicted score from Elo
             predicted_a = expected_score(
-                ratings[a],
-                ratings[b],
+                ratings[
+                    agent_a
+                ],
+                ratings[
+                    agent_b
+                ],
+                elo_scale,
             )
 
             error = (
@@ -333,145 +519,314 @@ def fit_global_elo(
                 - predicted_a
             )
 
-            gradients[a] += (
-                error * total
+            gradients[
+                agent_a
+            ] += (
+                error
+                * total
             )
 
-            gradients[b] -= (
-                error * total
+            gradients[
+                agent_b
+            ] -= (
+                error
+                * total
             )
-
-        # ----------------------------------------------------
-        # Normalize global gradient
-        # ----------------------------------------------------
 
         max_change = 0.0
 
-        for agent_id in agents:
+        for agent in agents:
 
-            # Number of games played by this agent
-            games = 0
-
-            for match in match_results:
-
-                if (
-                    match["agent_a"]
-                    == agent_id
-                ):
-
-                    games += (
-                        match["a_wins"]
-                        + match["b_wins"]
-                        + match["draws"]
-                    )
-
-                elif (
-                    match["agent_b"]
-                    == agent_id
-                ):
-
-                    games += (
-                        match["a_wins"]
-                        + match["b_wins"]
-                        + match["draws"]
-                    )
+            games = (
+                games_per_agent[
+                    agent
+                ]
+            )
 
             if games == 0:
                 continue
 
             change = (
                 learning_rate
-                * gradients[agent_id]
+                * gradients[
+                    agent
+                ]
                 / games
             )
 
-            ratings[agent_id] += change
+            ratings[
+                agent
+            ] += change
 
             max_change = max(
                 max_change,
-                abs(change),
+                abs(
+                    change
+                ),
             )
 
         if max_change < 1e-7:
             break
 
     # --------------------------------------------------------
-    # Center around 1500
+    # Elo is identifiable only up to an additive constant.
+    # Center ratings around the requested baseline.
     # --------------------------------------------------------
 
     mean_rating = (
-        sum(ratings.values())
-        / len(ratings)
+        sum(
+            ratings.values()
+        )
+        / len(
+            ratings
+        )
     )
 
     shift = (
-        INITIAL_ELO
+        initial_elo
         - mean_rating
     )
 
-    for agent_id in ratings:
+    for agent in ratings:
 
-        ratings[agent_id] += shift
+        ratings[
+            agent
+        ] += shift
 
     return ratings
 
 
 # ============================================================
-# MAIN
+# CLI
 # ============================================================
 
-def main():
+def parse_args() -> argparse.Namespace:
 
-    print("=" * 80)
-    print("ALBERTA - ROUND ROBIN TOURNAMENT")
-    print("=" * 80)
-
-    print()
-    print(
-        f"RL directory     : "
-        f"{RL_CHECKPOINT_DIR}"
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run a round-robin tournament between ALBERTA "
+            "ActorCritic checkpoints."
+        )
     )
 
-    print(
-        f"Oracle directory : "
-        f"{ORACLE_CHECKPOINT_DIR}"
+    parser.add_argument(
+        "--rl-dir",
+        type=Path,
+        default=DEFAULT_RL_CHECKPOINT_DIR,
     )
 
-    print(
-        f"Include Oracle   : "
-        f"{INCLUDE_ORACLE}"
+    parser.add_argument(
+        "--oracle-dir",
+        type=Path,
+        default=DEFAULT_ORACLE_CHECKPOINT_DIR,
     )
 
-    print(
-        f"Games per match  : "
-        f"{GAMES_PER_MATCH}"
+    parser.add_argument(
+        "--include-oracle",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Include Oracle/AL checkpoints in addition "
+            "to RL checkpoints."
+        ),
     )
 
-    print(
-        f"Temperature      : "
-        f"{TEMPERATURE}"
+    parser.add_argument(
+        "--games-per-match",
+        type=int,
+        default=DEFAULT_GAMES_PER_MATCH,
     )
 
-    print(
-        f"Device           : "
-        f"{DEVICE}"
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=DEFAULT_TEMPERATURE,
     )
 
-    print()
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=DEFAULT_DEVICE,
+    )
 
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+    )
+
+    parser.add_argument(
+        "--channels",
+        type=int,
+        default=DEFAULT_CHANNELS,
+    )
+
+    parser.add_argument(
+        "--blocks",
+        type=int,
+        default=DEFAULT_BLOCKS,
+    )
+
+    parser.add_argument(
+        "--initial-elo",
+        type=float,
+        default=DEFAULT_INITIAL_ELO,
+    )
+
+    parser.add_argument(
+        "--elo-scale",
+        type=float,
+        default=DEFAULT_ELO_SCALE,
+    )
+
+    parser.add_argument(
+        "--elo-iterations",
+        type=int,
+        default=DEFAULT_ELO_ITERATIONS,
+    )
+
+    parser.add_argument(
+        "--elo-learning-rate",
+        type=float,
+        default=DEFAULT_ELO_LEARNING_RATE,
+    )
+
+    parser.add_argument(
+        "--output-csv",
+        type=Path,
+        default=None,
+    )
+
+    parser.add_argument(
+        "--output-json",
+        type=Path,
+        default=None,
+    )
+
+    return parser.parse_args()
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main() -> None:
+
+    args = parse_args()
 
     # ========================================================
-    # DISCOVER
+    # Validation
     # ========================================================
 
-    checkpoints = get_checkpoints()
+    if args.games_per_match <= 0:
+
+        raise ValueError(
+            "--games-per-match must be greater than zero."
+        )
+
+    if args.games_per_match % 2 != 0:
+
+        raise ValueError(
+            "--games-per-match must be even so colors "
+            "are exactly balanced."
+        )
+
+    if args.temperature < 0.0:
+
+        raise ValueError(
+            "--temperature cannot be negative."
+        )
+
+    if args.seed < 0:
+
+        raise ValueError(
+            "--seed must be non-negative."
+        )
+
+    if args.elo_scale <= 0.0:
+
+        raise ValueError(
+            "--elo-scale must be greater than zero."
+        )
+
+    if args.elo_iterations <= 0:
+
+        raise ValueError(
+            "--elo-iterations must be greater than zero."
+        )
+
+    if args.elo_learning_rate <= 0.0:
+
+        raise ValueError(
+            "--elo-learning-rate must be greater than zero."
+        )
+
+    device = resolve_device(
+        args.device
+    )
+
+    # ========================================================
+    # Reproducibility
+    # ========================================================
+
+    seed_everything(
+        args.seed
+    )
+
+    # ========================================================
+    # Header
+    # ========================================================
+
+    print()
+    print("=" * 80)
+    print("ALBERTA - ACTOR-CRITIC ROUND ROBIN")
+    print("=" * 80)
+
+    print(
+        f"RL directory       : {args.rl_dir}"
+    )
+
+    print(
+        f"Oracle directory   : {args.oracle_dir}"
+    )
+
+    print(
+        f"Include Oracle     : {args.include_oracle}"
+    )
+
+    print(
+        f"Games / match      : {args.games_per_match}"
+    )
+
+    print(
+        f"Temperature        : {args.temperature}"
+    )
+
+    print(
+        f"Device             : {device}"
+    )
+
+    print(
+        f"Master seed        : {args.seed}"
+    )
+
+    # ========================================================
+    # Discover checkpoints
+    # ========================================================
+
+    checkpoints = get_checkpoints(
+        rl_dir=args.rl_dir,
+        oracle_dir=args.oracle_dir,
+        include_oracle=args.include_oracle,
+    )
 
     if len(checkpoints) < 2:
 
         raise RuntimeError(
-            "Need at least two checkpoints."
+            "At least two ActorCritic checkpoints are required."
         )
 
+    print()
     print("=" * 80)
     print("CHECKPOINTS")
     print("=" * 80)
@@ -480,47 +835,49 @@ def main():
 
         print(
             f"{checkpoint['name']:<12} "
-            f"{checkpoint['path'].name}"
+            f"{checkpoint['path']}"
         )
 
-    print()
-
-    num_agents = len(checkpoints)
+    num_agents = len(
+        checkpoints
+    )
 
     total_matches = (
         num_agents
-        * (num_agents - 1)
+        * (
+            num_agents
+            - 1
+        )
         // 2
     )
 
     total_games = (
         total_matches
-        * GAMES_PER_MATCH
-    )
-
-    print(
-        f"Agents        : {num_agents}"
-    )
-
-    print(
-        f"Matches       : {total_matches}"
-    )
-
-    print(
-        f"Games/match   : {GAMES_PER_MATCH}"
-    )
-
-    print(
-        f"Total games   : {total_games}"
+        * args.games_per_match
     )
 
     print()
+    print(
+        f"Agents          : {num_agents}"
+    )
 
+    print(
+        f"Matches         : {total_matches}"
+    )
+
+    print(
+        f"Games / match   : {args.games_per_match}"
+    )
+
+    print(
+        f"Total games     : {total_games}"
+    )
 
     # ========================================================
-    # LOAD MODELS
+    # Load models
     # ========================================================
 
+    print()
     print("=" * 80)
     print("LOADING MODELS")
     print("=" * 80)
@@ -529,134 +886,174 @@ def main():
 
     for checkpoint in checkpoints:
 
-        name = checkpoint["name"]
+        name = checkpoint[
+            "name"
+        ]
 
         print(
             f"Loading {name}..."
         )
 
-        models[name] = load_model(
-            checkpoint["path"]
+        models[
+            name
+        ] = load_model(
+            path=checkpoint[
+                "path"
+            ],
+            device=device,
+            channels=args.channels,
+            blocks=args.blocks,
         )
 
-    print()
-
-    print(
-        f"Loaded {len(models)} models."
-    )
-
-    print()
-
-
     # ========================================================
-    # STATS
+    # Statistics
     # ========================================================
 
-    stats = {}
-
-    for checkpoint in checkpoints:
-
-        name = checkpoint["name"]
-
-        stats[name] = {
+    stats = {
+        checkpoint[
+            "name"
+        ]: {
             "games": 0,
             "wins": 0,
             "losses": 0,
             "draws": 0,
             "score": 0.0,
         }
-
+        for checkpoint in checkpoints
+    }
 
     match_results = []
 
-
     # ========================================================
-    # TOURNAMENT
+    # Tournament
     # ========================================================
 
+    print()
     print("=" * 80)
     print("TOURNAMENT")
     print("=" * 80)
 
-    for match_index, (
-        checkpoint_a,
-        checkpoint_b,
-    ) in enumerate(
+    matchups = list(
         itertools.combinations(
             checkpoints,
             2,
-        ),
-        start=1,
+        )
+    )
+
+    for zero_based_match_index, (
+        checkpoint_a,
+        checkpoint_b,
+    ) in enumerate(
+        matchups
     ):
 
-        name_a = checkpoint_a["name"]
-        name_b = checkpoint_b["name"]
+        match_number = (
+            zero_based_match_index
+            + 1
+        )
 
-        model_a = models[name_a]
-        model_b = models[name_b]
+        name_a = checkpoint_a[
+            "name"
+        ]
+
+        name_b = checkpoint_b[
+            "name"
+        ]
+
+        model_a = models[
+            name_a
+        ]
+
+        model_b = models[
+            name_b
+        ]
 
         a_wins = 0
         b_wins = 0
         draws = 0
 
+        half = (
+            args.games_per_match
+            // 2
+        )
+
+        print()
         print(
-            f"[{match_index}/{total_matches}] "
+            f"[{match_number}/{total_matches}] "
             f"{name_a} vs {name_b}"
         )
 
+        # ----------------------------------------------------
+        # First half: A White
+        # ----------------------------------------------------
 
-        # ====================================================
-        # A WHITE / B BLACK
-        # ====================================================
+        for local_game_index in range(
+            half
+        ):
 
-        half = GAMES_PER_MATCH // 2
+            game_seed = derive_game_seed(
+                master_seed=args.seed,
+                match_index=zero_based_match_index,
+                game_index=local_game_index,
+            )
 
-        for _ in range(half):
+            seed_everything(
+                game_seed
+            )
 
             result = play_game(
-                model_a,
-                model_b,
+                white_model=model_a,
+                black_model=model_b,
+                device=device,
+                temperature=args.temperature,
             )
 
             if result == "1-0":
-
                 a_wins += 1
 
             elif result == "0-1":
-
                 b_wins += 1
 
             else:
-
                 draws += 1
 
+        # ----------------------------------------------------
+        # Second half: B White
+        # ----------------------------------------------------
 
-        # ====================================================
-        # B WHITE / A BLACK
-        # ====================================================
+        for local_game_index in range(
+            half,
+            args.games_per_match,
+        ):
 
-        for _ in range(half):
+            game_seed = derive_game_seed(
+                master_seed=args.seed,
+                match_index=zero_based_match_index,
+                game_index=local_game_index,
+            )
+
+            seed_everything(
+                game_seed
+            )
 
             result = play_game(
-                model_b,
-                model_a,
+                white_model=model_b,
+                black_model=model_a,
+                device=device,
+                temperature=args.temperature,
             )
 
             if result == "1-0":
-
                 b_wins += 1
 
             elif result == "0-1":
-
                 a_wins += 1
 
             else:
-
                 draws += 1
 
-
         # ====================================================
-        # SCORES
+        # Match score
         # ====================================================
 
         a_score = (
@@ -671,16 +1068,15 @@ def main():
 
         a_percentage = (
             a_score
-            / GAMES_PER_MATCH
-            * 100
+            / args.games_per_match
+            * 100.0
         )
 
         b_percentage = (
             b_score
-            / GAMES_PER_MATCH
-            * 100
+            / args.games_per_match
+            * 100.0
         )
-
 
         print(
             f"    {name_a:<12} "
@@ -698,52 +1094,97 @@ def main():
             f"-> {b_percentage:5.1f}%"
         )
 
-        print()
-
-
         # ====================================================
-        # GLOBAL STATS
+        # Global statistics
         # ====================================================
 
-        stats[name_a]["games"] += (
-            GAMES_PER_MATCH
-        )
+        stats[
+            name_a
+        ][
+            "games"
+        ] += args.games_per_match
 
-        stats[name_a]["wins"] += a_wins
-        stats[name_a]["losses"] += b_wins
-        stats[name_a]["draws"] += draws
-        stats[name_a]["score"] += a_score
+        stats[
+            name_a
+        ][
+            "wins"
+        ] += a_wins
 
+        stats[
+            name_a
+        ][
+            "losses"
+        ] += b_wins
 
-        stats[name_b]["games"] += (
-            GAMES_PER_MATCH
-        )
+        stats[
+            name_a
+        ][
+            "draws"
+        ] += draws
 
-        stats[name_b]["wins"] += b_wins
-        stats[name_b]["losses"] += a_wins
-        stats[name_b]["draws"] += draws
-        stats[name_b]["score"] += b_score
+        stats[
+            name_a
+        ][
+            "score"
+        ] += a_score
 
+        stats[
+            name_b
+        ][
+            "games"
+        ] += args.games_per_match
 
-        # ====================================================
-        # SAVE MATCH
-        # ====================================================
+        stats[
+            name_b
+        ][
+            "wins"
+        ] += b_wins
+
+        stats[
+            name_b
+        ][
+            "losses"
+        ] += a_wins
+
+        stats[
+            name_b
+        ][
+            "draws"
+        ] += draws
+
+        stats[
+            name_b
+        ][
+            "score"
+        ] += b_score
 
         match_results.append(
             {
-                "agent_a": name_a,
-                "agent_b": name_b,
-                "a_wins": a_wins,
-                "b_wins": b_wins,
-                "draws": draws,
-                "a_score_pct": a_percentage,
-                "b_score_pct": b_percentage,
+                "agent_a":
+                    name_a,
+
+                "agent_b":
+                    name_b,
+
+                "a_wins":
+                    a_wins,
+
+                "b_wins":
+                    b_wins,
+
+                "draws":
+                    draws,
+
+                "a_score_pct":
+                    a_percentage,
+
+                "b_score_pct":
+                    b_percentage,
             }
         )
 
-
     # ========================================================
-    # GLOBAL ELO
+    # Global Elo
     # ========================================================
 
     print()
@@ -752,26 +1193,34 @@ def main():
     print("=" * 80)
 
     agent_names = [
-        checkpoint["name"]
+        checkpoint[
+            "name"
+        ]
         for checkpoint in checkpoints
     ]
 
     elo = fit_global_elo(
-        agent_names,
-        match_results,
+        agents=agent_names,
+        match_results=match_results,
+        initial_elo=args.initial_elo,
+        elo_scale=args.elo_scale,
+        iterations=args.elo_iterations,
+        learning_rate=args.elo_learning_rate,
     )
 
-
     # ========================================================
-    # FINAL RANKING
+    # Final ranking
     # ========================================================
 
     ranking = sorted(
         agent_names,
-        key=lambda name: elo[name],
-        reverse=True,
+        key=lambda name: (
+            -elo[
+                name
+            ],
+            name,
+        ),
     )
-
 
     print()
     print("=" * 80)
@@ -790,42 +1239,116 @@ def main():
 
     print("-" * 80)
 
+    ranking_output = []
 
     for rank, name in enumerate(
         ranking,
         start=1,
     ):
 
-        s = stats[name]
+        agent_stats = stats[
+            name
+        ]
 
-        score_pct = (
-            s["score"]
-            / s["games"]
-            * 100
+        score_fraction = (
+            agent_stats[
+                "score"
+            ]
+            / agent_stats[
+                "games"
+            ]
         )
 
         print(
             f"{rank:<6}"
             f"{name:<12}"
             f"{elo[name]:>7.0f}   "
-            f"{score_pct:>6.1f}%   "
-            f"{s['wins']:<8}"
-            f"{s['losses']:<8}"
-            f"{s['draws']:<8}"
+            f"{100 * score_fraction:>6.1f}%   "
+            f"{agent_stats['wins']:<8}"
+            f"{agent_stats['losses']:<8}"
+            f"{agent_stats['draws']:<8}"
         )
 
+        ranking_output.append(
+            {
+                "rank":
+                    rank,
+
+                "agent":
+                    name,
+
+                "elo":
+                    elo[
+                        name
+                    ],
+
+                **agent_stats,
+
+                "score_fraction":
+                    score_fraction,
+            }
+        )
 
     # ========================================================
-    # SAVE CSV
+    # Output paths
+    # ========================================================
+
+    timestamp = datetime.now(
+        timezone.utc
+    ).strftime(
+        "%Y%m%d_%H%M%S"
+    )
+
+    if args.output_csv is None:
+
+        output_csv = (
+            DEFAULT_OUTPUT_DIR
+            / f"round_robin_{timestamp}.csv"
+        )
+
+    else:
+
+        output_csv = (
+            args.output_csv
+        )
+
+    if args.output_json is None:
+
+        output_json = (
+            DEFAULT_OUTPUT_DIR
+            / f"round_robin_{timestamp}.json"
+        )
+
+    else:
+
+        output_json = (
+            args.output_json
+        )
+
+    output_csv.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    output_json.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # ========================================================
+    # Save CSV
     # ========================================================
 
     with open(
-        OUTPUT_CSV,
+        output_csv,
         "w",
         newline="",
+        encoding="utf-8",
     ) as f:
 
-        writer = csv.writer(f)
+        writer = csv.writer(
+            f
+        )
 
         writer.writerow(
             [
@@ -843,24 +1366,101 @@ def main():
 
             writer.writerow(
                 [
-                    result["agent_a"],
-                    result["agent_b"],
-                    result["a_wins"],
-                    result["b_wins"],
-                    result["draws"],
+                    result[
+                        "agent_a"
+                    ],
+                    result[
+                        "agent_b"
+                    ],
+                    result[
+                        "a_wins"
+                    ],
+                    result[
+                        "b_wins"
+                    ],
+                    result[
+                        "draws"
+                    ],
                     f"{result['a_score_pct']:.4f}",
                     f"{result['b_score_pct']:.4f}",
                 ]
             )
 
+    # ========================================================
+    # Save JSON
+    # ========================================================
+
+    output = {
+        "seed":
+            args.seed,
+
+        "temperature":
+            args.temperature,
+
+        "games_per_match":
+            args.games_per_match,
+
+        "include_oracle":
+            args.include_oracle,
+
+        "device":
+            str(
+                device
+            ),
+
+        "checkpoints":
+            [
+                {
+                    **checkpoint,
+                    "path":
+                        str(
+                            checkpoint[
+                                "path"
+                            ]
+                        ),
+                }
+                for checkpoint
+                in checkpoints
+            ],
+
+        "total_matches":
+            total_matches,
+
+        "total_games":
+            total_games,
+
+        "match_results":
+            match_results,
+
+        "elo":
+            elo,
+
+        "ranking":
+            ranking_output,
+
+        "timestamp_utc":
+            timestamp,
+    }
+
+    with open(
+        output_json,
+        "w",
+        encoding="utf-8",
+    ) as f:
+
+        json.dump(
+            output,
+            f,
+            indent=2,
+        )
 
     print()
     print(
-        "Match results saved to:"
+        f"CSV saved to:  {output_csv}"
     )
 
     print(
-        f"  {OUTPUT_CSV}"
+        f"JSON saved to: {output_json}"
     )
 
     print()
