@@ -11,13 +11,6 @@ from pathlib import Path
 import chess.variant
 import numpy as np
 
-from AL.AL_weights import (
-    RAW_W_H,
-    RAW_W_HU,
-    RAW_W_U,
-    TAU,
-)
-
 
 # ============================================================
 # Project paths
@@ -34,7 +27,7 @@ DEFAULT_DATA_FILE = (
 
 DEFAULT_QUEUE_DIR = (
     PROJECT_ROOT
-    / "checkpoints"
+    / "data"
     / "queue"
 )
 
@@ -789,6 +782,29 @@ def main() -> None:
     )
 
     # ========================================================
+    # Load AL weights only when acquisition uses I
+    #
+    # Random acquisition must remain completely independent
+    # from the fitted active-learning score.
+    # ========================================================
+
+    if args.mode != "random":
+
+        from AL_weights import (
+            RAW_W_H,
+            RAW_W_HU,
+            RAW_W_U,
+            TAU,
+        )
+
+    else:
+
+        RAW_W_H = None
+        RAW_W_U = None
+        RAW_W_HU = None
+        TAU = None
+
+    # ========================================================
     # Header
     # ========================================================
 
@@ -825,27 +841,39 @@ def main() -> None:
     print("ACQUISITION SCORE")
     print("-" * 70)
 
-    print(
-        f"TAU            : {TAU:.6f}"
-    )
+    if args.mode == "random":
 
-    print(
-        f"RAW_W_H        : {RAW_W_H:+.9f}"
-    )
+        print(
+            "Random acquisition: I is not computed."
+        )
 
-    print(
-        f"RAW_W_U        : {RAW_W_U:+.9f}"
-    )
+        print(
+            "AL_weights.py is not imported or used."
+        )
 
-    print(
-        f"RAW_W_HU       : {RAW_W_HU:+.9f}"
-    )
+    else:
 
-    print()
-    print(
-        "Coefficients are used at their original OLS scale; "
-        "no coefficient normalization."
-    )
+        print(
+            f"TAU            : {TAU:.6f}"
+        )
+
+        print(
+            f"RAW_W_H        : {RAW_W_H:+.9f}"
+        )
+
+        print(
+            f"RAW_W_U        : {RAW_W_U:+.9f}"
+        )
+
+        print(
+            f"RAW_W_HU       : {RAW_W_HU:+.9f}"
+        )
+
+        print()
+        print(
+            "Coefficients are used at their original OLS scale; "
+            "no coefficient normalization."
+        )
 
     # ========================================================
     # Load uncertainty data
@@ -936,148 +964,173 @@ def main() -> None:
     )
 
     # ========================================================
-    # U log transform
+    # Acquisition score
     # ========================================================
 
-    if TAU <= 0.0:
-        raise ValueError(
-            "TAU must be strictly positive."
+    if args.mode == "random":
+
+        # ----------------------------------------------------
+        # Random selection does not use I.
+        #
+        # build_candidate_order() only needs an array whose
+        # length equals the number of records.
+        # ----------------------------------------------------
+
+        I = np.zeros(
+            len(data),
+            dtype=np.float64,
         )
 
-    if np.any(
-        U < 0.0
-    ):
-        raise ValueError(
-            "U contains negative values."
+        I_norm = np.zeros(
+            len(data),
+            dtype=np.float64,
         )
 
-    U_log = np.log1p(
-        U / TAU
-    )
+    else:
 
-    # ========================================================
-    # Side-aware percentile normalization
-    # ========================================================
+        # ====================================================
+        # U log transform
+        # ====================================================
 
-    H_norm = normalize_side_aware(
-        H,
-        sides,
-    )
+        if TAU <= 0.0:
+            raise ValueError(
+                "TAU must be strictly positive."
+            )
 
-    U_log_norm = normalize_side_aware(
-        U_log,
-        sides,
-    )
+        if np.any(
+            U < 0.0
+        ):
+            raise ValueError(
+                "U contains negative values."
+            )
 
-    # ========================================================
-    # Interaction
-    # ========================================================
-
-    HU_log_norm = (
-        H_norm
-        * U_log_norm
-    )
-
-    # ========================================================
-    # Standardization
-    #
-    # These transformations must match those used when fitting
-    # the OLS acquisition coefficients.
-    # ========================================================
-
-    H_mean = float(
-        H_norm.mean()
-    )
-
-    H_std = float(
-        H_norm.std()
-    )
-
-    U_log_mean = float(
-        U_log_norm.mean()
-    )
-
-    U_log_std = float(
-        U_log_norm.std()
-    )
-
-    HU_log_mean = float(
-        HU_log_norm.mean()
-    )
-
-    HU_log_std = float(
-        HU_log_norm.std()
-    )
-
-    if H_std <= 0.0:
-        raise ValueError(
-            "H normalized standard deviation is zero."
+        U_log = np.log1p(
+            U / TAU
         )
 
-    if U_log_std <= 0.0:
-        raise ValueError(
-            "U_log normalized standard deviation is zero."
+        # ====================================================
+        # Side-aware percentile normalization
+        # ====================================================
+
+        H_norm = normalize_side_aware(
+            H,
+            sides,
         )
 
-    if HU_log_std <= 0.0:
-        raise ValueError(
-            "H*U_log normalized standard deviation is zero."
+        U_log_norm = normalize_side_aware(
+            U_log,
+            sides,
         )
 
-    H_star = (
-        H_norm
-        - H_mean
-    ) / H_std
+        # ====================================================
+        # Interaction
+        # ====================================================
 
-    U_log_star = (
-        U_log_norm
-        - U_log_mean
-    ) / U_log_std
+        HU_log_norm = (
+            H_norm
+            * U_log_norm
+        )
 
-    HU_log_star = (
-        HU_log_norm
-        - HU_log_mean
-    ) / HU_log_std
+        # ====================================================
+        # Standardization
+        #
+        # These transformations must match those used when
+        # fitting the OLS acquisition coefficients.
+        # ====================================================
 
-    # ========================================================
-    # Raw acquisition score
-    # ========================================================
+        H_mean = float(
+            H_norm.mean()
+        )
 
-    I = (
-        RAW_W_H
-        * H_star
-        + RAW_W_U
-        * U_log_star
-        + RAW_W_HU
-        * HU_log_star
-    )
+        H_std = float(
+            H_norm.std()
+        )
 
-    # ========================================================
-    # Display-only normalized score
-    # ========================================================
+        U_log_mean = float(
+            U_log_norm.mean()
+        )
 
-    I_norm = minmax_normalize(
-        I
-    )
+        U_log_std = float(
+            U_log_norm.std()
+        )
 
-    print()
-    print("Active-learning score computed.")
+        HU_log_mean = float(
+            HU_log_norm.mean()
+        )
 
-    print(
-        f"I min       : {I.min():+.9f}"
-    )
+        HU_log_std = float(
+            HU_log_norm.std()
+        )
 
-    print(
-        f"I max       : {I.max():+.9f}"
-    )
+        if H_std <= 0.0:
+            raise ValueError(
+                "H normalized standard deviation is zero."
+            )
 
-    print(
-        f"I_norm min  : {I_norm.min():.9f}"
-    )
+        if U_log_std <= 0.0:
+            raise ValueError(
+                "U_log normalized standard deviation is zero."
+            )
 
-    print(
-        f"I_norm max  : {I_norm.max():.9f}"
-    )
+        if HU_log_std <= 0.0:
+            raise ValueError(
+                "H*U_log normalized standard deviation is zero."
+            )
+
+        H_star = (
+            H_norm
+            - H_mean
+        ) / H_std
+
+        U_log_star = (
+            U_log_norm
+            - U_log_mean
+        ) / U_log_std
+
+        HU_log_star = (
+            HU_log_norm
+            - HU_log_mean
+        ) / HU_log_std
+
+        # ====================================================
+        # Raw acquisition score
+        # ====================================================
+
+        I = (
+            RAW_W_H
+            * H_star
+            + RAW_W_U
+            * U_log_star
+            + RAW_W_HU
+            * HU_log_star
+        )
+
+        # ====================================================
+        # Display-only normalized score
+        # ====================================================
+
+        I_norm = minmax_normalize(
+            I
+        )
+
+        print()
+        print("Active-learning score computed.")
+
+        print(
+            f"I min       : {I.min():+.9f}"
+        )
+
+        print(
+            f"I max       : {I.max():+.9f}"
+        )
+
+        print(
+            f"I_norm min  : {I_norm.min():.9f}"
+        )
+
+        print(
+            f"I_norm max  : {I_norm.max():.9f}"
+        )
 
     # ========================================================
     # Existing queue
@@ -1111,13 +1164,20 @@ def main() -> None:
         rng=rng,
     )
 
-    selected_I = I[
-        selected_indices
-    ]
+    if args.mode != "random":
 
-    selected_I_norm = I_norm[
-        selected_indices
-    ]
+        selected_I = I[
+            selected_indices
+        ]
+
+        selected_I_norm = I_norm[
+            selected_indices
+        ]
+
+    else:
+
+        selected_I = None
+        selected_I_norm = None
 
     # ========================================================
     # Selection report
@@ -1152,29 +1212,37 @@ def main() -> None:
         f"{100 * len(selected_indices) / len(data):.5f}%"
     )
 
-    print(
-        f"I min selected       : {selected_I.min():+.9f}"
-    )
+    if args.mode != "random":
 
-    print(
-        f"I max selected       : {selected_I.max():+.9f}"
-    )
+        print(
+            f"I min selected       : {selected_I.min():+.9f}"
+        )
 
-    print(
-        f"I mean selected      : {selected_I.mean():+.9f}"
-    )
+        print(
+            f"I max selected       : {selected_I.max():+.9f}"
+        )
 
-    print(
-        f"I median selected    : {np.median(selected_I):+.9f}"
-    )
+        print(
+            f"I mean selected      : {selected_I.mean():+.9f}"
+        )
 
-    print(
-        f"I_norm min selected  : {selected_I_norm.min():.9f}"
-    )
+        print(
+            f"I median selected    : {np.median(selected_I):+.9f}"
+        )
 
-    print(
-        f"I_norm max selected  : {selected_I_norm.max():.9f}"
-    )
+        print(
+            f"I_norm min selected  : {selected_I_norm.min():.9f}"
+        )
+
+        print(
+            f"I_norm max selected  : {selected_I_norm.max():.9f}"
+        )
+
+    else:
+
+        print(
+            "I statistics         : N/A (random acquisition)"
+        )
 
     # ========================================================
     # Side-to-move report
@@ -1336,19 +1404,27 @@ def main() -> None:
                         ]
                     ),
 
-                # Canonical field name.
+                # Random acquisition has no meaningful I score.
                 "score":
-                    float(
-                        I[
-                            idx
-                        ]
+                    (
+                        None
+                        if args.mode == "random"
+                        else float(
+                            I[
+                                idx
+                            ]
+                        )
                     ),
 
                 "I_norm":
-                    float(
-                        I_norm[
-                            idx
-                        ]
+                    (
+                        None
+                        if args.mode == "random"
+                        else float(
+                            I_norm[
+                                idx
+                            ]
+                        )
                     ),
 
                 # No single threshold is meaningful for all

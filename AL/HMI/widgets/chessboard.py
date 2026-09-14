@@ -20,14 +20,13 @@ from PyQt6.QtWidgets import (
 # Assets
 # ============================================================
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+HMI_ROOT = Path(__file__).resolve().parents[1]
 
 PIECE_ASSET_DIR = (
-    PROJECT_ROOT
+    HMI_ROOT
     / "assets"
     / "pieces"
 )
-
 
 # ============================================================
 # Promotion dialog

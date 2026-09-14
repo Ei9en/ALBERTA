@@ -1,0 +1,144 @@
+{
+  "seed": 42,
+  "temperature": 2.0,
+  "games_per_match": 200,
+  "include_oracle": true,
+  "device": "cpu",
+  "checkpoints": [
+    {
+      "name": "RL5",
+      "path": "/Users/tom/Desktop/Atomic/checkpoints/rl_epoch/rl_epoch_5.pt",
+      "type": "RL",
+      "epoch": 5
+    },
+    {
+      "name": "RL10",
+      "path": "/Users/tom/Desktop/Atomic/checkpoints/rl_epoch/rl_epoch_10.pt",
+      "type": "RL",
+      "epoch": 10
+    },
+    {
+      "name": "RL15",
+      "path": "/Users/tom/Desktop/Atomic/checkpoints/rl_epoch/rl_epoch_15.pt",
+      "type": "RL",
+      "epoch": 15
+    },
+    {
+      "name": "RL20",
+      "path": "/Users/tom/Desktop/Atomic/checkpoints/rl_epoch/rl_epoch_20.pt",
+      "type": "RL",
+      "epoch": 20
+    }
+  ],
+  "total_matches": 6,
+  "total_games": 1200,
+  "match_results": [
+    {
+      "agent_a": "RL5",
+      "agent_b": "RL10",
+      "a_wins": 69,
+      "b_wins": 113,
+      "draws": 18,
+      "a_score_pct": 39.0,
+      "b_score_pct": 61.0
+    },
+    {
+      "agent_a": "RL5",
+      "agent_b": "RL15",
+      "a_wins": 51,
+      "b_wins": 142,
+      "draws": 7,
+      "a_score_pct": 27.250000000000004,
+      "b_score_pct": 72.75
+    },
+    {
+      "agent_a": "RL5",
+      "agent_b": "RL20",
+      "a_wins": 41,
+      "b_wins": 154,
+      "draws": 5,
+      "a_score_pct": 21.75,
+      "b_score_pct": 78.25
+    },
+    {
+      "agent_a": "RL10",
+      "agent_b": "RL15",
+      "a_wins": 68,
+      "b_wins": 121,
+      "draws": 11,
+      "a_score_pct": 36.75,
+      "b_score_pct": 63.24999999999999
+    },
+    {
+      "agent_a": "RL10",
+      "agent_b": "RL20",
+      "a_wins": 70,
+      "b_wins": 114,
+      "draws": 16,
+      "a_score_pct": 39.0,
+      "b_score_pct": 61.0
+    },
+    {
+      "agent_a": "RL15",
+      "agent_b": "RL20",
+      "a_wins": 79,
+      "b_wins": 110,
+      "draws": 11,
+      "a_score_pct": 42.25,
+      "b_score_pct": 57.75
+    }
+  ],
+  "elo": {
+    "RL5": 1383.6062663632438,
+    "RL10": 1476.3050668081398,
+    "RL15": 1552.3599652401717,
+    "RL20": 1587.7287015884447
+  },
+  "ranking": [
+    {
+      "rank": 1,
+      "agent": "RL20",
+      "elo": 1587.7287015884447,
+      "games": 600,
+      "wins": 378,
+      "losses": 190,
+      "draws": 32,
+      "score": 394.0,
+      "score_fraction": 0.6566666666666666
+    },
+    {
+      "rank": 2,
+      "agent": "RL15",
+      "elo": 1552.3599652401717,
+      "games": 600,
+      "wins": 342,
+      "losses": 229,
+      "draws": 29,
+      "score": 356.5,
+      "score_fraction": 0.5941666666666666
+    },
+    {
+      "rank": 3,
+      "agent": "RL10",
+      "elo": 1476.3050668081398,
+      "games": 600,
+      "wins": 251,
+      "losses": 304,
+      "draws": 45,
+      "score": 273.5,
+      "score_fraction": 0.4558333333333333
+    },
+    {
+      "rank": 4,
+      "agent": "RL5",
+      "elo": 1383.6062663632438,
+      "games": 600,
+      "wins": 161,
+      "losses": 409,
+      "draws": 30,
+      "score": 176.0,
+      "score_fraction": 0.29333333333333333
+    }
+  ],
+  "timestamp_utc": "20260914_160644"
+}

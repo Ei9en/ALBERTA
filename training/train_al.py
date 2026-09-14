@@ -63,13 +63,13 @@ DEFAULT_BASELINE_LEAGUE_DIR = (
 
 DEFAULT_ORACLE_QUEUE = (
     PROJECT_ROOT
-    / "checkpoints"
+    / "data"
     / "queue"
-    / "oracle_queue_1-10_AL.jsonl"
+    / "oracle_queue_1-10_random.jsonl"
 )
 
-DEFAULT_RUN_NAME = "al_run"
-DEFAULT_END_EPOCH = 30
+DEFAULT_RUN_NAME = "rndm_run"
+DEFAULT_END_EPOCH = 20
 
 DEFAULT_NUM_WORKERS = 12
 DEFAULT_SELFPLAY_BATCH_SIZE = 256
