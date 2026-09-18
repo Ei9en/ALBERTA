@@ -150,7 +150,7 @@ class OracleQueue:
         associated with a FEN.
 
         This must remain identical to the convention used by
-        seed_oracle_queue.py and tools/fen_to_query_id.py.
+        seed_oracle_queue.py and tools/FEN_to_query_id.py.
         """
 
         return uuid.uuid5(

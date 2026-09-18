@@ -15,6 +15,26 @@ The main experiment studies a response-aware acquisition strategy: instead of se
 
 Predicted responses are then used as a **bi-objective Pareto acquisition criterion**.
 
+## Motivation
+
+Expert feedback is potentially valuable in reinforcement learning, but it is
+also expensive. When only a tiny number of interventions is available, the
+problem is no longer simply how to learn from expert supervision, but
+**where that supervision should be spent**.
+
+Atomic Chess provides a compact testbed for this question: self-play can
+generate large amounts of experience cheaply, while tactical positions can
+produce sharp disagreements between policies, value estimates, and expert
+judgment. It is also a practical setting for human-in-the-loop experimentation:
+the author has substantial prior experience playing Atomic Chess, allowing
+expert annotations to be provided directly without relying on an external
+annotation pipeline.
+
+ALBERTA therefore treats expert supervision as a scarce resource. Rather than
+asking only where the learner is uncertain, the project asks a complementary
+question: **where is an expert intervention expected to change the learner
+the most?**
+
 ## Overview
 
 The experimental pipeline is:
