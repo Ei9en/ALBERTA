@@ -27,16 +27,26 @@ value and not the direction of the outcome.
 Predictors
 ----------
 
-Given raw policy entropy H and value-disagreement uncertainty U:
+Given raw policy entropy H and value-disagreement uncertainty U,
+H and U are percentile-rank normalized independently within each:
 
-    F(U) = log1p(U / TAU)
+    chronological-window x side-to-move
 
-H and F(U) are percentile-rank normalized independently for
-White-to-move and Black-to-move positions.
+stratum.
+
+The chronological windows are contiguous equal-size partitions of
+the append-ordered uncertainty dataset. They are coarse temporal
+strata and must not be interpreted as exact RL epochs.
+
+This temporal normalization is used because both H and historical
+league disagreement U evolve systematically during RL training.
+Without temporal stratification, the global percentile rank of U can
+partly encode when an observation was collected rather than only its
+relative disagreement within the current learning regime.
 
 The interaction is then defined as:
 
-    H_norm * F(U)_norm
+    H_norm * U_norm
 
 All three predictors and the target are standardized before OLS.
 
@@ -44,8 +54,8 @@ The regression is:
 
     Y* =
         RAW_W_H  * H*
-        + RAW_W_U  * F(U)*
-        + RAW_W_HU * (H_norm * F(U)_norm)*
+        + RAW_W_U  * U*
+        + RAW_W_HU * (H_norm * U_norm)*
         + epsilon
 
 The RAW_W_* coefficients are the canonical coefficients used by
@@ -66,6 +76,13 @@ The generated AL/AL_weights.py is imported directly by:
 
     AL/seed_oracle_queue.py
     AL/distribution_I.py
+
+IMPORTANT
+---------
+
+The same chronological-window x side-to-move normalization used here
+must also be used by seed_oracle_queue.py and distribution_I.py when
+the resulting RAW_W_* coefficients are applied.
 """
 
 from __future__ import annotations
@@ -103,7 +120,7 @@ DEFAULT_REPORT_FILE = (
     / "active_learning_weight_report.txt"
 )
 
-DEFAULT_TAU = 0.05
+DEFAULT_TEMPORAL_WINDOWS = 6
 
 
 # ============================================================
@@ -233,13 +250,34 @@ def extract_side(
 
 
 # ============================================================
-# Side-aware normalization
+# Temporal + side-aware normalization
 # ============================================================
 
-def normalize_side_aware(
+def normalize_temporal_side_aware(
     values: np.ndarray,
     sides: np.ndarray,
-) -> np.ndarray:
+    n_windows: int,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+]:
+    """
+    Percentile-rank normalization conditional on:
+
+        - chronological window
+        - side to move
+
+    Records are assumed to preserve chronological append order.
+
+    The full dataset is divided into n_windows contiguous,
+    approximately equal-size windows.
+
+    Within each (window, side) stratum, values are independently
+    converted to percentile ranks in [0, 1].
+
+    This prevents systematic temporal drift in H or U from directly
+    dominating the acquisition ranking.
+    """
 
     values = np.asarray(
         values,
@@ -250,41 +288,116 @@ def normalize_side_aware(
         sides
     )
 
+    n = len(
+        values
+    )
+
+    if len(
+        sides
+    ) != n:
+
+        raise ValueError(
+            "values and sides must have identical lengths."
+        )
+
+    if n_windows < 1:
+
+        raise ValueError(
+            "n_windows must be >= 1."
+        )
+
+    if n < n_windows:
+
+        raise ValueError(
+            "Not enough observations for requested temporal windows."
+        )
+
     normalized = np.empty_like(
         values,
         dtype=np.float64,
     )
 
-    for side in (
-        "w",
-        "b",
+    window_ids = np.empty(
+        n,
+        dtype=np.int64,
+    )
+
+    edges = np.linspace(
+        0,
+        n,
+        n_windows + 1,
+        dtype=np.int64,
+    )
+
+    for window in range(
+        n_windows
     ):
 
-        mask = (
-            sides == side
-        )
-
-        count = int(
-            np.sum(
-                mask
-            )
-        )
-
-        if count < 2:
-
-            raise ValueError(
-                f"Not enough positions for side {side} normalization."
-            )
-
-        normalized[
-            mask
-        ] = percentile_rank(
-            values[
-                mask
+        start = int(
+            edges[
+                window
             ]
         )
 
-    return normalized
+        end = int(
+            edges[
+                window + 1
+            ]
+        )
+
+        window_ids[
+            start:end
+        ] = window
+
+        for side in (
+            "w",
+            "b",
+        ):
+
+            side_mask = (
+                sides[
+                    start:end
+                ]
+                == side
+            )
+
+            count = int(
+                np.sum(
+                    side_mask
+                )
+            )
+
+            if count < 2:
+
+                raise ValueError(
+                    f"Not enough observations in "
+                    f"window {window + 1}, side {side}: "
+                    f"{count}"
+                )
+
+            local_values = values[
+                start:end
+            ][
+                side_mask
+            ]
+
+            local_ranks = percentile_rank(
+                local_values
+            )
+
+            local_indices = np.flatnonzero(
+                side_mask
+            )
+
+            normalized[
+                start
+                + local_indices
+            ] = local_ranks
+
+    return (
+        normalized,
+        window_ids,
+    )
 
 
 # ============================================================
@@ -565,8 +678,9 @@ def build_regression_data(
     H: np.ndarray,
     U: np.ndarray,
     results: list[str],
-    tau: float,
+    n_windows: int,
 ) -> tuple[
+    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,
@@ -579,12 +693,6 @@ def build_regression_data(
     print(
         "Building regression variables..."
     )
-
-    if tau <= 0.0:
-
-        raise ValueError(
-            "TAU must be strictly positive."
-        )
 
     sides = extract_side(
         fens
@@ -609,7 +717,7 @@ def build_regression_data(
     )
 
     # --------------------------------------------------------
-    # Regression target:
+    # Regression target
     #
     #     Y = |R|
     #
@@ -621,53 +729,137 @@ def build_regression_data(
     )
 
     # --------------------------------------------------------
-    # U transform
-    # --------------------------------------------------------
-
-    U_log = np.log1p(
-        U
-        / tau
-    )
-
-    # --------------------------------------------------------
-    # Side-aware percentile normalization
+    # Temporal + side-aware normalization of H
     # --------------------------------------------------------
 
     print(
-        "Normalizing H by side-to-move..."
+        "Normalizing H by chronological window and side-to-move..."
     )
 
-    H_norm = normalize_side_aware(
-        H,
-        sides,
-    )
-
-    print(
-        "Normalizing log-transformed U by side-to-move..."
-    )
-
-    U_log_norm = normalize_side_aware(
-        U_log,
-        sides,
+    (
+        H_norm,
+        window_ids,
+    ) = normalize_temporal_side_aware(
+        values=H,
+        sides=sides,
+        n_windows=n_windows,
     )
 
     # --------------------------------------------------------
-    # Interaction
+    # Temporal + side-aware normalization of raw U
+    # --------------------------------------------------------
+
+    print(
+        "Normalizing U by chronological window and side-to-move..."
+    )
+
+    (
+        U_norm,
+        window_ids_u,
+    ) = normalize_temporal_side_aware(
+        values=U,
+        sides=sides,
+        n_windows=n_windows,
+    )
+
+    if not np.array_equal(
+        window_ids,
+        window_ids_u,
+    ):
+
+        raise RuntimeError(
+            "Temporal-window assignments are inconsistent."
+        )
+
+    # --------------------------------------------------------
+    # Factorial interaction
     # --------------------------------------------------------
 
     HU_interaction = (
         H_norm
-        * U_log_norm
+        * U_norm
     )
 
     return (
         H_norm,
-        U_log_norm,
+        U_norm,
         HU_interaction,
         Y,
         rewards,
         sides,
+        window_ids,
     )
+
+
+# ============================================================
+# Temporal normalization diagnostics
+# ============================================================
+
+def print_temporal_normalization_diagnostics(
+    H_norm: np.ndarray,
+    U_norm: np.ndarray,
+    sides: np.ndarray,
+    window_ids: np.ndarray,
+    n_windows: int,
+) -> None:
+
+    print()
+    print("=" * 70)
+    print("TEMPORAL NORMALIZATION DIAGNOSTIC")
+    print("=" * 70)
+
+    print()
+    print(
+        "Expected percentile means are approximately 0.5 "
+        "within each window x side stratum."
+    )
+
+    for window in range(
+        n_windows
+    ):
+
+        window_mask = (
+            window_ids
+            == window
+        )
+
+        print()
+        print(
+            f"W{window + 1}: "
+            f"{np.sum(window_mask):,} observations"
+        )
+
+        for side in (
+            "w",
+            "b",
+        ):
+
+            mask = (
+                window_mask
+                & (sides == side)
+            )
+
+            count = int(
+                np.sum(
+                    mask
+                )
+            )
+
+            if count == 0:
+
+                raise RuntimeError(
+                    f"Empty temporal normalization stratum: "
+                    f"W{window + 1}, side={side}"
+                )
+
+            print(
+                f"  {side}: "
+                f"n={count:,}, "
+                f"H_norm_mean={np.mean(H_norm[mask]):.6f}, "
+                f"U_norm_mean={np.mean(U_norm[mask]):.6f}, "
+                f"H_norm_std={np.std(H_norm[mask]):.6f}, "
+                f"U_norm_std={np.std(U_norm[mask]):.6f}"
+            )
 
 
 # ============================================================
@@ -856,9 +1048,7 @@ def calculate_vif(
 
         if denominator <= 1e-12:
 
-            vif_value = (
-                np.inf
-            )
+            vif_value = np.inf
 
         else:
 
@@ -924,7 +1114,7 @@ def normalize_coefficients(
 
 def build_report(
     n: int,
-    tau: float,
+    n_windows: int,
     coefficients: np.ndarray,
     normalized_weights: np.ndarray,
     r_squared: float,
@@ -935,12 +1125,15 @@ def build_report(
     rewards: np.ndarray,
     rank: int,
     singular_values: np.ndarray,
+    H_norm: np.ndarray,
+    U_norm: np.ndarray,
+    window_ids: np.ndarray,
 ) -> str:
 
     names = [
         "H",
-        "log(U)",
-        "H x log(U)",
+        "U",
+        "H x U",
     ]
 
     lines = []
@@ -974,7 +1167,7 @@ def build_report(
     )
 
     add(
-        f"TAU: {tau}"
+        f"Chronological windows: {n_windows}"
     )
 
     add()
@@ -1020,6 +1213,84 @@ def build_report(
     add(
         f"Black-to-move: {np.sum(sides == 'b'):,}"
     )
+
+    add()
+
+    # --------------------------------------------------------
+    # Temporal normalization
+    # --------------------------------------------------------
+
+    add(
+        "TEMPORAL NORMALIZATION"
+    )
+
+    add(
+        "-" * 70
+    )
+
+    add(
+        f"Chronological windows: {n_windows}"
+    )
+
+    add()
+
+    add(
+        "H and U are percentile-rank normalized independently "
+        "within each chronological-window x side-to-move stratum."
+    )
+
+    add()
+
+    add(
+        "The chronological windows are equal-size contiguous "
+        "partitions of the append-ordered uncertainty dataset."
+    )
+
+    add(
+        "They are coarse temporal strata and must not be "
+        "interpreted as exact RL epochs."
+    )
+
+    add()
+
+    add(
+        "This normalization is intended to prevent systematic "
+        "temporal drift in H or historical-league disagreement U "
+        "from dominating acquisition ranking."
+    )
+
+    add()
+
+    for window in range(
+        n_windows
+    ):
+
+        window_mask = (
+            window_ids
+            == window
+        )
+
+        add(
+            f"W{window + 1}: "
+            f"{np.sum(window_mask):,} observations"
+        )
+
+        for side in (
+            "w",
+            "b",
+        ):
+
+            mask = (
+                window_mask
+                & (sides == side)
+            )
+
+            add(
+                f"  {side}: "
+                f"n={np.sum(mask):,}, "
+                f"H_norm_mean={np.mean(H_norm[mask]):.6f}, "
+                f"U_norm_mean={np.mean(U_norm[mask]):.6f}"
+            )
 
     add()
 
@@ -1197,6 +1468,15 @@ def build_report(
     add()
 
     add(
+        "The temporal stratification means that H and U are "
+        "interpreted relative to the local learning regime in which "
+        "an observation was collected, rather than relative to the "
+        "entire non-stationary RL1-10 population."
+    )
+
+    add()
+
+    add(
         "This is an observational association. It does not "
         "establish causal learning value or useful update direction."
     )
@@ -1206,6 +1486,14 @@ def build_report(
     add(
         "Weights should be estimated once on the reference "
         "uncertainty dataset and frozen before query selection."
+    )
+
+    add()
+
+    add(
+        "The same temporal-window x side-to-move normalization "
+        "must be used when applying these coefficients during "
+        "query selection."
     )
 
     return "\n".join(
@@ -1219,7 +1507,7 @@ def build_report(
 
 def save_weights(
     weights_file: Path,
-    tau: float,
+    n_windows: int,
     coefficients: np.ndarray,
     normalized_weights: np.ndarray,
 ) -> None:
@@ -1271,7 +1559,15 @@ def save_weights(
         )
 
         f.write(
-            "normalized to sum to one.\n"
+            "normalized to sum to one.\n\n"
+        )
+
+        f.write(
+            "Calibration uses chronological-window x side-to-move\n"
+        )
+
+        f.write(
+            "percentile normalization of raw H and U.\n"
         )
 
         f.write(
@@ -1279,7 +1575,7 @@ def save_weights(
         )
 
         f.write(
-            f"TAU = {float(tau)!r}\n\n"
+            f"TEMPORAL_WINDOWS = {int(n_windows)!r}\n\n"
         )
 
         f.write(
@@ -1348,10 +1644,13 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--tau",
-        type=float,
-        default=DEFAULT_TAU,
-        help="Scale parameter in log1p(U / TAU).",
+        "--temporal-windows",
+        type=int,
+        default=DEFAULT_TEMPORAL_WINDOWS,
+        help=(
+            "Number of contiguous chronological windows used "
+            "for temporal + side-aware percentile normalization."
+        ),
     )
 
     return parser.parse_args()
@@ -1365,10 +1664,10 @@ def main() -> None:
 
     args = parse_args()
 
-    if args.tau <= 0.0:
+    if args.temporal_windows < 1:
 
         raise ValueError(
-            "--tau must be strictly positive."
+            "--temporal-windows must be >= 1."
         )
 
     # ========================================================
@@ -1390,17 +1689,30 @@ def main() -> None:
 
     (
         H_norm,
-        U_log_norm,
+        U_norm,
         HU_interaction,
         Y,
         rewards,
         sides,
+        window_ids,
     ) = build_regression_data(
         fens=fens,
         H=H,
         U=U,
         results=results,
-        tau=args.tau,
+        n_windows=args.temporal_windows,
+    )
+
+    # ========================================================
+    # Temporal normalization diagnostics
+    # ========================================================
+
+    print_temporal_normalization_diagnostics(
+        H_norm=H_norm,
+        U_norm=U_norm,
+        sides=sides,
+        window_ids=window_ids,
+        n_windows=args.temporal_windows,
     )
 
     # ========================================================
@@ -1425,7 +1737,7 @@ def main() -> None:
         _,
         _,
     ) = standardize(
-        U_log_norm
+        U_norm
     )
 
     (
@@ -1463,13 +1775,13 @@ def main() -> None:
                 Y_star,
             ),
 
-        "log(U)":
+        "U":
             correlation(
                 U_star,
                 Y_star,
             ),
 
-        "H x log(U)":
+        "H x U":
             correlation(
                 HU_star,
                 Y_star,
@@ -1611,8 +1923,8 @@ def main() -> None:
     for name, value in zip(
         (
             "H",
-            "log(U)",
-            "H x log(U)",
+            "U",
+            "H x U",
         ),
         vif,
     ):
@@ -1628,7 +1940,7 @@ def main() -> None:
 
     save_weights(
         weights_file=args.weights_file,
-        tau=args.tau,
+        n_windows=args.temporal_windows,
         coefficients=coefficients,
         normalized_weights=normalized_weights,
     )
@@ -1641,7 +1953,7 @@ def main() -> None:
         n=len(
             fens
         ),
-        tau=args.tau,
+        n_windows=args.temporal_windows,
         coefficients=coefficients,
         normalized_weights=normalized_weights,
         r_squared=r_squared,
@@ -1652,6 +1964,9 @@ def main() -> None:
         rewards=rewards,
         rank=rank,
         singular_values=singular_values,
+        H_norm=H_norm,
+        U_norm=U_norm,
+        window_ids=window_ids,
     )
 
     args.report_file.parent.mkdir(
@@ -1686,9 +2001,18 @@ def main() -> None:
     )
 
     print()
+
     print(
         "AL/AL_weights.py can now be imported by "
         "seed_oracle_queue.py and distribution_I.py."
+    )
+
+    print()
+
+    print(
+        "IMPORTANT: seed_oracle_queue.py and distribution_I.py "
+        "must use the same chronological-window x side-to-move "
+        "normalization before applying these coefficients."
     )
 
 

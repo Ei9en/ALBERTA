@@ -12,7 +12,7 @@ Pipeline
     H raw
         |
         v
-    side-aware percentile normalization
+    temporal-window x side-aware percentile normalization
         |
         v
     H_norm
@@ -29,7 +29,7 @@ Pipeline
     F(U) = log1p(U / TAU)
         |
         v
-    side-aware percentile normalization
+    temporal-window x side-aware percentile normalization
         |
         v
     F(U)_norm
@@ -71,6 +71,13 @@ The acquisition score is:
 
 The OLS coefficients retain their original sign and magnitude.
 
+The chronological windows are contiguous equal-size partitions
+of the append-ordered uncertainty dataset. They are coarse temporal
+strata, not exact RL epochs.
+
+The normalization used here must exactly match the normalization
+used by estimate_active_learning_weights.py.
+
 The final min-max normalization is only a representation of the
 score and does not affect ranking.
 
@@ -87,11 +94,12 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from AL.AL_weights import (
+from AL_weights import (
     RAW_W_H,
     RAW_W_HU,
     RAW_W_U,
     TAU,
+    TEMPORAL_WINDOWS,
 )
 
 
@@ -114,7 +122,8 @@ DEFAULT_OUTPUT_FILE = (
     / "I_distribution.png"
 )
 
-DEFAULT_AL_BUDGET = 0.0002
+# 0.01 %
+DEFAULT_AL_BUDGET = 0.0001
 
 
 # ============================================================
@@ -129,8 +138,8 @@ def percentile_rank(
 
     Ties receive their average zero-based rank.
 
-    This implementation intentionally matches
-    AL/seed_oracle_queue.py exactly.
+    This implementation must remain identical to the one used by
+    estimate_active_learning_weights.py and seed_oracle_queue.py.
     """
 
     values = np.asarray(
@@ -138,9 +147,7 @@ def percentile_rank(
         dtype=np.float64,
     )
 
-    n = len(
-        values
-    )
+    n = len(values)
 
     if n < 2:
         raise ValueError(
@@ -165,9 +172,7 @@ def percentile_rank(
 
     while start < n:
 
-        end = (
-            start + 1
-        )
+        end = start + 1
 
         while (
             end < n
@@ -183,9 +188,7 @@ def percentile_rank(
         ) / 2.0
 
         ranks[
-            order[
-                start:end
-            ]
+            order[start:end]
         ] = (
             average_rank
             / (n - 1)
@@ -218,9 +221,7 @@ def extract_side_to_move(
                 f"Invalid FEN: {fen}"
             )
 
-        side = parts[
-            1
-        ]
+        side = parts[1]
 
         if side not in {
             "w",
@@ -242,13 +243,29 @@ def extract_side_to_move(
 
 
 # ============================================================
-# Side-aware normalization
+# Temporal + side-aware normalization
 # ============================================================
 
-def normalize_side_aware(
+def normalize_temporal_side_aware(
     values: np.ndarray,
     sides: np.ndarray,
-) -> np.ndarray:
+    n_windows: int,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+]:
+    """
+    Percentile-rank normalization conditional on:
+
+        - chronological window
+        - side to move
+
+    Records are assumed to preserve chronological append order.
+
+    The dataset is split into contiguous approximately equal-size
+    windows. Within each window x side stratum, values are converted
+    independently to percentile ranks in [0, 1].
+    """
 
     values = np.asarray(
         values,
@@ -259,41 +276,110 @@ def normalize_side_aware(
         sides
     )
 
-    normalized = np.zeros_like(
+    n = len(values)
+
+    if len(sides) != n:
+
+        raise ValueError(
+            "values and sides must have identical lengths."
+        )
+
+    if n_windows < 1:
+
+        raise ValueError(
+            "n_windows must be >= 1."
+        )
+
+    if n < n_windows:
+
+        raise ValueError(
+            "Not enough observations for requested temporal windows."
+        )
+
+    normalized = np.empty_like(
         values,
         dtype=np.float64,
     )
 
-    for side in (
-        "w",
-        "b",
+    window_ids = np.empty(
+        n,
+        dtype=np.int64,
+    )
+
+    edges = np.linspace(
+        0,
+        n,
+        n_windows + 1,
+        dtype=np.int64,
+    )
+
+    for window in range(
+        n_windows
     ):
 
-        mask = (
-            sides == side
+        start = int(
+            edges[window]
         )
 
-        count = int(
-            np.sum(
-                mask
-            )
+        end = int(
+            edges[window + 1]
         )
 
-        if count < 2:
+        window_ids[
+            start:end
+        ] = window
 
-            raise ValueError(
-                f"Not enough positions for side {side} normalization."
+        local_sides = sides[
+            start:end
+        ]
+
+        for side in (
+            "w",
+            "b",
+        ):
+
+            side_mask = (
+                local_sides
+                == side
             )
 
-        normalized[
-            mask
-        ] = percentile_rank(
-            values[
-                mask
+            count = int(
+                np.sum(
+                    side_mask
+                )
+            )
+
+            if count < 2:
+
+                raise ValueError(
+                    f"Not enough observations in "
+                    f"W{window + 1}, side={side}: "
+                    f"{count}"
+                )
+
+            local_values = values[
+                start:end
+            ][
+                side_mask
             ]
-        )
 
-    return normalized
+            local_ranks = percentile_rank(
+                local_values
+            )
+
+            local_indices = np.flatnonzero(
+                side_mask
+            )
+
+            normalized[
+                start
+                + local_indices
+            ] = local_ranks
+
+    return (
+        normalized,
+        window_ids,
+    )
 
 
 # ============================================================
@@ -317,7 +403,8 @@ def z_score(
 
     std = float(
         np.std(
-            values
+            values,
+            ddof=0,
         )
     )
 
@@ -459,23 +546,28 @@ def load_data(
         ):
 
             rejected += 1
-
             continue
 
-        if not (
-            np.isfinite(
-                h
-            )
-            and np.isfinite(
-                u
-            )
-            and np.isfinite(
-                hu
-            )
+        if not isinstance(
+            fen,
+            str,
         ):
 
             rejected += 1
+            continue
 
+        if not (
+            np.isfinite(h)
+            and np.isfinite(u)
+            and np.isfinite(hu)
+        ):
+
+            rejected += 1
+            continue
+
+        if u < 0.0:
+
+            rejected += 1
             continue
 
         fens.append(
@@ -527,6 +619,9 @@ def load_data(
                 dtype=np.float64,
             ),
 
+        # Kept for compatibility / diagnostics.
+        # The acquisition interaction is recomputed from the
+        # normalized H and U features.
         "HU":
             np.asarray(
                 HU,
@@ -550,11 +645,15 @@ def validate_configuration(
 
     print()
     print(
-        f"TAU       : {TAU:.6f}"
+        f"TAU              : {TAU:.6f}"
     )
 
     print(
-        f"AL budget : {budget:.5%}"
+        f"Temporal windows : {TEMPORAL_WINDOWS}"
+    )
+
+    print(
+        f"AL budget        : {budget:.5%}"
     )
 
     print()
@@ -585,6 +684,12 @@ def validate_configuration(
             "TAU must be strictly positive."
         )
 
+    if TEMPORAL_WINDOWS < 1:
+
+        raise ValueError(
+            "TEMPORAL_WINDOWS must be >= 1."
+        )
+
     if not (
         0.0
         < budget
@@ -603,6 +708,7 @@ def validate_configuration(
 def build_score(
     data: dict[str, np.ndarray],
 ) -> tuple[
+    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,
@@ -626,29 +732,28 @@ def build_score(
         "U"
     ]
 
-    if np.any(
-        U < 0.0
-    ):
-
-        raise ValueError(
-            "U contains negative values."
-        )
-
     sides = extract_side_to_move(
         fens
     )
 
     # --------------------------------------------------------
-    # 1. H normalization
+    # 1. H temporal + side-aware normalization
     # --------------------------------------------------------
 
-    H_norm = normalize_side_aware(
-        H,
-        sides,
+    (
+        H_norm,
+        window_ids,
+    ) = normalize_temporal_side_aware(
+        values=H,
+        sides=sides,
+        n_windows=TEMPORAL_WINDOWS,
     )
 
     # --------------------------------------------------------
     # 2. U logarithmic transform
+    #
+    # Retained because the current calibration was fitted with
+    # exactly this pipeline.
     # --------------------------------------------------------
 
     F_U_raw = np.log1p(
@@ -656,13 +761,26 @@ def build_score(
     )
 
     # --------------------------------------------------------
-    # 3. U side-aware normalization
+    # 3. U temporal + side-aware normalization
     # --------------------------------------------------------
 
-    F_U_norm = normalize_side_aware(
-        F_U_raw,
-        sides,
+    (
+        F_U_norm,
+        window_ids_u,
+    ) = normalize_temporal_side_aware(
+        values=F_U_raw,
+        sides=sides,
+        n_windows=TEMPORAL_WINDOWS,
     )
+
+    if not np.array_equal(
+        window_ids,
+        window_ids_u,
+    ):
+
+        raise RuntimeError(
+            "Temporal-window assignments are inconsistent."
+        )
 
     # --------------------------------------------------------
     # 4. Interaction
@@ -737,6 +855,7 @@ def build_score(
         I,
         I_norm,
         sides,
+        window_ids,
         components,
     )
 
@@ -771,32 +890,24 @@ def compute_budget_threshold(
         ),
     )
 
-    order = (
-        np.argsort(
-            I,
-            kind="stable",
-        )[::-1]
+    order = np.argsort(
+        -I,
+        kind="stable",
     )
 
-    selected_indices = (
-        order[
-            :target
-        ]
-    )
+    selected_indices = order[
+        :target
+    ]
 
     threshold = float(
         I[
-            selected_indices[
-                -1
-            ]
+            selected_indices[-1]
         ]
     )
 
     threshold_norm = float(
         I_norm[
-            selected_indices[
-                -1
-            ]
+            selected_indices[-1]
         ]
     )
 
@@ -824,6 +935,7 @@ def print_diagnostics(
     I: np.ndarray,
     I_norm: np.ndarray,
     sides: np.ndarray,
+    window_ids: np.ndarray,
     components: dict[str, np.ndarray],
     budget: float,
 ) -> np.ndarray:
@@ -860,6 +972,46 @@ def print_diagnostics(
     print("=" * 70)
     print("ACTIVE LEARNING SCORE I")
     print("=" * 70)
+
+    # --------------------------------------------------------
+    # Temporal normalization sanity check
+    # --------------------------------------------------------
+
+    print()
+    print("TEMPORAL NORMALIZATION")
+    print("-" * 70)
+
+    for window in range(
+        TEMPORAL_WINDOWS
+    ):
+
+        window_mask = (
+            window_ids
+            == window
+        )
+
+        print()
+        print(
+            f"W{window + 1}: "
+            f"{np.sum(window_mask):,} observations"
+        )
+
+        for side in (
+            "w",
+            "b",
+        ):
+
+            mask = (
+                window_mask
+                & (sides == side)
+            )
+
+            print(
+                f"  {side}: "
+                f"n={np.sum(mask):,}, "
+                f"H_norm_mean={np.mean(H_norm[mask]):.6f}, "
+                f"U_norm_mean={np.mean(F_U_norm[mask]):.6f}"
+            )
 
     # --------------------------------------------------------
     # Distribution by side
@@ -920,7 +1072,7 @@ def print_diagnostics(
     ):
 
         print(
-            f"{label:<10}: "
+            f"{label:<12}: "
             f"mean={np.mean(values):+.6f} "
             f"std={np.std(values):.6f}"
         )
@@ -1107,30 +1259,22 @@ def print_diagnostics(
 
     white_fraction = (
         total_white
-        / len(
-            sides
-        )
+        / len(sides)
     )
 
     black_fraction = (
         total_black
-        / len(
-            sides
-        )
+        / len(sides)
     )
 
     selected_white_fraction = (
         selected_white
-        / len(
-            selected_indices
-        )
+        / len(selected_indices)
     )
 
     selected_black_fraction = (
         selected_black
-        / len(
-            selected_indices
-        )
+        / len(selected_indices)
     )
 
     print()
@@ -1173,6 +1317,59 @@ def print_diagnostics(
         print(
             f"Black enrichment: "
             f"{selected_black_fraction / black_fraction:.3f}x"
+        )
+
+    # --------------------------------------------------------
+    # Temporal composition of selected positions
+    # --------------------------------------------------------
+
+    print()
+    print("TEMPORAL COMPOSITION OF I SELECTION")
+    print("-" * 70)
+
+    selected_window_ids = window_ids[
+        selected_indices
+    ]
+
+    for window in range(
+        TEMPORAL_WINDOWS
+    ):
+
+        global_count = int(
+            np.sum(
+                window_ids == window
+            )
+        )
+
+        selected_count = int(
+            np.sum(
+                selected_window_ids == window
+            )
+        )
+
+        global_fraction = (
+            global_count
+            / len(window_ids)
+        )
+
+        selected_window_fraction = (
+            selected_count
+            / len(selected_indices)
+        )
+
+        enrichment = (
+            selected_window_fraction
+            / global_fraction
+            if global_fraction > 0.0
+            else float("nan")
+        )
+
+        print(
+            f"W{window + 1}: "
+            f"{selected_count:4d} selected "
+            f"({selected_window_fraction:7.2%}), "
+            f"expected={global_fraction:7.2%}, "
+            f"enrichment={enrichment:.3f}x"
         )
 
     return selected_indices
@@ -1248,10 +1445,8 @@ def plot_distribution(
         exist_ok=True,
     )
 
-    counts, centers, smooth_counts = (
-        smooth_histogram(
-            I_norm
-        )
+    _, centers, smooth_counts = smooth_histogram(
+        I_norm
     )
 
     figure, axis = plt.subplots(
@@ -1362,7 +1557,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_AL_BUDGET,
         help=(
             "Active-learning annotation budget. "
-            "Default: 0.0002 = 0.02%%."
+            "Default: 0.0001 = 0.01%%."
         ),
     )
 
@@ -1389,6 +1584,7 @@ def main() -> None:
         I,
         I_norm,
         sides,
+        window_ids,
         components,
     ) = build_score(
         data
@@ -1398,6 +1594,7 @@ def main() -> None:
         I=I,
         I_norm=I_norm,
         sides=sides,
+        window_ids=window_ids,
         components=components,
         budget=args.budget,
     )

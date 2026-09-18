@@ -19,13 +19,10 @@ from torch.optim import Adam
 # Project imports
 # ============================================================
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(
-        0,
-        str(PROJECT_ROOT),
-    )
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import training.train_rl as rl
 
@@ -37,15 +34,13 @@ from src.rl.oracle_replay_buffer import OracleReplayBuffer
 
 
 # ============================================================
-# Defaults
+# Default paths
 # ============================================================
 
-DEFAULT_SEED = 42
-
-DEFAULT_DEVICE = (
-    "cuda"
-    if torch.cuda.is_available()
-    else "cpu"
+DEFAULT_BC_CHECKPOINT_DIR = (
+    PROJECT_ROOT
+    / "checkpoints"
+    / "bc_epoch"
 )
 
 DEFAULT_START_CHECKPOINT = (
@@ -68,7 +63,26 @@ DEFAULT_ORACLE_QUEUE = (
     / "oracle_queue_1-10_random.jsonl"
 )
 
-DEFAULT_RUN_NAME = "rndm_run"
+DEFAULT_OUTPUT_DIR = (
+    PROJECT_ROOT
+    / "checkpoints"
+    / "al_runs"
+)
+
+
+# ============================================================
+# Defaults
+# ============================================================
+
+DEFAULT_SEED = 42
+
+DEFAULT_DEVICE = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "cpu"
+)
+
+DEFAULT_RUN_NAME = "random_001"
 DEFAULT_END_EPOCH = 20
 
 DEFAULT_NUM_WORKERS = 12
@@ -76,7 +90,6 @@ DEFAULT_SELFPLAY_BATCH_SIZE = 256
 
 DEFAULT_ORACLE_CAPACITY = 50_000
 DEFAULT_ORACLE_BATCH_SIZE = 4096
-
 DEFAULT_ORACLE_INJECTION_FREQUENCY = 1
 
 DEFAULT_ORACLE_POLICY_COEF = 0.05
@@ -101,44 +114,27 @@ SITUATION_WEIGHTS = {
 
 
 # ============================================================
-# Determinism
+# Reproducibility
 # ============================================================
 
 def seed_everything(
     seed: int,
 ) -> None:
-    """
-    Seed AL-specific Python, NumPy and PyTorch randomness.
 
-    Deterministic self-play / PPO task seeding remains owned by
-    training.train_rl, which is the canonical RL implementation.
-    """
-
-    random.seed(
-        seed
-    )
-
-    np.random.seed(
-        seed
-    )
-
-    torch.manual_seed(
-        seed
-    )
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
     if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
-        torch.cuda.manual_seed_all(
-            seed
-        )
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
 
-    if hasattr(
-        torch.backends,
-        "cudnn",
-    ):
-
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(
+        True,
+        warn_only=True,
+    )
 
 
 # ============================================================
@@ -154,70 +150,80 @@ def parse_args() -> argparse.Namespace:
         )
     )
 
-    # --------------------------------------------------------
-    # Experiment identity
-    # --------------------------------------------------------
+    # ========================================================
+    # Experiment
+    # ========================================================
 
     parser.add_argument(
         "--run-name",
         type=str,
         default=DEFAULT_RUN_NAME,
-        help=(
-            "Name of this AL run. Outputs are isolated under "
-            "checkpoints/al_runs/<run-name>/."
-        ),
     )
 
     parser.add_argument(
         "--acquisition",
         type=str,
         default="unspecified",
-        help=(
-            "Acquisition label stored as experiment metadata, "
-            "e.g. random, high-I, middle-I, low-I."
-        ),
     )
 
-    # --------------------------------------------------------
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+    )
+
+    # ========================================================
+    # Model / BC
+    # ========================================================
+
+    parser.add_argument(
+        "--bc-checkpoint-dir",
+        type=Path,
+        default=DEFAULT_BC_CHECKPOINT_DIR,
+    )
+
+    parser.add_argument(
+        "--channels",
+        type=int,
+        default=rl.DEFAULT_CHANNELS,
+    )
+
+    parser.add_argument(
+        "--blocks",
+        type=int,
+        default=rl.DEFAULT_BLOCKS,
+    )
+
+    # ========================================================
     # Starting state
-    # --------------------------------------------------------
+    # ========================================================
 
     parser.add_argument(
         "--start-checkpoint",
         type=Path,
         default=DEFAULT_START_CHECKPOINT,
-        help=(
-            "RL or AL ActorCritic checkpoint from which the "
-            "experiment continues."
-        ),
     )
 
     parser.add_argument(
         "--league-dir",
         type=Path,
         default=DEFAULT_BASELINE_LEAGUE_DIR,
-        help=(
-            "Directory containing historical league snapshots "
-            "required to reconstruct the starting league."
-        ),
     )
 
     parser.add_argument(
         "--end-epoch",
         type=int,
         default=DEFAULT_END_EPOCH,
-        help="Last AL training epoch, inclusive.",
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Oracle
-    # --------------------------------------------------------
+    # ========================================================
 
     parser.add_argument(
         "--queue",
         type=Path,
         default=DEFAULT_ORACLE_QUEUE,
-        help="Oracle queue JSONL.",
     )
 
     parser.add_argument(
@@ -236,10 +242,6 @@ def parse_args() -> argparse.Namespace:
         "--oracle-frequency",
         type=int,
         default=DEFAULT_ORACLE_INJECTION_FREQUENCY,
-        help=(
-            "Inject Oracle loss once every N PPO minibatch "
-            "updates."
-        ),
     )
 
     parser.add_argument(
@@ -254,9 +256,9 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_ORACLE_VALUE_COEF,
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Runtime
-    # --------------------------------------------------------
+    # ========================================================
 
     parser.add_argument(
         "--device",
@@ -285,13 +287,165 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--resume-stats",
         action="store_true",
-        help=(
-            "Reload an existing uncertainty JSON from this run "
-            "before continuing."
-        ),
     )
 
     return parser.parse_args()
+
+
+# ============================================================
+# train_rl compatibility
+# ============================================================
+
+def complete_rl_args(
+    args: argparse.Namespace,
+) -> argparse.Namespace:
+    """
+    train_al intentionally delegates the canonical PPO/self-play
+    implementation to training.train_rl.
+
+    Populate every RL configuration field consumed by those
+    functions using exactly the historical train_rl defaults.
+    """
+
+    args.num_workers = args.workers
+
+    args.games_per_epoch = (
+        rl.DEFAULT_GAMES_PER_EPOCH
+    )
+
+    args.temperature_selfplay = (
+        rl.DEFAULT_TEMPERATURE_SELFPLAY
+    )
+
+    args.opening_prior_strength = (
+        rl.DEFAULT_OPENING_PRIOR_STRENGTH
+    )
+
+    args.opening_prior_plies = (
+        rl.DEFAULT_OPENING_PRIOR_PLIES
+    )
+
+    args.buffer_capacity = (
+        rl.DEFAULT_BUFFER_CAPACITY
+    )
+
+    args.batch_size = (
+        rl.DEFAULT_BATCH_SIZE
+    )
+
+    args.sgd_epochs = (
+        rl.DEFAULT_SGD_EPOCHS
+    )
+
+    args.value_coef = (
+        rl.DEFAULT_VALUE_COEF
+    )
+
+    args.gamma = (
+        rl.DEFAULT_GAMMA
+    )
+
+    args.gae_lambda = (
+        rl.DEFAULT_GAE_LAMBDA
+    )
+
+    args.ppo_clip = (
+        rl.DEFAULT_PPO_CLIP
+    )
+
+    args.entropy_coef = (
+        rl.DEFAULT_ENTROPY_COEF
+    )
+
+    args.grad_clip = (
+        rl.DEFAULT_GRAD_CLIP
+    )
+
+    args.uncertainty_batch_size = (
+        rl.DEFAULT_UNCERTAINTY_BATCH_SIZE
+    )
+
+    args.rl_total_epochs = (
+        rl.DEFAULT_RL_TOTAL_EPOCHS
+    )
+
+    args.dkl_fit_epoch_stride = (
+        rl.DEFAULT_DKL_FIT_EPOCH_STRIDE
+    )
+
+    args.dkl_inf = (
+        rl.DEFAULT_DKL_INF
+    )
+
+    args.dkl_decay_per_fit_unit = (
+        rl.DEFAULT_DKL_DECAY_PER_FIT_UNIT
+    )
+
+    args.dkl_alpha = (
+        rl.DEFAULT_DKL_ALPHA
+    )
+
+    args.lambda_dkl = (
+        rl.DEFAULT_LAMBDA_DKL
+    )
+
+    return args
+
+
+# ============================================================
+# Validation
+# ============================================================
+
+def validate_args(
+    args: argparse.Namespace,
+) -> None:
+
+    if args.end_epoch < 1:
+        raise ValueError(
+            "--end-epoch must be >= 1."
+        )
+
+    if args.workers <= 0:
+        raise ValueError(
+            "--workers must be >= 1."
+        )
+
+    if args.selfplay_batch_size <= 0:
+        raise ValueError(
+            "--selfplay-batch-size must be >= 1."
+        )
+
+    if args.uncertainty_batch_size <= 0:
+        raise ValueError(
+            "uncertainty_batch_size must be >= 1."
+        )
+
+    if args.oracle_batch_size <= 0:
+        raise ValueError(
+            "--oracle-batch-size must be >= 1."
+        )
+
+    if args.oracle_frequency <= 0:
+        raise ValueError(
+            "--oracle-frequency must be >= 1."
+        )
+
+    if args.channels <= 0:
+        raise ValueError(
+            "--channels must be >= 1."
+        )
+
+    if args.blocks <= 0:
+        raise ValueError(
+            "--blocks must be >= 1."
+        )
+
+    if args.games_per_epoch != 2500:
+
+        raise ValueError(
+            "This AL experiment expects exactly "
+            "2500 self-play games per epoch."
+        )
 
 
 # ============================================================
@@ -301,21 +455,6 @@ def parse_args() -> argparse.Namespace:
 def load_oracle_queue(
     path: Path,
 ) -> list[dict]:
-    """
-    Load complete Oracle annotations.
-
-    A record is usable when it contains:
-
-        oracle_move
-        oracle_confidence
-        oracle_situation
-        reward
-
-    Status is not used as the source of truth, except that
-    explicitly discarded entries are ignored.
-
-    Legacy field names are accepted when present.
-    """
 
     if not path.exists():
 
@@ -365,20 +504,12 @@ def load_oracle_queue(
                     f"Expected object at line {line_number}."
                 )
 
-            # ------------------------------------------------
-            # Explicitly discarded records are never used.
-            # ------------------------------------------------
-
             if record.get(
                 "status"
             ) == "discarded":
 
                 skipped_discarded += 1
                 continue
-
-            # ------------------------------------------------
-            # Canonical fields + legacy fallbacks
-            # ------------------------------------------------
 
             oracle_move = record.get(
                 "oracle_move"
@@ -401,11 +532,6 @@ def load_oracle_queue(
             reward_raw = record.get(
                 "reward"
             )
-
-            # ------------------------------------------------
-            # The AL objective requires BOTH annotation
-            # families: policy annotation + value annotation.
-            # ------------------------------------------------
 
             if (
                 oracle_move is None
@@ -445,10 +571,6 @@ def load_oracle_queue(
                     f"Invalid reward at line "
                     f"{line_number}: {reward_raw}"
                 ) from exc
-
-            # ------------------------------------------------
-            # Validation
-            # ------------------------------------------------
 
             if reward not in {
                 -1.0,
@@ -538,10 +660,6 @@ def load_oracle_queue(
         raise RuntimeError(
             "No complete Oracle annotations found."
         )
-
-    # ========================================================
-    # Diagnostics
-    # ========================================================
 
     reward_counts = {
         -1.0: 0,
@@ -648,9 +766,6 @@ def build_oracle_buffer(
 
     for record in annotations:
 
-        # OracleReplayBuffer predates the canonical
-        # "situation" terminology. Its fourth positional
-        # argument represents the same supervision factor.
         buffer.add(
             record[
                 "fen"
@@ -688,33 +803,6 @@ def compute_oracle_loss(
     policy_coef: float,
     value_coef: float,
 ) -> dict[str, torch.Tensor]:
-    """
-    Compute sparse Oracle supervision.
-
-    Policy:
-        L_policy =
-            sum_i w_i [-log pi(a_i* | s_i)]
-            --------------------------------
-                       sum_i w_i
-
-    Value:
-        L_value =
-            sum_i w_i [V(s_i) - R_i]^2
-            ----------------------------
-                     sum_i w_i
-
-    where:
-
-        w_i =
-            confidence_weight_i
-            * situation_weight_i
-
-    Total:
-
-        L_oracle =
-            policy_coef * L_policy
-            + value_coef * L_value
-    """
 
     if not oracle_batch:
 
@@ -726,14 +814,9 @@ def compute_oracle_loss(
         )
 
         return {
-            "loss":
-                zero,
-
-            "policy_loss":
-                zero,
-
-            "value_loss":
-                zero,
+            "loss": zero,
+            "policy_loss": zero,
+            "value_loss": zero,
         }
 
     boards = []
@@ -788,8 +871,6 @@ def compute_oracle_loss(
             "medium",
         )
 
-        # Compatibility with the existing
-        # OracleReplayBuffer representation.
         situation = record.get(
             "situation",
             record.get(
@@ -823,10 +904,6 @@ def compute_oracle_loss(
             )
         )
 
-    # ========================================================
-    # Encode
-    # ========================================================
-
     encoded_boards = encode_boards(
         boards
     ).to(
@@ -851,17 +928,9 @@ def compute_oracle_loss(
         device=device,
     )
 
-    # ========================================================
-    # Forward
-    # ========================================================
-
     logits, values = model(
         encoded_boards
     )
-
-    # ========================================================
-    # Legal-action masking
-    # ========================================================
 
     masked_logits = logits.clone()
 
@@ -918,10 +987,6 @@ def compute_oracle_loss(
             ),
         )
 
-    # ========================================================
-    # Policy objective
-    # ========================================================
-
     log_probs = F.log_softmax(
         masked_logits,
         dim=1,
@@ -955,10 +1020,6 @@ def compute_oracle_loss(
         / weight_sum
     )
 
-    # ========================================================
-    # Value objective
-    # ========================================================
-
     predicted_values = values[
         :,
         0,
@@ -977,10 +1038,6 @@ def compute_oracle_loss(
         ).sum()
         / weight_sum
     )
-
-    # ========================================================
-    # Total Oracle objective
-    # ========================================================
 
     oracle_loss = (
         policy_coef
@@ -1014,15 +1071,6 @@ def make_oracle_loss_fn(
     policy_coef: float,
     value_coef: float,
 ):
-    """
-    Build the callback consumed by train_rl.train_epoch().
-
-    injection_frequency = 1:
-        Oracle on every PPO minibatch update.
-
-    injection_frequency = 5:
-        Oracle on updates 1, 6, 11, ...
-    """
 
     if injection_frequency <= 0:
 
@@ -1147,35 +1195,38 @@ def make_oracle_loss_fn(
 
 
 # ============================================================
-# Model loading
+# Model
 # ============================================================
 
 def build_actor_critic(
+    args: argparse.Namespace,
     device: torch.device,
 ) -> ActorCritic:
 
-    base_model = ChessResNet(
+    backbone = ChessResNet(
         num_actions=len(
             ACTIONS
         ),
-        channels=32,
-        blocks=4,
+        channels=args.channels,
+        blocks=args.blocks,
     )
 
     return ActorCritic(
-        base_model
+        backbone
     ).to(
         device
     )
 
 
+# ============================================================
+# Starting checkpoint
+# ============================================================
+
 def load_starting_state(
     checkpoint_path: Path,
+    args: argparse.Namespace,
     device: torch.device,
 ):
-    """
-    Restore model + optimizer from the exact training state.
-    """
 
     if not checkpoint_path.exists():
 
@@ -1198,8 +1249,7 @@ def load_starting_state(
     if "optimizer_state_dict" not in checkpoint:
 
         raise RuntimeError(
-            "Checkpoint does not contain optimizer_state_dict. "
-            "Exact continuation cannot be guaranteed."
+            "Checkpoint does not contain optimizer_state_dict."
         )
 
     checkpoint_actions = checkpoint.get(
@@ -1208,8 +1258,7 @@ def load_starting_state(
 
     if (
         checkpoint_actions is not None
-        and checkpoint_actions
-        != len(
+        and checkpoint_actions != len(
             ACTIONS
         )
     ):
@@ -1220,7 +1269,8 @@ def load_starting_state(
         )
 
     model = build_actor_critic(
-        device
+        args,
+        device,
     )
 
     model.load_state_dict(
@@ -1231,7 +1281,7 @@ def load_starting_state(
 
     optimizer = Adam(
         model.parameters(),
-        lr=rl.LR,
+        lr=rl.DEFAULT_LR,
     )
 
     optimizer.load_state_dict(
@@ -1250,7 +1300,8 @@ def load_starting_state(
     if start_epoch < 0:
 
         raise RuntimeError(
-            "Starting checkpoint does not contain a valid epoch."
+            "Starting checkpoint does not contain "
+            "a valid epoch."
         )
 
     print()
@@ -1286,40 +1337,34 @@ def load_league(
     *,
     start_epoch: int,
     league_dir: Path,
+    args: argparse.Namespace,
     device: torch.device,
 ):
     """
-    Reconstruct the historical opponent league.
+    Reconstruct exact historical league up to start_epoch.
 
-    BC6 / BC7:
-        - remain protected opponents;
-        - are explicitly EXCLUDED from value uncertainty.
-
-    Historical trained RL snapshots:
-        - remain opponents;
-        - ARE eligible for value uncertainty.
+    BC6 is protected and excluded from uncertainty.
+    RL snapshots participate in uncertainty.
     """
 
     protected_agents = {
         "bc_epoch_6",
-        "bc_epoch_7",
     }
 
     league = rl.League(
-        max_agents=rl.LEAGUE_MAX_AGENTS,
+        max_agents=rl.DEFAULT_LEAGUE_MAX_AGENTS,
         protected_agents=protected_agents,
     )
 
     # ========================================================
-    # BC anchors
+    # BC6
     # ========================================================
 
-    bc6 = rl.load_bc_agent(
-        6
-    )
-
-    bc7 = rl.load_bc_agent(
-        7
+    bc6 = rl.load_bc_actor_critic(
+        epoch=6,
+        args=args,
+        device=device,
+        evaluation=True,
     )
 
     league.add_agent(
@@ -1328,14 +1373,8 @@ def load_league(
         use_for_uncertainty=False,
     )
 
-    league.add_agent(
-        "bc_epoch_7",
-        bc7,
-        use_for_uncertainty=False,
-    )
-
     # ========================================================
-    # Historical trained snapshots
+    # Historical RL snapshots
     # ========================================================
 
     loaded_snapshots = 0
@@ -1358,8 +1397,26 @@ def load_league(
             map_location=device,
         )
 
+        checkpoint_actions = checkpoint.get(
+            "actions"
+        )
+
+        if (
+            checkpoint_actions is not None
+            and checkpoint_actions
+            != len(
+                ACTIONS
+            )
+        ):
+
+            raise ValueError(
+                f"Action-space mismatch in {path}: "
+                f"{checkpoint_actions} != {len(ACTIONS)}"
+            )
+
         snapshot = build_actor_critic(
-            device
+            args,
+            device,
         )
 
         snapshot.load_state_dict(
@@ -1388,6 +1445,11 @@ def load_league(
     )
 
     print(
+        f"BC checkpoint directory: "
+        f"{args.bc_checkpoint_dir}"
+    )
+
+    print(
         f"Historical RL snapshots loaded: "
         f"{loaded_snapshots}"
     )
@@ -1401,14 +1463,26 @@ def load_league(
         f"{league.uncertainty_names()}"
     )
 
+    # --------------------------------------------------------
+    # Fail fast. An RL10 AL branch must have RL1...RL10.
+    # --------------------------------------------------------
+
+    if start_epoch == 10 and loaded_snapshots != 10:
+
+        raise RuntimeError(
+            "Expected 10 historical RL league snapshots "
+            f"for an RL10 branch, but loaded {loaded_snapshots}. "
+            "Check --league-dir before spending compute."
+        )
+
     return (
         league,
-        bc7,
+        bc6,
     )
 
 
 # ============================================================
-# Uncertainty stats
+# Uncertainty
 # ============================================================
 
 def load_uncertainty_stats(
@@ -1438,8 +1512,8 @@ def load_uncertainty_stats(
         ):
 
             raise ValueError(
-                "Existing uncertainty statistics must be "
-                "stored as a JSON list."
+                "Existing uncertainty statistics "
+                "must be a JSON list."
             )
 
         stats.data = data
@@ -1453,7 +1527,7 @@ def load_uncertainty_stats(
 
 
 # ============================================================
-# Shared-model helpers
+# Shared-model helper
 # ============================================================
 
 def copy_model_state_to_shared(
@@ -1461,9 +1535,15 @@ def copy_model_state_to_shared(
     shared_model,
 ) -> None:
 
-    shared_state = shared_model.state_dict()
+    shared_state = (
+        shared_model.state_dict()
+    )
 
-    for key, value in source_model.state_dict().items():
+    for key, value in (
+        source_model
+        .state_dict()
+        .items()
+    ):
 
         shared_state[
             key
@@ -1475,7 +1555,7 @@ def copy_model_state_to_shared(
 
 
 # ============================================================
-# Checkpoint saving
+# Saving
 # ============================================================
 
 def save_al_checkpoint(
@@ -1596,39 +1676,13 @@ def main() -> None:
 
     args = parse_args()
 
-    # ========================================================
-    # Validation
-    # ========================================================
+    args = complete_rl_args(
+        args
+    )
 
-    if args.end_epoch < 0:
-
-        raise ValueError(
-            "--end-epoch must be non-negative."
-        )
-
-    if args.workers <= 0:
-
-        raise ValueError(
-            "--workers must be >= 1."
-        )
-
-    if args.selfplay_batch_size <= 0:
-
-        raise ValueError(
-            "--selfplay-batch-size must be >= 1."
-        )
-
-    if args.oracle_batch_size <= 0:
-
-        raise ValueError(
-            "--oracle-batch-size must be >= 1."
-        )
-
-    if args.oracle_frequency <= 0:
-
-        raise ValueError(
-            "--oracle-frequency must be >= 1."
-        )
+    validate_args(
+        args
+    )
 
     # ========================================================
     # Determinism
@@ -1638,18 +1692,16 @@ def main() -> None:
         args.seed
     )
 
-    device = torch.device(
+    device = rl.resolve_device(
         args.device
     )
 
     # ========================================================
-    # Run directories
+    # Output
     # ========================================================
 
     run_dir = (
-        PROJECT_ROOT
-        / "checkpoints"
-        / "al_runs"
+        args.output_dir
         / args.run_name
     )
 
@@ -1699,7 +1751,43 @@ def main() -> None:
     )
 
     print(
+        f"Channels:         {args.channels}"
+    )
+
+    print(
+        f"Blocks:           {args.blocks}"
+    )
+
+    print(
+        f"Games / epoch:    {args.games_per_epoch}"
+    )
+
+    print(
+        f"Self-play T:      {args.temperature_selfplay}"
+    )
+
+    print(
+        f"Workers:          {args.num_workers}"
+    )
+
+    print(
+        f"Self-play batch:  {args.selfplay_batch_size}"
+    )
+
+    print(
+        f"Uncertainty batch:{args.uncertainty_batch_size}"
+    )
+
+    print(
+        f"BC directory:     {args.bc_checkpoint_dir}"
+    )
+
+    print(
         f"Start checkpoint: {args.start_checkpoint}"
+    )
+
+    print(
+        f"League directory: {args.league_dir}"
     )
 
     print(
@@ -1711,7 +1799,7 @@ def main() -> None:
     )
 
     # ========================================================
-    # Starting model / optimizer
+    # Starting state
     # ========================================================
 
     (
@@ -1720,6 +1808,7 @@ def main() -> None:
         start_epoch,
     ) = load_starting_state(
         args.start_checkpoint,
+        args,
         device,
     )
 
@@ -1731,8 +1820,8 @@ def main() -> None:
     if args.end_epoch < first_al_epoch:
 
         raise ValueError(
-            f"--end-epoch={args.end_epoch} is earlier than "
-            f"the next trainable epoch {first_al_epoch}."
+            f"--end-epoch={args.end_epoch} "
+            f"is earlier than epoch {first_al_epoch}."
         )
 
     # ========================================================
@@ -1745,6 +1834,7 @@ def main() -> None:
     ) = load_league(
         start_epoch=start_epoch,
         league_dir=args.league_dir,
+        args=args,
         device=device,
     )
 
@@ -1776,36 +1866,36 @@ def main() -> None:
     print("=" * 70)
 
     print(
-        f"Annotations:       {len(oracle_buffer):,}"
+        f"Annotations:        {len(oracle_buffer):,}"
     )
 
     print(
-        f"Batch size:        "
+        "Batch size:         "
         f"{min(args.oracle_batch_size, len(oracle_buffer))}"
     )
 
     print(
-        f"Injection:         1 / {args.oracle_frequency}"
+        f"Injection:          1 / {args.oracle_frequency}"
     )
 
     print(
-        f"Policy coefficient:{args.oracle_policy_coef}"
+        f"Policy coefficient: {args.oracle_policy_coef}"
     )
 
     print(
-        f"Value coefficient: {args.oracle_value_coef}"
+        f"Value coefficient:  {args.oracle_value_coef}"
     )
 
     # ========================================================
-    # RL rollout buffer
+    # RL buffer
     # ========================================================
 
     buffer = rl.ReplayBuffer(
-        capacity=300_000
+        capacity=args.buffer_capacity
     )
 
     # ========================================================
-    # Uncertainty statistics
+    # Uncertainty
     # ========================================================
 
     stats = load_uncertainty_stats(
@@ -1814,7 +1904,7 @@ def main() -> None:
     )
 
     # ========================================================
-    # Shared BC model
+    # Shared models
     # ========================================================
 
     bc_model_selfplay = copy.deepcopy(
@@ -1826,19 +1916,11 @@ def main() -> None:
     bc_model_selfplay.eval()
     bc_model_selfplay.share_memory()
 
-    # ========================================================
-    # Shared current model
-    # ========================================================
-
     shared_current_model = (
-        rl._prepare_shared_model(
+        rl.prepare_shared_model(
             model
         )
     )
-
-    # ========================================================
-    # Shared league agents
-    # ========================================================
 
     shared_league_models = {}
 
@@ -1849,13 +1931,13 @@ def main() -> None:
 
         shared_league_models[
             name
-        ] = rl._prepare_shared_model(
+        ] = rl.prepare_shared_model(
             league_model
         )
 
-    # --------------------------------------------------------
-    # Preallocate future AL league slots.
-    # --------------------------------------------------------
+    # ========================================================
+    # Preallocate AL league slots
+    # ========================================================
 
     for epoch in range(
         first_al_epoch,
@@ -1896,20 +1978,19 @@ def main() -> None:
         league.names()
     )
 
-    # ========================================================
-    # Pool
-    # ========================================================
-
     try:
 
         with ctx.Pool(
-            processes=args.workers,
+            processes=args.num_workers,
             initializer=rl._init_selfplay_worker,
             initargs=(
                 shared_current_model,
                 shared_league_models,
                 league_registry,
                 bc_model_selfplay,
+                args.temperature_selfplay,
+                args.opening_prior_strength,
+                args.opening_prior_plies,
             ),
         ) as pool:
 
@@ -1929,29 +2010,28 @@ def main() -> None:
                 )
                 print("=" * 70)
 
-                # ---------------------------------------------
+                # =============================================
                 # Self-play
-                # ---------------------------------------------
+                # =============================================
 
                 games = rl.collect_games_parallel(
                     pool,
-                    shared_current_model,
-                    shared_league_models,
                     model,
                     league,
-                    rl.GAMES_PER_EPOCH,
+                    args.games_per_epoch,
                     stats,
-                    num_workers=args.workers,
-                    batch_size=args.selfplay_batch_size,
+                    epoch,
+                    args,
+                    device,
                 )
 
                 wins = 0
                 losses = 0
                 draws = 0
 
-                # ---------------------------------------------
-                # Build on-policy PPO buffer
-                # ---------------------------------------------
+                # =============================================
+                # Build PPO buffer
+                # =============================================
 
                 for game in games:
 
@@ -2017,11 +2097,13 @@ def main() -> None:
                             -1
                         ] = terminal_reward
 
-                    advantages, returns = rl.compute_gae(
-                        trajectory,
-                        rewards,
-                        gamma=rl.GAMMA,
-                        gae_lambda=rl.GAE_LAMBDA,
+                    advantages, returns = (
+                        rl.compute_gae(
+                            trajectory,
+                            rewards,
+                            gamma=args.gamma,
+                            gae_lambda=args.gae_lambda,
+                        )
                     )
 
                     for (
@@ -2064,10 +2146,12 @@ def main() -> None:
                     + draws
                 )
 
-                if total_games <= 0:
+                if total_games != args.games_per_epoch:
 
                     raise RuntimeError(
-                        "No self-play games collected."
+                        "Self-play returned "
+                        f"{total_games} games instead of "
+                        f"{args.games_per_epoch}."
                     )
 
                 score_rate = (
@@ -2089,9 +2173,9 @@ def main() -> None:
                     f"{len(buffer):,} transitions"
                 )
 
-                # ---------------------------------------------
+                # =============================================
                 # PPO + Oracle
-                # ---------------------------------------------
+                # =============================================
 
                 oracle_loss_fn.reset_epoch_stats()
 
@@ -2108,6 +2192,8 @@ def main() -> None:
                     buffer,
                     bc_model,
                     epoch,
+                    args,
+                    device,
                     extra_loss_fn=oracle_loss_fn,
                 )
 
@@ -2121,7 +2207,8 @@ def main() -> None:
                     f"| Actor={actor_loss:.4f} "
                     f"| Critic={critic_loss:.4f} "
                     f"| KL={approx_kl:.6f} "
-                    f"| DKL={dkl:.6f}"
+                    f"| DKL={dkl:.6f} "
+                    f"| DKL loss={dkl_loss:.6f}"
                 )
 
                 print(
@@ -2131,23 +2218,23 @@ def main() -> None:
                     f"{oracle_epoch_stats['injections']}"
                 )
 
-                # ---------------------------------------------
+                # =============================================
                 # On-policy semantics
-                # ---------------------------------------------
+                # =============================================
 
                 buffer.clear()
 
-                # ---------------------------------------------
-                # Save uncertainty statistics
-                # ---------------------------------------------
+                # =============================================
+                # Save uncertainty
+                # =============================================
 
                 stats.save(
                     uncertainty_stats_path
                 )
 
-                # ---------------------------------------------
+                # =============================================
                 # Save AL checkpoint
-                # ---------------------------------------------
+                # =============================================
 
                 checkpoint_path = (
                     checkpoint_dir
@@ -2175,12 +2262,9 @@ def main() -> None:
                     f"Checkpoint: {checkpoint_path}"
                 )
 
-                # ---------------------------------------------
-                # Add trained AL snapshot to the league.
-                #
-                # Unlike BC6/BC7, trained RL/AL critics are
-                # legitimate uncertainty contributors.
-                # ---------------------------------------------
+                # =============================================
+                # League snapshot
+                # =============================================
 
                 snapshot = copy.deepcopy(
                     model
@@ -2213,15 +2297,15 @@ def main() -> None:
                     acquisition=args.acquisition,
                 )
 
-                # ---------------------------------------------
-                # Update worker-side shared snapshot
-                # ---------------------------------------------
+                # =============================================
+                # Synchronize workers
+                # =============================================
 
                 if agent_name not in shared_league_models:
 
                     raise RuntimeError(
-                        "Missing preallocated shared model "
-                        f"slot: {agent_name}"
+                        "Missing preallocated shared "
+                        f"league slot: {agent_name}"
                     )
 
                 copy_model_state_to_shared(
@@ -2235,26 +2319,18 @@ def main() -> None:
                     agent_name
                 ].eval()
 
-                # ---------------------------------------------
-                # Update worker registry after league pruning.
-                # ---------------------------------------------
-
                 league_registry[:] = (
                     league.names()
                 )
-
-                # ---------------------------------------------
-                # Update current policy visible by workers.
-                # ---------------------------------------------
 
                 copy_model_state_to_shared(
                     model,
                     shared_current_model,
                 )
 
-                # ---------------------------------------------
-                # Epoch summary
-                # ---------------------------------------------
+                # =============================================
+                # Summary
+                # =============================================
 
                 print()
                 print(

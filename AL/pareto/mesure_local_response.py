@@ -5,24 +5,30 @@ ALBERTA - Dynamic Pareto Local Response
 =======================================
 
 Refresh the fixed manually annotated Pareto calibration probes under
-a contemporary learner and measure their controlled local Oracle
-response.
+the RL10 learner and measure their controlled local Oracle response.
 
-This is the second stage of the dynamic Pareto acquisition pipeline:
+Pipeline
+--------
 
     fixed annotated calibration FENs
                 |
                 v
-    recompute H_t / U_t / HU_t
+    reconstruct historical league RL1 ... RL9
+                |
+                v
+    current learner RL10
+                |
+                v
+    recompute H_10 / U_10 / HU_10
                 |
                 v
     apply one controlled Oracle-only optimizer step
                 |
                 v
-    measure Delta_KL_t and |Delta_V_t|
+    measure Delta_KL_10 and |Delta_V_10|
                 |
                 v
-    calibration dataset for the Pareto response surrogate
+    calibration dataset for Pareto response surrogate
 
 The resulting dataset maps:
 
@@ -40,34 +46,30 @@ and:
     Delta_V_t =
         |V_after - V_before|
 
-Thus Delta_V is deliberately a response MAGNITUDE, not a signed
-value improvement.
+Delta_V is therefore a response magnitude, not a signed value
+improvement.
 
-Important
----------
+League reconstruction
+---------------------
 
-The 200 FENs and their human annotations stay fixed across dynamic
-Pareto generations.
+At the branch point t = 10:
 
-Learner-dependent quantities are refreshed:
+    BC6
+        protected opponent
+        excluded from uncertainty
 
-    H_t
-    U_t
-    HU_t
-    Delta_KL_t
-    Delta_V_t
+    RL1 ... RL9
+        historical uncertainty contributors
 
-Uncertainty
------------
+    RL10
+        current learner
+        supplied separately to League.uncertainty_batch()
 
-U_t is computed using:
+Thus U_10 is computed from exactly:
 
-    trained historical learner critics
-    + current learner critic
+    RL1 ... RL9 + current RL10
 
-BC6 and BC7 remain league policy anchors but are explicitly excluded
-from uncertainty estimation because their ActorCritic value heads
-are untrained.
+and the current critic contributes exactly once.
 
 Oracle loss
 -----------
@@ -76,26 +78,18 @@ The Oracle objective is delegated directly to:
 
     training.train_al.compute_oracle_loss()
 
-For a one-annotation batch, normalized confidence × situation
-weighting cancels exactly. Annotation categories are therefore
-retained as metadata but do not artificially rescale individual
-probe gradients.
-
 Optimizer
 ---------
 
-The diagnostic restores the contemporary learner checkpoint AND its
-optimizer state before every annotation.
+The diagnostic restores the RL10 learner checkpoint AND its optimizer
+state before every annotation.
 
 Therefore every probe starts from the same:
 
-    theta_t
-    Adam state_t
+    theta_10
+    Adam state_10
 
-and receives one identical-form Oracle-only step.
-
-This is intentionally different from analysis/annotation_response.py,
-which uses a fresh diagnostic Adam optimizer.
+and receives one Oracle-only step.
 
 No PPO loss is included in this local probe.
 
@@ -152,25 +146,26 @@ from src.selfplay.league import League
 # Defaults
 # ============================================================
 
-DEFAULT_EPOCH = 14
+DEFAULT_EPOCH = 10
 
 DEFAULT_ORACLE_QUEUE = (
     PROJECT_ROOT
-    / "checkpoints"
+    / "data"
     / "queue"
     / "oracle_queue_1-10_pareto_probe.jsonl"
 )
 
-DEFAULT_CHECKPOINT_DIR = (
+DEFAULT_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
-    / "dynamic_pareto_epoch"
+    / "rl_epoch"
+    / "rl_epoch_10.pt"
 )
 
-DEFAULT_LEAGUE_DIR = (
+DEFAULT_BASELINE_LEAGUE_DIR = (
     PROJECT_ROOT
     / "checkpoints"
-    / "dynamic_pareto_league"
+    / "league"
 )
 
 DEFAULT_BC_DIR = (
@@ -189,24 +184,23 @@ DEFAULT_OUTPUT = (
 DEFAULT_DEVICE = "cpu"
 DEFAULT_SEED = 42
 
-DEFAULT_LEAGUE_HISTORY = 10
+DEFAULT_CHANNELS = 32
+DEFAULT_BLOCKS = 4
+
 DEFAULT_LEAGUE_MAX_AGENTS = 12
 
-DEFAULT_BC_PRIOR_EPOCH = 7
-DEFAULT_BC_ANCHORS = (
-    6,
-    7,
-)
+DEFAULT_BC_PRIOR_EPOCH = 6
+DEFAULT_BC_ANCHOR_EPOCH = 6
 
 DEFAULT_OPENING_PRIOR_PLIES = getattr(
     rl,
-    "OPENING_PRIOR_PLIES",
+    "DEFAULT_OPENING_PRIOR_PLIES",
     6,
 )
 
 DEFAULT_OPENING_PRIOR_STRENGTH = getattr(
     rl,
-    "OPENING_PRIOR_STRENGTH",
+    "DEFAULT_OPENING_PRIOR_STRENGTH",
     1.0,
 )
 
@@ -227,8 +221,8 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Refresh the fixed Pareto calibration probe and "
-            "measure contemporary local Oracle responses."
+            "Refresh the fixed Pareto calibration probe at RL10 "
+            "and measure local Oracle responses."
         )
     )
 
@@ -247,23 +241,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        default=None,
-        help=(
-            "Current learner checkpoint. If omitted, "
-            "<checkpoint-dir>/al_epoch_<epoch>.pt is used."
-        ),
+        default=DEFAULT_CHECKPOINT,
     )
 
     parser.add_argument(
-        "--checkpoint-dir",
+        "--baseline-league-dir",
         type=Path,
-        default=DEFAULT_CHECKPOINT_DIR,
-    )
-
-    parser.add_argument(
-        "--league-dir",
-        type=Path,
-        default=DEFAULT_LEAGUE_DIR,
+        default=DEFAULT_BASELINE_LEAGUE_DIR,
     )
 
     parser.add_argument(
@@ -291,9 +275,15 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--league-history",
+        "--channels",
         type=int,
-        default=DEFAULT_LEAGUE_HISTORY,
+        default=DEFAULT_CHANNELS,
+    )
+
+    parser.add_argument(
+        "--blocks",
+        type=int,
+        default=DEFAULT_BLOCKS,
     )
 
     parser.add_argument(
@@ -350,7 +340,6 @@ def seed_everything(
     )
 
     if torch.cuda.is_available():
-
         torch.cuda.manual_seed_all(
             seed
         )
@@ -359,7 +348,6 @@ def seed_everything(
         torch.backends,
         "cudnn",
     ):
-
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
@@ -371,12 +359,6 @@ def seed_everything(
 def freeze_batchnorm(
     model: torch.nn.Module,
 ) -> None:
-    """
-    Freeze BatchNorm running statistics while keeping affine
-    parameters trainable.
-
-    One-position probe batches must not modify BN running state.
-    """
 
     for module in model.modules():
 
@@ -384,7 +366,6 @@ def freeze_batchnorm(
             module,
             torch.nn.modules.batchnorm._BatchNorm,
         ):
-
             module.eval()
 
 
@@ -394,11 +375,11 @@ def freeze_batchnorm(
 
 def load_actor_critic_checkpoint(
     path: Path,
+    args: argparse.Namespace,
     device: torch.device,
 ):
 
     if not path.exists():
-
         raise FileNotFoundError(
             f"ActorCritic checkpoint not found:\n{path}"
         )
@@ -409,7 +390,6 @@ def load_actor_critic_checkpoint(
     )
 
     if "model_state_dict" not in checkpoint:
-
         raise RuntimeError(
             f"No model_state_dict in:\n{path}"
         )
@@ -422,14 +402,14 @@ def load_actor_critic_checkpoint(
         checkpoint_actions is not None
         and checkpoint_actions != len(ACTIONS)
     ):
-
         raise ValueError(
             "Action-space mismatch: "
             f"{checkpoint_actions} != {len(ACTIONS)}"
         )
 
     model = al.build_actor_critic(
-        device
+        args,
+        device,
     )
 
     model.load_state_dict(
@@ -450,7 +430,6 @@ def load_current_checkpoint(
 ) -> dict:
 
     if not path.exists():
-
         raise FileNotFoundError(
             f"Current learner checkpoint not found:\n{path}"
         )
@@ -466,7 +445,6 @@ def load_current_checkpoint(
     ):
 
         if key not in checkpoint:
-
             raise RuntimeError(
                 f"Current checkpoint has no {key}:\n{path}"
             )
@@ -479,7 +457,6 @@ def load_current_checkpoint(
         checkpoint_actions is not None
         and checkpoint_actions != len(ACTIONS)
     ):
-
         raise ValueError(
             "Action-space mismatch: "
             f"{checkpoint_actions} != {len(ACTIONS)}"
@@ -489,7 +466,7 @@ def load_current_checkpoint(
 
 
 # ============================================================
-# BC policy / opponent loading
+# BC loading
 # ============================================================
 
 def load_bc_policy(
@@ -505,7 +482,6 @@ def load_bc_policy(
     )
 
     if not path.exists():
-
         raise FileNotFoundError(
             f"BC checkpoint not found:\n{path}"
         )
@@ -516,7 +492,6 @@ def load_bc_policy(
     )
 
     if "model_state_dict" not in checkpoint:
-
         raise RuntimeError(
             f"BC checkpoint has no model_state_dict:\n{path}"
         )
@@ -549,11 +524,6 @@ def load_bc_opponent(
     bc_dir: Path,
     device: torch.device,
 ):
-    """
-    Wrap BC policy into ActorCritic for league opponent use.
-
-    Its value head is untrained and must never contribute to U.
-    """
 
     path = (
         bc_dir
@@ -561,7 +531,6 @@ def load_bc_opponent(
     )
 
     if not path.exists():
-
         raise FileNotFoundError(
             f"BC checkpoint not found:\n{path}"
         )
@@ -570,6 +539,11 @@ def load_bc_opponent(
         path,
         map_location=device,
     )
+
+    if "model_state_dict" not in checkpoint:
+        raise RuntimeError(
+            f"BC checkpoint has no model_state_dict:\n{path}"
+        )
 
     base_model = ChessResNet(
         num_actions=len(ACTIONS),
@@ -596,42 +570,42 @@ def load_bc_opponent(
 
 
 # ============================================================
-# Historical league
+# Historical league reconstruction
 # ============================================================
 
 def load_current_league(
     *,
     current_epoch: int,
-    league_dir: Path,
+    baseline_league_dir: Path,
     bc_dir: Path,
+    args: argparse.Namespace,
     device: torch.device,
-    history: int,
     max_agents: int,
 ) -> League:
     """
-    Reconstruct the contemporary Pareto-training league.
+    Reconstruct the historical league immediately before the
+    current RL10 learner.
 
-    BC6 / BC7:
-        opponent = yes
-        uncertainty = no
+    At t=10:
 
-    Historical trained learner snapshots:
-        opponent = yes
-        uncertainty = yes
+        BC6       protected, excluded from U
+        RL1..RL9  historical U contributors
+        RL10      NOT inserted here
 
-    Current learner itself is supplied separately to
-    League.uncertainty_batch().
+    RL10 is supplied separately as current_model to
+    League.uncertainty_batch(), so it contributes exactly once.
     """
 
-    protected_names = [
-        f"bc_epoch_{epoch}"
-        for epoch
-        in DEFAULT_BC_ANCHORS
-    ]
+    if current_epoch < 1:
+        raise ValueError(
+            "current_epoch must be >= 1."
+        )
 
     league = League(
         max_agents=max_agents,
-        protected_agents=protected_names,
+        protected_agents={
+            "bc_epoch_6",
+        },
     )
 
     print()
@@ -640,48 +614,35 @@ def load_current_league(
     print("=" * 72)
 
     # --------------------------------------------------------
-    # Fixed BC anchors
+    # Protected BC6 anchor
     # --------------------------------------------------------
 
-    for bc_epoch in DEFAULT_BC_ANCHORS:
-
-        name = (
-            f"bc_epoch_{bc_epoch}"
-        )
-
-        model = load_bc_opponent(
-            epoch=bc_epoch,
-            bc_dir=bc_dir,
-            device=device,
-        )
-
-        league.add_agent(
-            name,
-            model,
-            use_for_uncertainty=False,
-        )
-
-        print(
-            f"Loaded opponent {name} "
-            f"(excluded from U)"
-        )
-
-    # --------------------------------------------------------
-    # Historical trained learners
-    # --------------------------------------------------------
-
-    start_epoch = max(
-        1,
-        current_epoch
-        - history
-        + 1,
+    bc6 = load_bc_opponent(
+        epoch=DEFAULT_BC_ANCHOR_EPOCH,
+        bc_dir=bc_dir,
+        device=device,
     )
 
-    loaded_snapshots = 0
+    league.add_agent(
+        "bc_epoch_6",
+        bc6,
+        use_for_uncertainty=False,
+    )
+
+    print(
+        "Loaded bc_epoch_6 "
+        "(protected opponent, excluded from U)"
+    )
+
+    # --------------------------------------------------------
+    # Historical RL snapshots: RL1 ... RL(t-1)
+    # --------------------------------------------------------
+
+    baseline_loaded = 0
 
     for epoch in range(
-        start_epoch,
-        current_epoch + 1,
+        1,
+        current_epoch,
     ):
 
         name = (
@@ -689,21 +650,19 @@ def load_current_league(
         )
 
         path = (
-            league_dir
+            baseline_league_dir
             / f"{name}.pt"
         )
 
         if not path.exists():
-
-            print(
-                f"WARNING: missing league snapshot: "
+            raise FileNotFoundError(
+                "Missing required baseline league snapshot:\n"
                 f"{path}"
             )
 
-            continue
-
         model = load_actor_critic_checkpoint(
             path,
+            args,
             device,
         )
 
@@ -713,24 +672,58 @@ def load_current_league(
             use_for_uncertainty=True,
         )
 
-        loaded_snapshots += 1
+        baseline_loaded += 1
 
         print(
-            f"Loaded {name} "
-            f"(included in U)"
+            f"Loaded baseline {name}"
         )
+
+    # --------------------------------------------------------
+    # Diagnostics
+    # --------------------------------------------------------
 
     print()
 
     print(
-        f"Historical trained critics: "
-        f"{loaded_snapshots}"
+        f"Baseline snapshots inserted: "
+        f"{baseline_loaded}"
     )
 
     print(
-        f"U contributors: "
+        f"Final historical league size: "
+        f"{len(league)}"
+    )
+
+    print(
+        f"League members: "
+        f"{league.names()}"
+    )
+
+    print(
+        f"Historical U contributors: "
         f"{league.uncertainty_names()}"
     )
+
+    expected_uncertainty_count = (
+        len(league.uncertainty_names())
+        + 1
+    )
+
+    print(
+        "U critics including current learner: "
+        f"{expected_uncertainty_count}"
+    )
+
+    current_name = (
+        f"league_epoch_{current_epoch:03d}"
+    )
+
+    if current_name in league.names():
+        raise RuntimeError(
+            "Current learner snapshot is already present in "
+            "the historical league. This would duplicate the "
+            "current critic in U."
+        )
 
     return league
 
@@ -742,14 +735,8 @@ def load_current_league(
 def load_annotations(
     path: Path,
 ) -> list[dict]:
-    """
-    Load complete fixed human annotations.
-
-    Stored historical H/U/HU values are deliberately ignored.
-    """
 
     if not path.exists():
-
         raise FileNotFoundError(
             f"Oracle queue not found:\n{path}"
         )
@@ -775,13 +762,11 @@ def load_annotations(
                 continue
 
             try:
-
                 record = json.loads(
                     line
                 )
 
             except json.JSONDecodeError as exc:
-
                 raise ValueError(
                     f"Invalid JSON at line {line_number}."
                 ) from exc
@@ -790,7 +775,6 @@ def load_annotations(
                 record,
                 dict,
             ):
-
                 raise ValueError(
                     f"Expected JSON object at line "
                     f"{line_number}."
@@ -799,7 +783,6 @@ def load_annotations(
             if record.get(
                 "status"
             ) == "discarded":
-
                 skipped_discarded += 1
                 continue
 
@@ -840,33 +823,28 @@ def load_annotations(
                 or situation is None
                 or reward_raw is None
             ):
-
                 skipped_incomplete += 1
                 continue
 
             if confidence not in al.CONFIDENCE_WEIGHTS:
-
                 raise ValueError(
                     f"Invalid confidence at line "
                     f"{line_number}: {confidence}"
                 )
 
             if situation not in al.SITUATION_WEIGHTS:
-
                 raise ValueError(
                     f"Invalid situation at line "
                     f"{line_number}: {situation}"
                 )
 
             if oracle_move not in ACTION_TO_INDEX:
-
                 raise ValueError(
                     f"Unknown Oracle move at line "
                     f"{line_number}: {oracle_move}"
                 )
 
             try:
-
                 reward = float(
                     reward_raw
                 )
@@ -875,7 +853,6 @@ def load_annotations(
                 TypeError,
                 ValueError,
             ) as exc:
-
                 raise ValueError(
                     f"Invalid reward at line "
                     f"{line_number}: {reward_raw}"
@@ -886,7 +863,6 @@ def load_annotations(
                 0.0,
                 1.0,
             }:
-
                 raise ValueError(
                     f"Invalid reward at line "
                     f"{line_number}: {reward}"
@@ -903,7 +879,6 @@ def load_annotations(
             }
 
             if oracle_move not in legal_moves:
-
                 raise ValueError(
                     f"Illegal Oracle move at line "
                     f"{line_number}:\n"
@@ -936,7 +911,6 @@ def load_annotations(
             )
 
     if not annotations:
-
         raise RuntimeError(
             "No complete Oracle annotations found."
         )
@@ -979,7 +953,6 @@ def opening_prior_alpha(
         or prior_strength <= 0.0
         or ply >= prior_plies
     ):
-
         return 0.0
 
     return (
@@ -1008,14 +981,6 @@ def compute_entropy(
     opening_prior_plies: int,
     opening_prior_strength: float,
 ) -> float:
-    """
-    Compute rollout entropy over legal actions.
-
-    BC opening prior is applied where active.
-
-    Entropy is measured before rollout sampling temperature,
-    matching the historical H definition.
-    """
 
     encoded = encode_boards(
         [
@@ -1034,7 +999,6 @@ def compute_entropy(
     )
 
     if not legal_moves:
-
         raise RuntimeError(
             "Probe position has no legal moves."
         )
@@ -1074,7 +1038,6 @@ def compute_entropy(
             bc_logits,
             tuple,
         ):
-
             bc_logits = bc_logits[
                 0
             ]
@@ -1187,7 +1150,6 @@ def refresh_annotation_features(
             )
             or U < 0.0
         ):
-
             raise RuntimeError(
                 "Non-finite dynamic H/U."
             )
@@ -1236,12 +1198,6 @@ def evaluate_position(
     fen: str,
     device: torch.device,
 ) -> dict:
-    """
-    Evaluate the raw learner policy over legal actions.
-
-    No BC prior and no temperature are applied here because the
-    target is the learner's own local policy displacement.
-    """
 
     model.eval()
 
@@ -1266,7 +1222,6 @@ def evaluate_position(
     )
 
     if not legal_moves:
-
         raise RuntimeError(
             "Probe position has no legal moves."
         )
@@ -1336,7 +1291,6 @@ def compute_kl(
             "legal_indices"
         ]
     ):
-
         raise RuntimeError(
             "Legal support changed between evaluations."
         )
@@ -1358,7 +1312,6 @@ def compute_kl(
     if not torch.isfinite(
         kl
     ):
-
         raise RuntimeError(
             "Non-finite policy KL."
         )
@@ -1390,10 +1343,6 @@ def measure_annotation(
         device=device,
     )
 
-    # --------------------------------------------------------
-    # Exactly one controlled Oracle-only step.
-    # --------------------------------------------------------
-
     model.train()
 
     freeze_batchnorm(
@@ -1420,18 +1369,25 @@ def measure_annotation(
 
     loss.backward()
 
+    gradients = [
+        parameter.grad
+        .detach()
+        .reshape(
+            -1
+        )
+        for parameter
+        in model.parameters()
+        if parameter.grad is not None
+    ]
+
+    if not gradients:
+        raise RuntimeError(
+            "Oracle loss produced no gradients."
+        )
+
     gradient_norm = torch.linalg.vector_norm(
         torch.cat(
-            [
-                parameter.grad
-                .detach()
-                .reshape(
-                    -1
-                )
-                for parameter
-                in model.parameters()
-                if parameter.grad is not None
-            ]
+            gradients
         )
     )
 
@@ -1505,7 +1461,6 @@ def measure_annotation(
                 gradient_norm.item()
             ),
 
-        # Metadata only for a one-item normalized Oracle batch.
         "confidence_weight":
             float(
                 confidence_weight
@@ -1532,20 +1487,12 @@ def main() -> None:
 
     args = parse_args()
 
-    if args.epoch < 0:
-
+    if args.epoch < 1:
         raise ValueError(
-            "--epoch must be non-negative."
-        )
-
-    if args.league_history <= 0:
-
-        raise ValueError(
-            "--league-history must be positive."
+            "--epoch must be >= 1."
         )
 
     if args.league_max_agents <= 0:
-
         raise ValueError(
             "--league-max-agents must be positive."
         )
@@ -1560,36 +1507,45 @@ def main() -> None:
 
     checkpoint_path = args.checkpoint
 
-    if checkpoint_path is None:
-
-        checkpoint_path = (
-            args.checkpoint_dir
-            / f"al_epoch_{args.epoch}.pt"
-        )
-
     print()
     print("=" * 72)
     print("ALBERTA - DYNAMIC PARETO LOCAL RESPONSE")
     print("=" * 72)
 
     print(
-        f"Epoch:        {args.epoch}"
+        f"Epoch:                 {args.epoch}"
     )
 
     print(
-        f"Checkpoint:   {checkpoint_path}"
+        f"Checkpoint:            {checkpoint_path}"
     )
 
     print(
-        f"Probe queue:  {args.oracle_queue}"
+        f"Probe queue:           {args.oracle_queue}"
     )
 
     print(
-        f"League dir:   {args.league_dir}"
+        f"Baseline league:       "
+        f"{args.baseline_league_dir}"
     )
 
     print(
-        f"Device:       {device}"
+        f"League max agents:     "
+        f"{args.league_max_agents}"
+    )
+
+    print(
+        f"Channels:              "
+        f"{args.channels}"
+    )
+
+    print(
+        f"Blocks:                "
+        f"{args.blocks}"
+    )
+
+    print(
+        f"Device:                {device}"
     )
 
     # ========================================================
@@ -1622,11 +1578,12 @@ def main() -> None:
     )
 
     # ========================================================
-    # Current learner used to refresh H/U
+    # Current learner used for H/U
     # ========================================================
 
     current_model = al.build_actor_critic(
-        device
+        args,
+        device,
     )
 
     current_model.load_state_dict(
@@ -1637,7 +1594,7 @@ def main() -> None:
     current_model.eval()
 
     # ========================================================
-    # BC opening prior
+    # BC6 opening prior
     # ========================================================
 
     bc_policy = load_bc_policy(
@@ -1652,10 +1609,12 @@ def main() -> None:
 
     league = load_current_league(
         current_epoch=args.epoch,
-        league_dir=args.league_dir,
+        baseline_league_dir=(
+            args.baseline_league_dir
+        ),
         bc_dir=args.bc_dir,
+        args=args,
         device=device,
-        history=args.league_history,
         max_agents=args.league_max_agents,
     )
 
@@ -1669,7 +1628,9 @@ def main() -> None:
         bc_policy=bc_policy,
         league=league,
         device=device,
-        opening_prior_plies=args.opening_prior_plies,
+        opening_prior_plies=(
+            args.opening_prior_plies
+        ),
         opening_prior_strength=(
             args.opening_prior_strength
         ),
@@ -1680,7 +1641,8 @@ def main() -> None:
     # ========================================================
 
     model = al.build_actor_critic(
-        device
+        args,
+        device,
     )
 
     # ========================================================
@@ -1710,14 +1672,11 @@ def main() -> None:
 
         # ----------------------------------------------------
         # Exact common optimizer state
-        #
-        # Use a fresh optimizer object so no mutable state from
-        # the previous annotation can leak into this probe.
         # ----------------------------------------------------
 
         optimizer = Adam(
             model.parameters(),
-            lr=rl.LR,
+            lr=rl.DEFAULT_LR,
         )
 
         optimizer.load_state_dict(
@@ -1824,7 +1783,6 @@ def main() -> None:
     ) as file:
 
         for result in results:
-
             file.write(
                 json.dumps(
                     result,
@@ -1924,5 +1882,4 @@ def main() -> None:
 # ============================================================
 
 if __name__ == "__main__":
-
     main()

@@ -51,23 +51,35 @@ Default design
     5 positions per bin
     200 probe positions total
 
-The score I follows the same acquisition coordinate system as the
-canonical Active Learning pipeline:
+Canonical acquisition score
+---------------------------
 
-    U_log = log1p(U / tau)
+The chronological valid self-play pool is divided into
+TEMPORAL_WINDOWS contiguous windows.
 
-    H_norm     = side-aware percentile(H)
-    U_norm     = side-aware percentile(U_log)
-    HU_norm    = H_norm * U_norm
+Within each temporal window and side-to-move stratum:
+
+    H_norm = percentile(H)
+    U_norm = percentile(U)
+
+The interaction is constructed after normalization:
+
+    HU_norm = H_norm * U_norm
+
+The three predictors are standardized globally:
 
     H*  = standardized(H_norm)
     U*  = standardized(U_norm)
     HU* = standardized(HU_norm)
 
+The canonical acquisition score is:
+
     I =
         w_H  H*
         + w_U  U*
         + w_HU HU*
+
+The coefficients are the raw OLS coefficients stored in AL_weights.py.
 
 Important
 ---------
@@ -76,6 +88,10 @@ The input self-play statistics MUST have been generated with the
 corrected league uncertainty estimator.
 
 In particular, U must exclude untrained BC value heads.
+
+Temporal windows are assigned on the complete valid uncertainty pool
+in its original chronological order, BEFORE legal-move filtering,
+duplicate filtering, or probe selection.
 
 The stored raw HU field is recomputed as:
 
@@ -86,7 +102,7 @@ rather than trusted from the input JSON.
 Output
 ------
 
-    checkpoints/queue/oracle_queue_1-10_pareto_probe.jsonl
+    data/queue/oracle_queue_1-10_pareto_probe.jsonl
 """
 
 from __future__ import annotations
@@ -111,7 +127,6 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 if str(PROJECT_ROOT) not in sys.path:
-
     sys.path.insert(
         0,
         str(PROJECT_ROOT),
@@ -123,7 +138,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # ============================================================
 
 from AL.AL_weights import (
-    TAU,
+    TEMPORAL_WINDOWS,
     RAW_W_H,
     RAW_W_U,
     RAW_W_HU,
@@ -143,7 +158,7 @@ DEFAULT_DATA_FILE = (
 
 DEFAULT_QUEUE_FILE = (
     PROJECT_ROOT
-    / "checkpoints"
+    / "data"
     / "queue"
     / "oracle_queue_1-10_pareto_probe.jsonl"
 )
@@ -219,7 +234,6 @@ def safe_float(
 ) -> float:
 
     try:
-
         value = float(
             value
         )
@@ -228,13 +242,11 @@ def safe_float(
         TypeError,
         ValueError,
     ):
-
         return np.nan
 
     if not np.isfinite(
         value
     ):
-
         return np.nan
 
     return value
@@ -259,7 +271,6 @@ def load_records(
 ) -> list[dict]:
 
     if not path.exists():
-
         raise FileNotFoundError(
             f"Input file not found:\n{path}"
         )
@@ -277,7 +288,6 @@ def load_records(
         payload,
         list,
     ):
-
         return payload
 
     if isinstance(
@@ -301,7 +311,6 @@ def load_records(
                 value,
                 list,
             ):
-
                 return value
 
     raise ValueError(
@@ -327,7 +336,6 @@ def percentile_rank(
     )
 
     if n < 2:
-
         raise ValueError(
             "At least two values are required."
         )
@@ -357,13 +365,9 @@ def percentile_rank(
 
         while (
             end < n
-            and sorted_values[
-                end
-            ] == sorted_values[
-                start
-            ]
+            and sorted_values[end]
+            == sorted_values[start]
         ):
-
             end += 1
 
         average_rank = (
@@ -373,9 +377,7 @@ def percentile_rank(
         ) / 2.0
 
         ranks[
-            order[
-                start:end
-            ]
+            order[start:end]
         ] = (
             average_rank
             / (
@@ -406,7 +408,6 @@ def extract_side(
         if len(
             parts
         ) < 2:
-
             raise ValueError(
                 f"Invalid FEN:\n{fen}"
             )
@@ -419,7 +420,6 @@ def extract_side(
             "w",
             "b",
         }:
-
             raise ValueError(
                 f"Invalid side-to-move in FEN:\n{fen}"
             )
@@ -435,51 +435,151 @@ def extract_side(
 
 
 # ============================================================
-# Side-aware normalization
+# Temporal + side-aware normalization
 # ============================================================
 
-def normalize_side_aware(
+def normalize_temporal_side_aware(
     values: np.ndarray,
     sides: np.ndarray,
-) -> np.ndarray:
+    n_windows: int,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+]:
+    """
+    Percentile-normalize values independently inside each
+    chronological temporal-window x side-to-move stratum.
+
+    Temporal windows are contiguous slices of the complete valid
+    uncertainty pool.
+
+    Returns
+    -------
+    normalized:
+        Percentile coordinates in [0, 1].
+
+    window_ids:
+        Temporal-window assignment for every valid position.
+    """
 
     values = np.asarray(
         values,
         dtype=np.float64,
     )
 
-    normalized = np.empty_like(
-        values,
+    sides = np.asarray(
+        sides,
+    )
+
+    n = len(
+        values
+    )
+
+    if len(
+        sides
+    ) != n:
+        raise ValueError(
+            "values and sides must have the same length."
+        )
+
+    if n < 2:
+        raise ValueError(
+            "At least two values are required."
+        )
+
+    if n_windows <= 0:
+        raise ValueError(
+            "n_windows must be strictly positive."
+        )
+
+    if n_windows > n:
+        raise ValueError(
+            "n_windows cannot exceed the number of positions."
+        )
+
+    normalized = np.empty(
+        n,
         dtype=np.float64,
     )
 
-    for side in (
-        "w",
-        "b",
+    window_ids = np.empty(
+        n,
+        dtype=np.int64,
+    )
+
+    boundaries = np.linspace(
+        0,
+        n,
+        n_windows + 1,
+        dtype=np.int64,
+    )
+
+    for window_id in range(
+        n_windows
     ):
 
-        mask = (
-            sides
-            == side
-        )
-
-        if np.sum(
-            mask
-        ) < 2:
-
-            raise ValueError(
-                f"Not enough positions for side '{side}'."
-            )
-
-        normalized[
-            mask
-        ] = percentile_rank(
-            values[
-                mask
+        start = int(
+            boundaries[
+                window_id
             ]
         )
 
-    return normalized
+        end = int(
+            boundaries[
+                window_id
+                + 1
+            ]
+        )
+
+        if end <= start:
+            raise ValueError(
+                f"Temporal window {window_id + 1} is empty."
+            )
+
+        window_ids[
+            start:end
+        ] = window_id
+
+        for side in (
+            "w",
+            "b",
+        ):
+
+            local_mask = (
+                sides[
+                    start:end
+                ]
+                == side
+            )
+
+            local_indices = (
+                np.flatnonzero(
+                    local_mask
+                )
+                + start
+            )
+
+            if len(
+                local_indices
+            ) < 2:
+                raise ValueError(
+                    "Not enough positions for "
+                    f"temporal window {window_id + 1}, "
+                    f"side '{side}'."
+                )
+
+            normalized[
+                local_indices
+            ] = percentile_rank(
+                values[
+                    local_indices
+                ]
+            )
+
+    return (
+        normalized,
+        window_ids,
+    )
 
 
 # ============================================================
@@ -508,7 +608,6 @@ def minmax_normalize(
     )
 
     if maximum <= minimum:
-
         raise ValueError(
             "Cannot min-max normalize a constant score."
         )
@@ -532,11 +631,23 @@ def build_score(
     """
     Build the canonical AL score I and its percentile coordinate.
 
-    Raw HU is stored for provenance as H * U.
+    Raw HU is stored for provenance as:
 
-    The interaction entering I is instead:
+        HU = H * U
 
-        HU_norm = H_norm * U_log_norm
+    Acquisition coordinates are:
+
+        H_norm =
+            temporal x side percentile(H)
+
+        U_norm =
+            temporal x side percentile(U)
+
+        HU_norm =
+            H_norm * U_norm
+
+    These three coordinates are standardized globally before
+    application of the canonical OLS coefficients.
     """
 
     cleaned_records = []
@@ -553,7 +664,6 @@ def build_score(
             record,
             dict,
         ):
-
             skipped_invalid += 1
             continue
 
@@ -587,14 +697,17 @@ def build_score(
             )
             or U < 0.0
         ):
-
             skipped_invalid += 1
             continue
 
-        # Validate FEN now.
-        chess.variant.AtomicBoard(
-            fen
-        )
+        try:
+            chess.variant.AtomicBoard(
+                fen
+            )
+
+        except Exception:
+            skipped_invalid += 1
+            continue
 
         cleaned_records.append(
             record
@@ -615,7 +728,6 @@ def build_score(
     if len(
         cleaned_records
     ) < 2:
-
         raise RuntimeError(
             "Too few valid H/U records."
         )
@@ -648,27 +760,34 @@ def build_score(
     )
 
     # --------------------------------------------------------
-    # U transformation used by acquisition score
+    # Temporal + side-aware percentile coordinates
     # --------------------------------------------------------
 
-    U_log = np.log1p(
-        U
-        / TAU
+    H_norm, H_window_ids = (
+        normalize_temporal_side_aware(
+            H,
+            sides,
+            TEMPORAL_WINDOWS,
+        )
     )
 
-    # --------------------------------------------------------
-    # Side-aware percentile coordinates
-    # --------------------------------------------------------
-
-    H_norm = normalize_side_aware(
-        H,
-        sides,
+    U_norm, U_window_ids = (
+        normalize_temporal_side_aware(
+            U,
+            sides,
+            TEMPORAL_WINDOWS,
+        )
     )
 
-    U_norm = normalize_side_aware(
-        U_log,
-        sides,
-    )
+    if not np.array_equal(
+        H_window_ids,
+        U_window_ids,
+    ):
+        raise RuntimeError(
+            "Temporal window mismatch between H and U."
+        )
+
+    window_ids = H_window_ids
 
     # --------------------------------------------------------
     # Interaction in normalized coordinate system
@@ -680,8 +799,20 @@ def build_score(
     )
 
     # --------------------------------------------------------
-    # Standardization
+    # Global standardization
     # --------------------------------------------------------
+
+    H_mean = float(
+        H_norm.mean()
+    )
+
+    U_mean = float(
+        U_norm.mean()
+    )
+
+    HU_mean = float(
+        HU_norm.mean()
+    )
 
     H_std = float(
         H_norm.std(
@@ -706,24 +837,23 @@ def build_score(
         or U_std <= 0.0
         or HU_std <= 0.0
     ):
-
         raise ValueError(
             "Cannot standardize constant acquisition predictor."
         )
 
     H_star = (
         H_norm
-        - H_norm.mean()
+        - H_mean
     ) / H_std
 
     U_star = (
         U_norm
-        - U_norm.mean()
+        - U_mean
     ) / U_std
 
     HU_star = (
         HU_norm
-        - HU_norm.mean()
+        - HU_mean
     ) / HU_std
 
     # --------------------------------------------------------
@@ -763,6 +893,15 @@ def build_score(
         "HU":
             HU,
 
+        "H_norm":
+            H_norm,
+
+        "U_norm":
+            U_norm,
+
+        "HU_norm":
+            HU_norm,
+
         "I":
             I,
 
@@ -774,6 +913,9 @@ def build_score(
 
         "sides":
             sides,
+
+        "window_ids":
+            window_ids,
 
         "skipped_invalid":
             skipped_invalid,
@@ -903,23 +1045,19 @@ def select_probe(
             )
 
             if query_id in selected_ids:
-
                 rejected_duplicates += 1
                 continue
 
             try:
-
                 legal_moves = count_legal_moves(
                     fen
                 )
 
             except Exception:
-
                 rejected_moves += 1
                 continue
 
             if legal_moves <= 1:
-
                 rejected_moves += 1
                 continue
 
@@ -934,13 +1072,11 @@ def select_probe(
             if len(
                 bin_selected
             ) >= samples_per_bin:
-
                 break
 
         if len(
             bin_selected
         ) < samples_per_bin:
-
             raise RuntimeError(
                 "Could not obtain enough eligible positions "
                 f"from percentile bin {bin_id}: "
@@ -992,7 +1128,6 @@ def write_probe_queue(
     HU: np.ndarray,
     I: np.ndarray,
     I_norm: np.ndarray,
-    I_percentile: np.ndarray,
     force: bool,
 ) -> None:
 
@@ -1001,7 +1136,6 @@ def write_probe_queue(
         and output_path.stat().st_size > 0
         and not force
     ):
-
         raise FileExistsError(
             f"Probe queue already exists:\n"
             f"{output_path}\n\n"
@@ -1080,13 +1214,6 @@ def write_probe_queue(
                         ]
                     ),
 
-                "I_percentile":
-                    float(
-                        I_percentile[
-                            index
-                        ]
-                    ),
-
                 "threshold":
                     None,
 
@@ -1154,13 +1281,11 @@ def main() -> None:
     args = parse_args()
 
     if args.bins <= 0:
-
         raise ValueError(
             "--bins must be strictly positive."
         )
 
     if args.samples_per_bin <= 0:
-
         raise ValueError(
             "--samples-per-bin must be strictly positive."
         )
@@ -1171,28 +1296,32 @@ def main() -> None:
     print("=" * 72)
 
     print(
-        f"Input:           {args.input}"
+        f"Input:             {args.input}"
     )
 
     print(
-        f"Output:          {args.output}"
+        f"Output:            {args.output}"
     )
 
     print(
-        f"Bins:            {args.bins}"
+        f"Bins:              {args.bins}"
     )
 
     print(
-        f"Samples / bin:   {args.samples_per_bin}"
+        f"Samples / bin:     {args.samples_per_bin}"
     )
 
     print(
-        f"Target total:    "
+        f"Target total:      "
         f"{args.bins * args.samples_per_bin}"
     )
 
     print(
-        f"Seed:            {args.seed}"
+        f"Temporal windows:  {TEMPORAL_WINDOWS}"
+    )
+
+    print(
+        f"Seed:              {args.seed}"
     )
 
     print()
@@ -1239,6 +1368,14 @@ def main() -> None:
         "HU"
     ]
 
+    H_norm = score_data[
+        "H_norm"
+    ]
+
+    U_norm = score_data[
+        "U_norm"
+    ]
+
     I = score_data[
         "I"
     ]
@@ -1253,6 +1390,10 @@ def main() -> None:
 
     sides = score_data[
         "sides"
+    ]
+
+    window_ids = score_data[
+        "window_ids"
     ]
 
     print(
@@ -1277,6 +1418,52 @@ def main() -> None:
         f"{I_percentile.min():.6f}% -> "
         f"{I_percentile.max():.6f}%"
     )
+
+    # ========================================================
+    # Normalization diagnostics
+    # ========================================================
+
+    print()
+    print("=" * 72)
+    print("TEMPORAL x SIDE NORMALIZATION")
+    print("=" * 72)
+
+    for window_id in range(
+        TEMPORAL_WINDOWS
+    ):
+
+        for side in (
+            "w",
+            "b",
+        ):
+
+            mask = (
+                (
+                    window_ids
+                    == window_id
+                )
+                &
+                (
+                    sides
+                    == side
+                )
+            )
+
+            count = int(
+                np.sum(
+                    mask
+                )
+            )
+
+            print(
+                f"W{window_id + 1} "
+                f"{side} | "
+                f"n={count:7,d} | "
+                f"H_norm mean="
+                f"{H_norm[mask].mean():.6f} | "
+                f"U_norm mean="
+                f"{U_norm[mask].mean():.6f}"
+            )
 
     # ========================================================
     # Selection
@@ -1308,15 +1495,18 @@ def main() -> None:
         HU=HU,
         I=I,
         I_norm=I_norm,
-        I_percentile=I_percentile,
         force=args.force,
     )
 
     # ========================================================
-    # Diagnostics
+    # Final diagnostics
     # ========================================================
 
     selected_sides = sides[
+        selected_indices
+    ]
+
+    selected_windows = window_ids[
         selected_indices
     ]
 
@@ -1360,6 +1550,36 @@ def main() -> None:
     print()
 
     print(
+        "Selected temporal composition:"
+    )
+
+    for window_id in range(
+        TEMPORAL_WINDOWS
+    ):
+
+        count = int(
+            np.sum(
+                selected_windows
+                == window_id
+            )
+        )
+
+        fraction = (
+            count
+            / len(
+                selected_indices
+            )
+        )
+
+        print(
+            f"  W{window_id + 1}: "
+            f"{count:3d} "
+            f"({100.0 * fraction:6.2f}%)"
+        )
+
+    print()
+
+    print(
         f"Selected I percentile range: "
         f"{I_percentile[selected_indices].min():.6f}% -> "
         f"{I_percentile[selected_indices].max():.6f}%"
@@ -1377,5 +1597,4 @@ def main() -> None:
 # ============================================================
 
 if __name__ == "__main__":
-
     main()

@@ -36,7 +36,7 @@ DEFAULT_QUEUE_DIR = (
 # Configuration
 # ============================================================
 
-DEFAULT_AL_BUDGET = 0.0002
+DEFAULT_AL_BUDGET = 0.0001
 DEFAULT_SEED = 42
 
 
@@ -197,51 +197,148 @@ def count_legal_moves(
 # Side-aware normalization
 # ============================================================
 
-def normalize_side_aware(
+def normalize_temporal_side_aware(
     values: np.ndarray,
     sides: np.ndarray,
-) -> np.ndarray:
+    n_windows: int,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+]:
+    """
+    Percentile-rank normalization conditional on:
+
+        - chronological window
+        - side to move
+
+    Records are assumed to preserve chronological append order.
+
+    The full dataset is divided into n_windows contiguous,
+    approximately equal-size windows.
+
+    Within each (window, side) stratum, values are independently
+    converted to percentile ranks in [0, 1].
+    """
 
     values = np.asarray(
         values,
         dtype=np.float64,
     )
 
-    normalized = np.zeros_like(
+    sides = np.asarray(
+        sides
+    )
+
+    n = len(
+        values
+    )
+
+    if len(
+        sides
+    ) != n:
+
+        raise ValueError(
+            "values and sides must have identical lengths."
+        )
+
+    if n_windows < 1:
+
+        raise ValueError(
+            "n_windows must be >= 1."
+        )
+
+    if n < n_windows:
+
+        raise ValueError(
+            "Not enough observations for requested temporal windows."
+        )
+
+    normalized = np.empty_like(
         values,
         dtype=np.float64,
     )
 
-    for side in (
-        "w",
-        "b",
+    window_ids = np.empty(
+        n,
+        dtype=np.int64,
+    )
+
+    edges = np.linspace(
+        0,
+        n,
+        n_windows + 1,
+        dtype=np.int64,
+    )
+
+    for window in range(
+        n_windows
     ):
 
-        mask = (
-            sides == side
-        )
-
-        count = int(
-            np.sum(
-                mask
-            )
-        )
-
-        if count < 2:
-            raise ValueError(
-                f"Not enough positions for side {side} "
-                "normalization."
-            )
-
-        normalized[
-            mask
-        ] = percentile_rank(
-            values[
-                mask
+        start = int(
+            edges[
+                window
             ]
         )
 
-    return normalized
+        end = int(
+            edges[
+                window + 1
+            ]
+        )
+
+        window_ids[
+            start:end
+        ] = window
+
+        for side in (
+            "w",
+            "b",
+        ):
+
+            side_mask = (
+                sides[
+                    start:end
+                ]
+                == side
+            )
+
+            count = int(
+                np.sum(
+                    side_mask
+                )
+            )
+
+            if count < 2:
+
+                raise ValueError(
+                    f"Not enough observations in "
+                    f"window {window + 1}, side {side}: "
+                    f"{count}"
+                )
+
+            local_values = values[
+                start:end
+            ][
+                side_mask
+            ]
+
+            local_ranks = percentile_rank(
+                local_values
+            )
+
+            local_indices = np.flatnonzero(
+                side_mask
+            )
+
+            normalized[
+                start
+                + local_indices
+            ] = local_ranks
+
+    return (
+        normalized,
+        window_ids,
+    )
 
 
 # ============================================================
@@ -729,7 +826,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_AL_BUDGET,
         help=(
             "Fraction of input observations to annotate. "
-            "Default: 0.0002 = 0.02%%."
+            "Default: 0.0001 = 0.01%%."
         ),
     )
 
@@ -794,7 +891,7 @@ def main() -> None:
             RAW_W_H,
             RAW_W_HU,
             RAW_W_U,
-            TAU,
+            TEMPORAL_WINDOWS,
         )
 
     else:
@@ -802,7 +899,7 @@ def main() -> None:
         RAW_W_H = None
         RAW_W_U = None
         RAW_W_HU = None
-        TAU = None
+        TEMPORAL_WINDOWS = None
 
     # ========================================================
     # Header
@@ -854,7 +951,7 @@ def main() -> None:
     else:
 
         print(
-            f"TAU            : {TAU:.6f}"
+            f"TEMPORAL WINDOWS            : {TEMPORAL_WINDOWS:.6f}"
         )
 
         print(
@@ -989,53 +1086,53 @@ def main() -> None:
     else:
 
         # ====================================================
-        # U log transform
+        # Temporal-window x side-to-move percentile ranks
+        #
+        # IMPORTANT:
+        # This must remain identical to the normalization used
+        # when fitting RAW_W_*.
         # ====================================================
 
-        if TAU <= 0.0:
-            raise ValueError(
-                "TAU must be strictly positive."
-            )
+        (
+            H_norm,
+            window_ids,
+        ) = normalize_temporal_side_aware(
+            values=H,
+            sides=sides,
+            n_windows=TEMPORAL_WINDOWS,
+        )
 
-        if np.any(
-            U < 0.0
+        (
+            U_norm,
+            window_ids_u,
+        ) = normalize_temporal_side_aware(
+            values=U,
+            sides=sides,
+            n_windows=TEMPORAL_WINDOWS,
+        )
+
+        if not np.array_equal(
+            window_ids,
+            window_ids_u,
         ):
-            raise ValueError(
-                "U contains negative values."
+            raise RuntimeError(
+                "Temporal-window assignments are inconsistent."
             )
 
-        U_log = np.log1p(
-            U / TAU
-        )
-
         # ====================================================
-        # Side-aware percentile normalization
+        # Factorial interaction
         # ====================================================
 
-        H_norm = normalize_side_aware(
-            H,
-            sides,
-        )
-
-        U_log_norm = normalize_side_aware(
-            U_log,
-            sides,
-        )
-
-        # ====================================================
-        # Interaction
-        # ====================================================
-
-        HU_log_norm = (
+        HU_interaction = (
             H_norm
-            * U_log_norm
+            * U_norm
         )
 
         # ====================================================
         # Standardization
         #
-        # These transformations must match those used when
-        # fitting the OLS acquisition coefficients.
+        # This is performed on the same complete RL1-10
+        # reference population used for coefficient fitting.
         # ====================================================
 
         H_mean = float(
@@ -1046,20 +1143,20 @@ def main() -> None:
             H_norm.std()
         )
 
-        U_log_mean = float(
-            U_log_norm.mean()
+        U_mean = float(
+            U_norm.mean()
         )
 
-        U_log_std = float(
-            U_log_norm.std()
+        U_std = float(
+            U_norm.std()
         )
 
-        HU_log_mean = float(
-            HU_log_norm.mean()
+        HU_mean = float(
+            HU_interaction.mean()
         )
 
-        HU_log_std = float(
-            HU_log_norm.std()
+        HU_std = float(
+            HU_interaction.std()
         )
 
         if H_std <= 0.0:
@@ -1067,14 +1164,14 @@ def main() -> None:
                 "H normalized standard deviation is zero."
             )
 
-        if U_log_std <= 0.0:
+        if U_std <= 0.0:
             raise ValueError(
-                "U_log normalized standard deviation is zero."
+                "U normalized standard deviation is zero."
             )
 
-        if HU_log_std <= 0.0:
+        if HU_std <= 0.0:
             raise ValueError(
-                "H*U_log normalized standard deviation is zero."
+                "H*U normalized standard deviation is zero."
             )
 
         H_star = (
@@ -1082,32 +1179,28 @@ def main() -> None:
             - H_mean
         ) / H_std
 
-        U_log_star = (
-            U_log_norm
-            - U_log_mean
-        ) / U_log_std
+        U_star = (
+            U_norm
+            - U_mean
+        ) / U_std
 
-        HU_log_star = (
-            HU_log_norm
-            - HU_log_mean
-        ) / HU_log_std
+        HU_star = (
+            HU_interaction
+            - HU_mean
+        ) / HU_std
 
         # ====================================================
-        # Raw acquisition score
+        # Canonical I score
         # ====================================================
 
         I = (
             RAW_W_H
             * H_star
             + RAW_W_U
-            * U_log_star
+            * U_star
             + RAW_W_HU
-            * HU_log_star
+            * HU_star
         )
-
-        # ====================================================
-        # Display-only normalized score
-        # ====================================================
 
         I_norm = minmax_normalize(
             I

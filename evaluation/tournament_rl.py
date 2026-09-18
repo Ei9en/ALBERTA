@@ -43,7 +43,7 @@ DEFAULT_RL_CHECKPOINT_DIR = (
 DEFAULT_ORACLE_CHECKPOINT_DIR = (
     PROJECT_ROOT
     / "checkpoints"
-    / "oracle_epoch_rndm"
+    / "random_001"
 )
 
 DEFAULT_OUTPUT_DIR = (
