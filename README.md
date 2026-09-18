@@ -34,7 +34,7 @@ League-based PPO self-play
         ├───────────────┬──────────────────┐
         │               │                  │
         ▼               ▼                  ▼
-   PPO only       Random acquisition      Pareto acquisition 
+   PPO only    Random acquisition   Pareto acquisition 
                         │                  │
                         │          200 calibration probes
                         │                  │
@@ -341,18 +341,12 @@ Atomic Chess game data is derived from the public Lichess database.
 
 The Lichess deployment integration builds on the `lichess-bot` project; see the files and license under `lichess_bot/` for upstream attribution.
 
-## Third-party software and assets
+## License
 
-ALBERTA includes or adapts third-party components that retain their
-respective licenses:
+Original ALBERTA code is released under the MIT License. See `LICENSE`.
 
-- `lichess_bot/` is based on the open-source `lichess-bot` project and is
-  distributed under the GNU Affero General Public License v3. See
-  `lichess_bot/LICENSE`.
+This repository also contains third-party software and assets under
+separate licenses, notably the AGPL-3.0-or-later `lichess-bot` integration
+and the GPL-2.0-or-later Cburnett chess piece set.
 
-- Chess-piece SVGs under `AL/HMI/assets/pieces/` use the Cburnett piece set
-  by Colin M. L. Burnett, obtained from the Lichess source repository.
-  The Cburnett piece set is distributed under the GNU GPL v2 or later.
-
-These third-party components are not relicensed under ALBERTA's project
-license.
+See `THIRD_PARTY_NOTICES.md` for attribution and licensing details.
