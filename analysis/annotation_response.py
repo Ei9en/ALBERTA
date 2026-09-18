@@ -101,7 +101,7 @@ Example
 
 python analysis/annotation_response.py \
     --checkpoint checkpoints/rl_epoch/rl_epoch_10.pt \
-    --queue checkpoints/queue/oracle_queue_1-10_random.jsonl \
+    --queue data/queue/oracle_queue_1-10_random.jsonl \
     --device cpu
 """
 
@@ -153,10 +153,7 @@ DEFAULT_CHECKPOINT = (
 )
 
 DEFAULT_QUEUE = (
-    PROJECT_ROOT
-    / "checkpoints"
-    / "queue"
-    / "oracle_queue_1-10_AL.jsonl"
+    PROJECT_ROOT / "data" / "queue" / "oracle_queue_1-10_AL.jsonl"
 )
 
 DEFAULT_OUTPUT_DIR = (

@@ -46,19 +46,16 @@ DEFAULT_BASE_CHECKPOINT = (
 DEFAULT_TRAINED_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
-    / "al_runs"
-    / "random_1-10"
-    / "checkpoints"
-    / "al_epoch_30.pt"
+    / "random_001"
+    / "rl_epoch_20.pt"
 )
 
 DEFAULT_QUEUE = (
     PROJECT_ROOT
-    / "checkpoints"
+    / "data"
     / "queue"
     / "oracle_queue_1-10_random.jsonl"
 )
-
 DEFAULT_REFERENCE_SOURCE = (
     PROJECT_ROOT
     / "data"

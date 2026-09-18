@@ -106,10 +106,10 @@ Example
 python analysis/reference_gradient_stability.py \
     --checkpoint checkpoints/rl_epoch/rl_epoch_10.pt \
     --replay checkpoints/buffer/replay_buffer_epoch_10.pkl \
-    --bc-checkpoint checkpoints/bc_epoch/bc_epoch_7.pt \
+    --bc-checkpoint checkpoints/bc_epoch/bc_epoch_6.pt \
     --reference-size 256 \
     --n-references 10 \
-    --oracle-queue checkpoints/queue/oracle_queue_1-10_random.jsonl \
+    --oracle-queue data/queue/oracle_queue_1-10_random.jsonl \
     --max-annotations 20 \
     --temperature 2.0 \
     --device cpu
@@ -177,7 +177,7 @@ DEFAULT_BC_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
     / "bc_epoch"
-    / "bc_epoch_7.pt"
+    / "bc_epoch_6.pt"
 )
 
 DEFAULT_OUTPUT = (

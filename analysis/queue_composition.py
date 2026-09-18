@@ -76,8 +76,8 @@ Example
 -------
 
 python analysis/analyze_queue_composition.py \
-    --random-queue checkpoints/queue/oracle_queue_1-10_random.jsonl \
-    --al-queue checkpoints/queue/oracle_queue_1-10_AL.jsonl
+    --random-queue data/queue/oracle_queue_1-10_random.jsonl \
+    --al-queue data/queue/oracle_queue_1-10_AL.jsonl
 """
 
 from __future__ import annotations
@@ -105,17 +105,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # ============================================================
 
 DEFAULT_RANDOM_QUEUE = (
-    PROJECT_ROOT
-    / "checkpoints"
-    / "queue"
-    / "oracle_queue_1-10_random.jsonl"
+    PROJECT_ROOT / "data" / "queue" / "oracle_queue_1-10_random.jsonl"
 )
 
 DEFAULT_AL_QUEUE = (
-    PROJECT_ROOT
-    / "checkpoints"
-    / "queue"
-    / "oracle_queue_1-10_AL.jsonl"
+    PROJECT_ROOT / "data" / "queue" / "oracle_queue_1-10_AL.jsonl"
 )
 
 DEFAULT_OUTPUT_DIR = (

@@ -6,16 +6,22 @@ __pycache__/
 # macOS
 .DS_Store
 
-# Data
+# Large datasets
 data/raw/
-data/processed/
 data/filtered/
+data/processed/
+data/selfplay_jsons/
+
+# Generated analysis outputs
+data/analysis/
+data/uncertainty_analysis/
+data/*.png
+
+# Model checkpoints
 checkpoints/
-lichess_bot_auto_logs/
-*.csv
-data/uncertainty_stats.json
-data/uncertainty_stats_1-10.json
-data/uncertainty_stats_1-10.json
-data/uncertainty_stats_*.json
-data/positions_2300_bc.jsonl
-data/
+
+# Evaluation outputs
+evaluation/results/
+
+# Lichess runtime logs
+lichess_bot/lichess_bot_auto_logs/

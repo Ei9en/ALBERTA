@@ -37,7 +37,7 @@ DEFAULT_BC_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
     / "bc_epoch"
-    / "bc_epoch_7.pt"
+    / "bc_epoch_6.pt"
 )
 
 DEFAULT_RL_CHECKPOINT = (

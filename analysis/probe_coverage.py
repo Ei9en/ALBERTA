@@ -105,7 +105,7 @@ Example
 -------
 
 python analysis/analyze_probe_coverage.py \
-    --probe checkpoints/queue/oracle_queue_1-10_pareto_probe.jsonl \
+    --probe data/queue/oracle_queue_1-10_pareto_probe.jsonl \
     --device cpu
 """
 
@@ -163,11 +163,9 @@ from src.selfplay.league import League
 # Defaults
 # ============================================================
 
+
 DEFAULT_PROBE_FILE = (
-    PROJECT_ROOT
-    / "checkpoints"
-    / "queue"
-    / "oracle_queue_1-10_pareto_probe.jsonl"
+    PROJECT_ROOT / "data" / "queue" / "oracle_queue_1-10_pareto_probe.jsonl"
 )
 
 DEFAULT_STRATA = {

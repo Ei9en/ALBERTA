@@ -95,7 +95,7 @@ Example
 -------
 
 python analysis/analyze_uncertainty_progression.py \
-    --input data/selfplay_jsons/uncertainty_stats_1-60.json \
+    --input data/selfplay_jsons/uncertainty_stats_1-10.json \
     --windows 6
 """
 
@@ -126,7 +126,7 @@ DEFAULT_INPUT_PATH = (
     PROJECT_ROOT
     / "data"
     / "selfplay_jsons"
-    / "uncertainty_stats_1-60.json"
+    / "uncertainty_stats_1-10.json"
 )
 
 DEFAULT_OUTPUT_DIR = (

@@ -133,9 +133,9 @@ Example
 
 python analysis/multi_gradient_alignment.py \
     --checkpoint checkpoints/rl_epoch/rl_epoch_10.pt \
-    --oracle-queue checkpoints/queue/oracle_queue_1-10_random.jsonl \
+    --oracle-queue data/queue/oracle_queue_1-10_random.jsonl \
     --replay checkpoints/buffer/replay_buffer_epoch_10.pkl \
-    --bc-checkpoint checkpoints/bc_epoch/bc_epoch_7.pt \
+    --bc-checkpoint checkpoints/bc_epoch/bc_epoch_6.pt \
     --reference-size 256 \
     --n-references 16 \
     --top-fraction 0.25 \
@@ -208,17 +208,14 @@ DEFAULT_REPLAY = (
 )
 
 DEFAULT_ORACLE_QUEUE = (
-    PROJECT_ROOT
-    / "checkpoints"
-    / "queue"
-    / "oracle_queue_1-10_random.jsonl"
+    PROJECT_ROOT / "data" / "queue" / "oracle_queue_1-10_random.jsonl"
 )
 
 DEFAULT_BC_CHECKPOINT = (
     PROJECT_ROOT
     / "checkpoints"
     / "bc_epoch"
-    / "bc_epoch_7.pt"
+    / "bc_epoch_6.pt"
 )
 
 DEFAULT_OUTPUT = (
