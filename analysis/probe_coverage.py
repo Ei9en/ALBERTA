@@ -73,7 +73,7 @@ representativeness.
 The dynamic U reconstruction uses ONLY trained historical RL value
 heads plus the current model.
 
-BC6 / BC7 remain league opponents but are explicitly excluded from
+BC6 remains league opponent but is explicitly excluded from
 uncertainty estimation.
 
 Therefore:
@@ -254,10 +254,9 @@ DEFAULT_CLASSIFIER_FOLDS = 5
 # Canonical current RL configuration.
 DEFAULT_LEAGUE_MAX_AGENTS = 12
 
-DEFAULT_BC_PRIOR_EPOCH = 7
+DEFAULT_BC_PRIOR_EPOCH = 6
 DEFAULT_BC_ANCHOR_EPOCHS = (
     6,
-    7,
 )
 
 DEFAULT_OPENING_PRIOR_PLIES = 6
@@ -1387,7 +1386,7 @@ def load_league_for_epoch(
     """
     Reconstruct the historical league available at RL epoch t.
 
-    BC6 / BC7:
+    BC6:
         opponents = yes
         uncertainty = NO
 
@@ -2210,7 +2209,7 @@ def build_report(
     )
 
     add(
-        "BC6 and BC7 may remain policy opponents in the league "
+        "BC6 may remain policy opponent in the league "
         "but their randomly initialized ActorCritic value heads "
         "are excluded from uncertainty estimation."
     )
