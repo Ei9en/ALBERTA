@@ -1,0 +1,15 @@
+# Core
+torch
+numpy
+python-chess
+tqdm
+zstandard
+
+# Scientific analysis
+scipy
+pandas
+scikit-learn
+matplotlib
+
+# Human Oracle interface
+PyQt6

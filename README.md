@@ -340,3 +340,19 @@ The current evidence supports this idea in one controlled training run. It does 
 Atomic Chess game data is derived from the public Lichess database.
 
 The Lichess deployment integration builds on the `lichess-bot` project; see the files and license under `lichess_bot/` for upstream attribution.
+
+## Third-party software and assets
+
+ALBERTA includes or adapts third-party components that retain their
+respective licenses:
+
+- `lichess_bot/` is based on the open-source `lichess-bot` project and is
+  distributed under the GNU Affero General Public License v3. See
+  `lichess_bot/LICENSE`.
+
+- Chess-piece SVGs under `AL/HMI/assets/pieces/` use the Cburnett piece set
+  by Colin M. L. Burnett, obtained from the Lichess source repository.
+  The Cburnett piece set is distributed under the GNU GPL v2 or later.
+
+These third-party components are not relicensed under ALBERTA's project
+license.
