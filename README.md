@@ -23,7 +23,7 @@ respond to supervision, separately for policy and value, then allocates a
 sparse annotation budget on the resulting Pareto front.
 
 <p align="center">
-  <img src="figures/pareto_geometry.png"
+  <img src="pareto_geometry.png"
        alt="ALBERTA Pareto acquisition geometry"
        width="850">
 </p>
