@@ -15,6 +15,24 @@ The main experiment studies a response-aware acquisition strategy: instead of se
 
 Predicted responses are then used as a **bi-objective Pareto acquisition criterion**.
 
+## ALBERTA in one figure
+
+ALBERTA does not acquire expert labels directly from uncertainty. Instead, it
+uses pre-annotation signals to predict how strongly the current learner would
+respond to supervision, separately for policy and value, then allocates a
+sparse annotation budget on the resulting Pareto front.
+
+<p align="center">
+  <img src="figures/pareto_geometry.png"
+       alt="ALBERTA Pareto acquisition geometry"
+       width="850">
+</p>
+
+The full RL10 candidate population is projected into predicted learner-response
+space. The red boundary is the first non-dominated front, and the 121 selected
+states are retained by crowding-distance truncation to preserve coverage across
+policy- and value-responsive regions.
+
 ## Motivation
 
 Expert feedback is potentially valuable in reinforcement learning, but it is
