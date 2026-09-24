@@ -53,6 +53,12 @@ asking only where the learner is uncertain, the project asks a complementary
 question: **where is an expert intervention expected to change the learner
 the most?**
 
+## Atomic Chess
+
+Atomic Chess is a chess variant in which every capture triggers an explosion centered on the destination square. The capturing piece, the captured piece, and all pieces on the eight adjacent squares are removed; adjacent pawns are immune unless they are directly involved in the capture. A king cannot make a capture that would cause it to explode, and the game is won either by checkmate or by exploding the opposing king. One unusual consequence of these rules is that the two kings may legally occupy adjacent squares. More generally, explosions take precedence over several standard chess constraints, including checks and pins.
+
+These rules fundamentally change the tactical structure of the game: local captures can have non-local consequences, material value becomes highly context-dependent (see [*Inferring Piece Value in Chess and Chess Variants*](https://arxiv.org/pdf/2509.04691) by Steven Pav), and many positions contain forced tactical sequences that differ sharply from those of standard chess. Despite these changes, Atomic Chess remains a deterministic, fully observable, two-player Markov game, making it a convenient controlled environment for reinforcement-learning experiments.
+
 ## Overview
 
 The experimental pipeline is:
